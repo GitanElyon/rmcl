@@ -96,6 +96,13 @@ paru -S rmcl-bin
 paru -S rmcl-git
 ```
 
+### Nix
+
+```sh
+nix run github:objz/rmcl
+nix profile install github:objz/rmcl
+```
+
 ### Cargo
 
 [![crates.io](https://img.shields.io/crates/v/rmcl?style=for-the-badge&logo=rust)](https://crates.io/crates/rmcl)

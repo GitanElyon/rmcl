@@ -859,6 +859,46 @@ fn streamed_entries_without_icons_are_visible_immediately() {
     assert_eq!(state.filtered_indices(), vec![0]);
 }
 
+#[tokio::test]
+async fn installed_predecoded_icons_are_visible_on_scan_and_cache_restore() {
+    let mut state = ContentListState::default();
+    state.set_installed_options(
+        &crate::tui::widgets::content::discovery::DiscoveryFilters::default(),
+        5,
+        false,
+        "26.2",
+        false,
+    );
+    let stream = state.start_stream("main");
+    let mut mod_entry = entry("Fabric API");
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(1, 1)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    mod_entry.icon_bytes = Some(png.into_inner());
+    mod_entry.icon_lines =
+        crate::instance::content::make_icon_pixels(mod_entry.icon_bytes.as_ref().unwrap(), 6, 3);
+    stream.send(mod_entry);
+    state.drain_pending();
+    assert_eq!(state.filtered_indices(), [0]);
+
+    let directory = tempfile::tempdir().unwrap();
+    state.start_load(
+        directory.path(),
+        "other",
+        crate::instance::content::mods::scan_one_mod,
+        "jar",
+    );
+    state.start_load(
+        directory.path(),
+        "main",
+        crate::instance::content::mods::scan_one_mod,
+        "jar",
+    );
+    assert_eq!(state.filtered_indices(), [0]);
+    assert!(!state.has_pending_icons());
+}
+
 #[test]
 fn rendering_visible_entries_restores_the_first_selection() {
     let mut state = ContentListState::default();

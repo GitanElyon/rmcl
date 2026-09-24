@@ -364,6 +364,10 @@ impl Default for ContentListState {
     }
 }
 
+fn needs_icon_before_showing(entry: &ContentEntry) -> bool {
+    entry.icon_lines.is_none() && (entry.icon_bytes.is_some() || entry.provider_icon)
+}
+
 impl ContentListState {
     pub(crate) fn has_pending_icons(&self) -> bool {
         !self.pending_entry_images.is_empty()
@@ -848,7 +852,7 @@ impl ContentListState {
                     self.sort_metadata.get_mut().remove(&entry.path);
                     self.images_dirty = true;
                     received_count += 1;
-                    if entry.icon_bytes.is_some() || entry.provider_icon {
+                    if needs_icon_before_showing(&entry) {
                         self.pending_entry_images.insert(entry.file_stem.clone());
                     }
                     self.display_metadata
@@ -1172,7 +1176,7 @@ impl ContentListState {
                 self.images_dirty = true;
                 continue;
             }
-            if entry.icon_bytes.is_some() {
+            if needs_icon_before_showing(&entry) {
                 self.pending_entry_images.insert(entry.file_stem.clone());
             }
             self.display_metadata
@@ -1696,7 +1700,7 @@ impl ContentListState {
             self.pending_entry_images.extend(
                 self.entries
                     .iter()
-                    .filter(|entry| entry.icon_bytes.is_some())
+                    .filter(|entry| needs_icon_before_showing(entry))
                     .map(|entry| entry.file_stem.clone()),
             );
             self.rebuild_display_metadata();

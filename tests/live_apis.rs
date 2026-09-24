@@ -149,6 +149,7 @@ async fn modrinth_discovery_returns_unique_compatible_mods() {
         &filters,
         ModLoader::Fabric,
         rmcl::instance::content::provider::DiscoverySort::Relevance,
+        false,
         0,
         100,
     )
@@ -181,6 +182,7 @@ async fn modrinth_discovery_returns_unique_compatible_mods() {
             &filters,
             ModLoader::Fabric,
             rmcl::instance::content::provider::DiscoverySort::Relevance,
+            false,
             offset,
             100,
         )
@@ -209,6 +211,7 @@ async fn curseforge_discovery_returns_compatible_mods() {
         ModLoader::Fabric,
         &[],
         rmcl::instance::content::provider::DiscoverySort::Relevance,
+        false,
         0,
         20,
     )

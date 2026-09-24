@@ -93,6 +93,7 @@ impl ContentProvider for FakeProvider {
         _instance: &InstanceConfig,
         _filters: &crate::instance::content::provider::DiscoverySearchFilters,
         _sort: DiscoverySort,
+        _reversed: bool,
         _offset: usize,
         _limit: usize,
     ) -> Result<DiscoveryResults, NetError> {
@@ -104,6 +105,7 @@ impl ContentProvider for FakeProvider {
         _query: &str,
         _filters: &crate::instance::content::provider::DiscoverySearchFilters,
         _sort: DiscoverySort,
+        _reversed: bool,
         _offset: usize,
         _limit: usize,
     ) -> Result<DiscoveryResults, NetError> {

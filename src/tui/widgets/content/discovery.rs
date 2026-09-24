@@ -211,6 +211,7 @@ pub struct DiscoveryRequest {
     pub cached_icons: std::collections::HashMap<(String, String), Vec<u8>>,
     pub known_projects: std::collections::HashMap<String, (String, String)>,
     pub sort: crate::instance::content::provider::DiscoverySort,
+    pub reversed: bool,
     pub filters: DiscoveryFilters,
     pub cached: bool,
 }
@@ -253,6 +254,7 @@ struct DiscoverySearchKey {
     context: String,
     query: String,
     sort: crate::instance::content::provider::DiscoverySort,
+    reversed: bool,
     filters: DiscoveryFilters,
     modrinth: bool,
     curseforge: bool,
@@ -288,6 +290,7 @@ async fn search_provider(
     target: &DiscoveryTarget,
     query: &str,
     sort: crate::instance::content::provider::DiscoverySort,
+    reversed: bool,
     filters: &DiscoveryFilters,
     offset: usize,
     limit: usize,
@@ -373,6 +376,7 @@ async fn search_provider(
                     &content.instance,
                     &search_filters,
                     sort,
+                    reversed,
                     offset,
                     limit,
                 )
@@ -380,7 +384,7 @@ async fn search_provider(
         }
         DiscoveryTarget::Modpacks => {
             provider
-                .search_modpacks(query, &search_filters, sort, offset, limit)
+                .search_modpacks(query, &search_filters, sort, reversed, offset, limit)
                 .await
         }
     };
@@ -410,6 +414,7 @@ pub(crate) fn spawn_provider_search(
         mut cached_icons,
         known_projects,
         sort,
+        reversed,
         filters,
         cached,
     } = request;
@@ -430,6 +435,7 @@ pub(crate) fn spawn_provider_search(
             &target,
             &query,
             sort,
+            reversed,
             &filters,
             offset,
             limit,
@@ -444,6 +450,7 @@ pub(crate) fn spawn_provider_search(
             &target,
             &query,
             sort,
+            reversed,
             &filters,
             offset,
             limit,
@@ -909,6 +916,7 @@ pub struct DiscoveryState {
     pub list: ContentListState,
     pub search: crate::tui::widgets::search::SearchState,
     pub sort: crate::instance::content::provider::DiscoverySort,
+    pub sort_reversed: bool,
     pub sort_panel_open: bool,
     pub sort_panel_focused: bool,
     pub sort_panel_page: DiscoveryPanelPage,
@@ -1107,6 +1115,7 @@ fn discovery_sorts(provider: &str) -> &'static [crate::instance::content::provid
     use crate::instance::content::provider::DiscoverySort;
     if provider == "curseforge" {
         &[
+            DiscoverySort::Relevance,
             DiscoverySort::Popular,
             DiscoverySort::Released,
             DiscoverySort::Downloads,
@@ -1124,11 +1133,8 @@ impl DiscoveryState {
             modpacks: false,
             list: ContentListState::default(),
             search: crate::tui::widgets::search::SearchState::default(),
-            sort: if crate::config::SETTINGS.read().content.preferred_provider() == "curseforge" {
-                crate::instance::content::provider::DiscoverySort::Popular
-            } else {
-                Default::default()
-            },
+            sort: Default::default(),
+            sort_reversed: false,
             sort_panel_open: false,
             sort_panel_focused: false,
             sort_panel_page: DiscoveryPanelPage::default(),
@@ -1257,6 +1263,7 @@ impl DiscoveryState {
         self.filter_panel_selected = 0;
         if !self.sorts().contains(&self.sort) {
             self.sort = self.sorts()[0];
+            self.sort_reversed = false;
         }
         self.sort_panel_selected = self
             .sorts()
@@ -1319,8 +1326,9 @@ impl DiscoveryState {
             return;
         }
         let default = self.sorts()[0];
-        if self.sort != default {
+        if self.sort != default || self.sort_reversed {
             self.sort = default;
+            self.sort_reversed = false;
             self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
         }
     }
@@ -1367,6 +1375,7 @@ impl DiscoveryState {
             context: context.clone(),
             query: self.search.query.clone(),
             sort: self.sort,
+            reversed: self.sort_reversed,
             filters: self.filters.clone(),
             modrinth: settings.content.discovery_provider_enabled("modrinth"),
             curseforge: settings.content.discovery_provider_enabled("curseforge"),
@@ -1460,6 +1469,7 @@ impl DiscoveryState {
             cached_icons,
             known_projects: std::collections::HashMap::new(),
             sort: self.sort,
+            reversed: self.sort_reversed,
             filters: self.filters.clone(),
             cached: !self.page_loading,
         }
@@ -1501,6 +1511,7 @@ impl DiscoveryState {
             cached_icons,
             known_projects,
             sort: self.sort,
+            reversed: self.sort_reversed,
             filters: self.filters.clone(),
             cached: false,
         })
@@ -2042,10 +2053,18 @@ impl DiscoveryState {
             return;
         }
         let sort = self.sorts()[self.sort_panel_selected];
-        if self.sort != sort {
+        if self.sort == sort {
+            if self.sort_reversed {
+                self.sort = self.sorts()[0];
+                self.sort_reversed = false;
+            } else {
+                self.sort_reversed = true;
+            }
+        } else {
             self.sort = sort;
-            self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+            self.sort_reversed = false;
         }
+        self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
     }
 
     fn apply_selected_filter(&mut self) {

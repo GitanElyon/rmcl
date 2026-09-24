@@ -282,6 +282,7 @@ pub async fn search_discovery(
     loader: ModLoader,
     included_categories: &[String],
     sort: crate::instance::content::provider::DiscoverySort,
+    reversed: bool,
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, NetError> {
@@ -294,6 +295,7 @@ pub async fn search_discovery(
         (kind == ContentKind::Mod).then_some(loader),
         included_categories,
         sort,
+        reversed,
         offset,
         limit,
     )
@@ -308,6 +310,7 @@ pub async fn search_modpacks(
     game_versions: &[String],
     included_categories: &[String],
     sort: crate::instance::content::provider::DiscoverySort,
+    reversed: bool,
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, NetError> {
@@ -320,6 +323,7 @@ pub async fn search_modpacks(
         None,
         included_categories,
         sort,
+        reversed,
         offset,
         limit,
     )
@@ -336,6 +340,7 @@ async fn search(
     loader: Option<ModLoader>,
     included_categories: &[String],
     sort: crate::instance::content::provider::DiscoverySort,
+    reversed: bool,
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, NetError> {
@@ -368,7 +373,7 @@ async fn search(
             format!("index={}", offset + received),
             format!("pageSize={page_size}"),
             format!("sortField={}", curseforge_sort_field(sort, query)),
-            "sortOrder=desc".to_owned(),
+            format!("sortOrder={}", if reversed { "asc" } else { "desc" }),
         ];
         if !query.trim().is_empty() {
             params.push(format!("searchFilter={}", url_encode(query.trim())));

@@ -986,20 +986,19 @@ fn render_sort_panel(frame: &mut Frame, area: Rect, state: &mut DiscoveryState) 
         } else {
             state.sorts()[index] == state.sort
         };
+        let reversed = if state.local_mode {
+            state.local_sort_descending
+        } else {
+            state.sort_reversed
+        };
         let spans = vec![
             Span::styled(
                 if selected { "▌ " } else { "  " },
                 Style::default().fg(theme.accent()),
             ),
             Span::styled(
-                if active && state.local_mode {
-                    if state.local_sort_descending {
-                        "▼ "
-                    } else {
-                        "▲ "
-                    }
-                } else if active {
-                    "● "
+                if active {
+                    if reversed { "▼ " } else { "▲ " }
                 } else {
                     "· "
                 },

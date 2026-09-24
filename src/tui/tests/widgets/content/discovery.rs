@@ -330,6 +330,7 @@ fn curseforge_discovery_uses_its_categories_and_supported_sorts() {
     assert_eq!(
         state.sorts(),
         &[
+            crate::instance::content::provider::DiscoverySort::Relevance,
             crate::instance::content::provider::DiscoverySort::Popular,
             crate::instance::content::provider::DiscoverySort::Released,
             crate::instance::content::provider::DiscoverySort::Downloads,
@@ -346,6 +347,33 @@ fn curseforge_discovery_uses_its_categories_and_supported_sorts() {
         state.filters.categories.get("library-api"),
         Some(&CategoryFilter::Include)
     );
+}
+
+#[test]
+fn discovery_sort_cycles_up_down_then_best_match_up() {
+    use crate::instance::content::provider::DiscoverySort;
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    assert_eq!(state.sort, DiscoverySort::Relevance);
+    assert!(!state.sort_reversed);
+    state.sort_panel_selected = state
+        .sorts()
+        .iter()
+        .position(|sort| *sort == DiscoverySort::Downloads)
+        .unwrap();
+    state.apply_selected_sort();
+    assert_eq!(state.sort, DiscoverySort::Downloads);
+    assert!(!state.sort_reversed);
+    state.apply_selected_sort();
+    assert!(state.sort_reversed);
+    state.apply_selected_sort();
+    assert_eq!(state.sort, DiscoverySort::Relevance);
+    assert!(!state.sort_reversed);
+    state.sort_panel_selected = 0;
+    state.apply_selected_sort();
+    assert!(state.sort_reversed);
+    state.reset_sort();
+    assert_eq!(state.sort, DiscoverySort::Relevance);
+    assert!(!state.sort_reversed);
 }
 
 #[test]

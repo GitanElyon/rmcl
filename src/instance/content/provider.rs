@@ -40,11 +40,10 @@ impl DiscoverySort {
     pub fn label(self) -> &'static str {
         match self {
             Self::Relevance => "Best match",
-            Self::Downloads => "Most downloaded",
-            Self::Popular => "Popular",
-            Self::Updated => "Recently updated",
-            Self::Newest => "Newest",
-            Self::Released => "Recently released",
+            Self::Downloads => "Downloads",
+            Self::Popular => "Popularity",
+            Self::Updated => "Updates",
+            Self::Newest | Self::Released => "Release date",
         }
     }
 }
@@ -74,6 +73,7 @@ pub trait ContentProvider: Send + Sync {
         instance: &InstanceConfig,
         filters: &DiscoverySearchFilters,
         sort: DiscoverySort,
+        reversed: bool,
         offset: usize,
         limit: usize,
     ) -> Result<DiscoveryResults, crate::net::NetError>;
@@ -83,6 +83,7 @@ pub trait ContentProvider: Send + Sync {
         query: &str,
         filters: &DiscoverySearchFilters,
         sort: DiscoverySort,
+        reversed: bool,
         offset: usize,
         limit: usize,
     ) -> Result<DiscoveryResults, crate::net::NetError>;
@@ -141,6 +142,7 @@ impl ContentProvider for ModrinthProvider {
         instance: &InstanceConfig,
         filters: &DiscoverySearchFilters,
         sort: DiscoverySort,
+        reversed: bool,
         offset: usize,
         limit: usize,
     ) -> Result<DiscoveryResults, crate::net::NetError> {
@@ -151,6 +153,7 @@ impl ContentProvider for ModrinthProvider {
             filters,
             instance.loader,
             sort,
+            reversed,
             offset,
             limit,
         )
@@ -162,11 +165,20 @@ impl ContentProvider for ModrinthProvider {
         query: &str,
         filters: &DiscoverySearchFilters,
         sort: DiscoverySort,
+        reversed: bool,
         offset: usize,
         limit: usize,
     ) -> Result<DiscoveryResults, crate::net::NetError> {
-        crate::net::modrinth::search_modpacks(&self.client, query, filters, sort, offset, limit)
-            .await
+        crate::net::modrinth::search_modpacks(
+            &self.client,
+            query,
+            filters,
+            sort,
+            reversed,
+            offset,
+            limit,
+        )
+        .await
     }
 
     async fn resolve_files(
@@ -288,6 +300,7 @@ impl ContentProvider for CurseForgeProvider {
         instance: &InstanceConfig,
         filters: &DiscoverySearchFilters,
         sort: DiscoverySort,
+        reversed: bool,
         offset: usize,
         limit: usize,
     ) -> Result<DiscoveryResults, crate::net::NetError> {
@@ -300,6 +313,7 @@ impl ContentProvider for CurseForgeProvider {
             instance.loader,
             &filters.included_categories,
             sort,
+            reversed,
             offset,
             limit,
         )
@@ -311,6 +325,7 @@ impl ContentProvider for CurseForgeProvider {
         query: &str,
         filters: &DiscoverySearchFilters,
         sort: DiscoverySort,
+        reversed: bool,
         offset: usize,
         limit: usize,
     ) -> Result<DiscoveryResults, crate::net::NetError> {
@@ -321,6 +336,7 @@ impl ContentProvider for CurseForgeProvider {
             &filters.game_versions,
             &filters.included_categories,
             sort,
+            reversed,
             offset,
             limit,
         )

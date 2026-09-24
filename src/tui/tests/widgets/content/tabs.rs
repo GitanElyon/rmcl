@@ -117,8 +117,15 @@ fn discovery_sort_panel_renders_beside_results() {
     assert!(rendered.contains("Sort"));
     assert!(rendered.contains("Sort by"));
     assert!(!rendered.contains("Active"));
-    assert!(rendered.contains("●"));
-    assert!(rendered.contains("Most downloaded"));
+    assert!(rendered.contains("▲ Best match"));
+    assert!(rendered.contains("Downloads"));
+    state.sort_reversed = true;
+    terminal
+        .draw(|frame| {
+            render_discovery_popup(frame, Rect::new(0, 1, 80, 19), &mut state, &picker);
+        })
+        .unwrap();
+    assert!(format!("{}", terminal.backend()).contains("▼ Best match"));
 }
 
 #[test]
@@ -158,13 +165,14 @@ fn installed_sort_panel_only_shows_file_fields() {
     let rendered = format!("{}", terminal.backend());
     assert!(rendered.contains("▲ File size"));
     assert!(!rendered.contains("Smallest"));
-    assert!(!rendered.contains("Most downloaded"));
+    assert!(!rendered.contains("Downloads"));
     assert!(rendered.contains("Sort by"));
 }
 
 #[test]
 fn curseforge_panel_uses_curseforge_categories_and_sorts() {
     use ratatui::{Terminal, backend::TestBackend};
+    crate::net::curseforge::seed_discovery_categories_for_test();
     let mut state = DiscoveryState::new(crate::instance::ContentKind::Mod);
     state.set_local_mode(false);
     state.category_provider = "curseforge".to_owned();
@@ -175,15 +183,15 @@ fn curseforge_panel_uses_curseforge_categories_and_sorts() {
         .draw(|frame| render_sort_panel(frame, Rect::new(0, 1, 60, 29), &mut state))
         .unwrap();
     let rendered = format!("{}", terminal.backend());
-    assert!(rendered.contains("Adventure and RPG"));
+    assert!(rendered.contains("API and Library"));
     assert!(!rendered.contains("Environment"));
     state.sort_panel_page = crate::tui::widgets::content::discovery::DiscoveryPanelPage::Sort;
     terminal
         .draw(|frame| render_sort_panel(frame, Rect::new(0, 1, 60, 29), &mut state))
         .unwrap();
     let rendered = format!("{}", terminal.backend());
-    assert!(rendered.contains("Recently released"));
-    assert!(!rendered.contains("Best match"));
+    assert!(rendered.contains("Release date"));
+    assert!(rendered.contains("Best match"));
 }
 
 #[test]

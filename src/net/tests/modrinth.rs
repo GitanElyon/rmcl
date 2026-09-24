@@ -3,6 +3,24 @@
 
 use super::*;
 
+#[test]
+fn reversed_search_pages_cover_every_result_once() {
+    let ids: Vec<_> = (0..11).collect();
+    let pages = (0..11)
+        .step_by(4)
+        .flat_map(|offset| {
+            let (start, count) = reversed_window(ids.len(), offset, 4).unwrap();
+            ids[start..start + count]
+                .iter()
+                .rev()
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pages, (0..11).rev().collect::<Vec<_>>());
+    assert_eq!(reversed_window(11, 11, 4), None);
+}
+
 fn version_with_files(files: Vec<VersionFile>) -> VersionInfo {
     VersionInfo {
         id: "version-id".to_owned(),

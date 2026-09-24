@@ -197,19 +197,14 @@ pub async fn search_discovery(
     filters: &crate::instance::content::provider::DiscoverySearchFilters,
     loader: ModLoader,
     sort: crate::instance::content::provider::DiscoverySort,
+    reversed: bool,
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, crate::net::NetError> {
     let facets = discovery_facets(kind, filters, loader);
     let query = query.trim();
     let index = discovery_index(sort, query);
-    let url = format!(
-        "{API_BASE}/search?query={}&facets={}&index={index}&offset={offset}&limit={limit}",
-        url_encode(query),
-        url_encode(&facets),
-    );
-    let results: DiscoverySearchResponse = client.get_json(&url).await?;
-    Ok(discovery_results(results))
+    search_sorted(client, query, &facets, index, reversed, offset, limit).await
 }
 
 pub async fn search_modpacks(
@@ -217,6 +212,7 @@ pub async fn search_modpacks(
     query: &str,
     filters: &crate::instance::content::provider::DiscoverySearchFilters,
     sort: crate::instance::content::provider::DiscoverySort,
+    reversed: bool,
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, crate::net::NetError> {
@@ -234,13 +230,53 @@ pub async fn search_modpacks(
     }
     add_filter_facets(&mut facets, filters);
     let facets = serde_json::to_string(&facets).unwrap_or_default();
-    let url = format!(
-        "{API_BASE}/search?query={}&facets={}&index={index}&offset={offset}&limit={limit}",
+    search_sorted(client, query, &facets, index, reversed, offset, limit).await
+}
+
+async fn search_sorted(
+    client: &crate::net::HttpClient,
+    query: &str,
+    facets: &str,
+    index: &str,
+    reversed: bool,
+    offset: usize,
+    limit: usize,
+) -> Result<DiscoveryResults, crate::net::NetError> {
+    let base = format!(
+        "{API_BASE}/search?query={}&facets={}&index={index}",
         url_encode(query),
-        url_encode(&facets),
+        url_encode(facets),
     );
+    let (fetch_offset, fetch_limit) = if reversed {
+        // Modrinth only supports descending indexes. Read the matching window
+        // from the end so reversing a page also reverses pagination globally.
+        let count: DiscoverySearchResponse =
+            client.get_json(&format!("{base}&offset=0&limit=1")).await?;
+        let total = count.total_hits.max(0) as usize;
+        let Some((start, count)) = reversed_window(total, offset, limit) else {
+            return Ok(DiscoveryResults {
+                projects: Vec::new(),
+                metadata: HashMap::new(),
+                received: 0,
+                total_hits: total,
+            });
+        };
+        (start, count)
+    } else {
+        (offset, limit)
+    };
+    let url = format!("{base}&offset={fetch_offset}&limit={fetch_limit}");
     let results: DiscoverySearchResponse = client.get_json(&url).await?;
-    Ok(discovery_results(results))
+    let mut results = discovery_results(results);
+    if reversed {
+        results.projects.reverse();
+    }
+    Ok(results)
+}
+
+fn reversed_window(total: usize, offset: usize, limit: usize) -> Option<(usize, usize)> {
+    let count = limit.min(total.checked_sub(offset)?);
+    (count > 0).then_some((total - offset - count, count))
 }
 
 fn discovery_results(results: DiscoverySearchResponse) -> DiscoveryResults {

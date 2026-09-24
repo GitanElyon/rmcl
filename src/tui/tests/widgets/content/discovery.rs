@@ -352,17 +352,13 @@ fn installed_sort_panel_has_local_fields_and_direction() {
     handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
     assert_eq!(state.local_sort_index, 6);
     assert!(!state.local_sort_descending);
-    for _ in 0..3 {
-        handle_key(&KeyEvent::from(KeyCode::Char('k')), &mut state);
-    }
-    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
-    assert_eq!(state.local_ranking_index, 3);
-    assert_eq!(state.local_sort_index, 6);
+    handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state);
+    assert_eq!(state.sort_panel_selected, 2);
     handle_key(&KeyEvent::from(KeyCode::Char('r')), &mut state);
     assert_eq!(state.local_sort_index, 5);
-    assert_eq!(state.local_ranking_index, 0);
-    handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state);
-    handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Char('k')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Char('k')), &mut state);
     handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
     assert_eq!(state.local_sort_index, 5);
     assert!(state.local_sort_descending);

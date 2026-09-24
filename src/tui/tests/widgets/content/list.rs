@@ -64,41 +64,6 @@ fn selected_provider_project_tracks_the_filtered_selection() {
 }
 
 #[test]
-fn installed_provider_sorts_keep_unknown_entries_last() {
-    let mut state = ContentListState {
-        entries: vec![entry("Unknown"), entry("Low"), entry("High")],
-        ..Default::default()
-    };
-    for (name, downloads) in [("Low", 10), ("High", 100)] {
-        let project_id = name.to_lowercase();
-        let entry = state
-            .entries
-            .iter_mut()
-            .find(|entry| entry.name == name)
-            .unwrap();
-        entry.provider_project = Some(crate::instance::ProviderProject {
-            provider: "modrinth".to_owned(),
-            project_id: project_id.clone(),
-            version_id: String::new(),
-        });
-        state.project_metadata.insert(
-            ("modrinth".to_owned(), project_id),
-            crate::net::modrinth::ProjectInfo {
-                downloads,
-                ..Default::default()
-            },
-        );
-    }
-    state.local_ranking_index = 3;
-    let names = state
-        .filtered_indices()
-        .into_iter()
-        .map(|index| state.entries[index].name.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(names, ["High", "Low", "Unknown"]);
-}
-
-#[test]
 fn installed_file_size_sort_changes_direction() {
     let temp = tempfile::tempdir().unwrap();
     let small = temp.path().join("small.jar");
@@ -128,7 +93,6 @@ fn installed_name_fallback_sorts_both_directions() {
             game_version: crate::tui::widgets::content::discovery::GameVersionFilter::Any,
             ..Default::default()
         },
-        0,
         5,
         false,
         "1.21.1",
@@ -137,38 +101,6 @@ fn installed_name_fallback_sorts_both_directions() {
     assert_eq!(state.filtered_indices(), [1, 0]);
     state.local_sort_descending = true;
     assert_eq!(state.filtered_indices(), [0, 1]);
-}
-
-#[test]
-fn installed_file_order_breaks_ties_with_project_ranking() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut state = ContentListState {
-        entries: vec![entry("Low"), entry("High"), entry("Large")],
-        local_sort_index: 6,
-        local_ranking_index: 3,
-        ..Default::default()
-    };
-    for (index, downloads, size) in [(0, 10, 1), (1, 100, 1), (2, 1000, 2)] {
-        let path = temp.path().join(format!("{index}.jar"));
-        std::fs::write(&path, vec![0; size]).unwrap();
-        state.entries[index].path = path;
-        let project_id = index.to_string();
-        state.entries[index].provider_project = Some(crate::instance::ProviderProject {
-            provider: "modrinth".to_owned(),
-            project_id: project_id.clone(),
-            version_id: String::new(),
-        });
-        state.project_metadata.insert(
-            ("modrinth".to_owned(), project_id),
-            crate::net::modrinth::ProjectInfo {
-                downloads,
-                ..Default::default()
-            },
-        );
-    }
-    assert_eq!(state.filtered_indices(), [1, 0, 2]);
-    state.local_sort_descending = true;
-    assert_eq!(state.filtered_indices(), [2, 1, 0]);
 }
 
 #[test]
@@ -219,7 +151,7 @@ fn installed_filters_use_cached_project_and_version_metadata() {
         )]),
         ..Default::default()
     };
-    state.set_installed_options(&filters, 0, 0, false, "1.21.1", true);
+    state.set_installed_options(&filters, 0, false, "1.21.1", true);
     assert_eq!(state.filtered_indices(), [1]);
     state.local_game_version = "1.20.1".to_owned();
     state.local_filters.game_version = GameVersionFilter::Current;

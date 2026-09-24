@@ -797,7 +797,6 @@ fn render_installed_list_panel(
     discovery_state.set_filter_loader(instance.loader);
     state.set_installed_options(
         &discovery_state.filters,
-        discovery_state.local_ranking_index,
         discovery_state.local_sort_index,
         discovery_state.local_sort_descending,
         &instance.game_version,
@@ -949,13 +948,9 @@ fn render_sort_panel(frame: &mut Frame, area: Rect, state: &mut DiscoveryState) 
         render_discovery_panel_title(frame, area, state);
         return;
     }
-    let selected_row = if state.local_mode && state.sort_panel_selected >= 5 {
-        state.sort_panel_selected + 3
-    } else {
-        state.sort_panel_selected + 1
-    };
+    let selected_row = state.sort_panel_selected + 1;
     let offset = selected_row.saturating_sub(usize::from(inner.height).saturating_sub(1));
-    let row_count = if state.local_mode { 11 } else { 6 };
+    let row_count = if state.local_mode { 4 } else { 6 };
     for row in offset..row_count.min(offset + usize::from(inner.height)) {
         let rect = Rect {
             x: inner.x,
@@ -963,18 +958,9 @@ fn render_sort_panel(frame: &mut Frame, area: Rect, state: &mut DiscoveryState) 
             width: inner.width,
             height: 1,
         };
-        if row == 0 || (state.local_mode && row == 7) {
+        if row == 0 {
             frame.render_widget(
-                Paragraph::new(if row == 0 {
-                    if state.local_mode {
-                        "  Project ranking"
-                    } else {
-                        "  Sort by"
-                    }
-                } else {
-                    "  File order"
-                })
-                .style(
+                Paragraph::new("  Sort by").style(
                     Style::default()
                         .fg(theme.text())
                         .add_modifier(Modifier::BOLD),
@@ -983,26 +969,15 @@ fn render_sort_panel(frame: &mut Frame, area: Rect, state: &mut DiscoveryState) 
             );
             continue;
         }
-        if row == 6 {
-            continue;
-        }
-        let index = if state.local_mode && row >= 8 {
-            row - 3
+        let index = row - 1;
+        let label = if state.local_mode {
+            ["Name", "File size", "Date modified"][index]
         } else {
-            row - 1
-        };
-        let label = if index < 5 {
             crate::instance::content::provider::DiscoverySort::ALL[index].label()
-        } else {
-            ["Name", "File size", "Date modified"][index - 5]
         };
         let selected = state.sort_panel_focused && index == state.sort_panel_selected;
         let active = if state.local_mode {
-            if index < 5 {
-                index == state.local_ranking_index
-            } else {
-                index == state.local_sort_index
-            }
+            index + 5 == state.local_sort_index
         } else {
             crate::instance::content::provider::DiscoverySort::ALL[index] == state.sort
         };
@@ -1012,7 +987,7 @@ fn render_sort_panel(frame: &mut Frame, area: Rect, state: &mut DiscoveryState) 
                 Style::default().fg(theme.accent()),
             ),
             Span::styled(
-                if active && index >= 5 {
+                if active && state.local_mode {
                     if state.local_sort_descending {
                         "▼ "
                     } else {

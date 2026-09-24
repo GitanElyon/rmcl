@@ -25,12 +25,6 @@ pub struct ProjectInfo {
     pub project_type: String,
     #[serde(default)]
     pub loaders: Vec<String>,
-    #[serde(default)]
-    pub downloads: u64,
-    #[serde(default, alias = "follows")]
-    pub followers: u64,
-    #[serde(default, alias = "published")]
-    pub date_created: String,
     #[serde(default, alias = "updated")]
     pub date_modified: String,
     #[serde(default)]

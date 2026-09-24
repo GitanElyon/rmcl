@@ -76,14 +76,11 @@ fn only_exclusively_library_categorized_projects_are_cleanup_eligible() {
 }
 
 #[test]
-fn project_metadata_caches_sort_and_environment_fields() {
+fn project_metadata_caches_environment_fields() {
     let project: ProjectInfo = serde_json::from_str(
-        r#"{"id":"test","slug":"test","title":"Test","downloads":120,"followers":5,"published":"2025-01-01T00:00:00Z","updated":"2025-02-01T00:00:00Z","client_side":"required","server_side":"unsupported"}"#,
+        r#"{"id":"test","slug":"test","title":"Test","updated":"2025-02-01T00:00:00Z","client_side":"required","server_side":"unsupported"}"#,
     )
     .unwrap();
-    assert_eq!(project.downloads, 120);
-    assert_eq!(project.followers, 5);
-    assert_eq!(project.date_created, "2025-01-01T00:00:00Z");
     assert_eq!(project.date_modified, "2025-02-01T00:00:00Z");
     assert_eq!(project.client_side, "required");
 }

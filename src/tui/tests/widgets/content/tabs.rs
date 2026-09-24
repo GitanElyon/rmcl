@@ -122,7 +122,7 @@ fn discovery_sort_panel_renders_beside_results() {
 }
 
 #[test]
-fn installed_sort_panel_shows_local_fields_after_provider_presets() {
+fn installed_sort_panel_only_shows_file_fields() {
     use ratatui::{Terminal, backend::TestBackend};
 
     let mut state = DiscoveryState::new(crate::instance::ContentKind::Mod);
@@ -137,31 +137,20 @@ fn installed_sort_panel_shows_local_fields_after_provider_presets() {
         .draw(|frame| render_discovery_popup(frame, Rect::new(0, 1, 100, 24), &mut state, &picker))
         .unwrap();
     let rendered = format!("{}", terminal.backend());
-    let positions = [
-        "Best match",
-        "Popular",
-        "Newest",
-        "Most downloaded",
-        "Recently updated",
-        "Name",
-        "File size",
-        "Date modified",
-    ]
-    .map(|label| {
+    let positions = ["Name", "File size", "Date modified"].map(|label| {
         rendered
             .find(label)
             .unwrap_or_else(|| panic!("missing {label}: {rendered}"))
     });
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
-    assert!(rendered.contains("Project ranking"));
-    assert!(rendered.contains("File order"));
-    assert!(rendered.contains("File size"));
+    assert!(rendered.contains("Sort by"));
+    assert!(!rendered.contains("Best match"));
+    assert!(!rendered.contains("Project ranking"));
     assert!(rendered.contains("▼ File size"));
     assert!(!rendered.contains("Largest"));
     assert!(!rendered.contains("Oldest"));
 
-    state.sort_panel_selected = 6;
-    state.local_ranking_index = 3;
+    state.sort_panel_selected = 1;
     state.local_sort_descending = false;
     terminal
         .draw(|frame| render_discovery_popup(frame, Rect::new(0, 1, 100, 24), &mut state, &picker))
@@ -169,8 +158,8 @@ fn installed_sort_panel_shows_local_fields_after_provider_presets() {
     let rendered = format!("{}", terminal.backend());
     assert!(rendered.contains("▲ File size"));
     assert!(!rendered.contains("Smallest"));
-    assert!(rendered.contains("Most downloaded"));
-    assert!(rendered.contains("File order"));
+    assert!(!rendered.contains("Most downloaded"));
+    assert!(rendered.contains("Sort by"));
 }
 
 #[test]

@@ -190,7 +190,6 @@ pub struct ContentListState {
     version_metadata: HashMap<(String, String), crate::net::modrinth::VersionInfo>,
     requested_provider_icons: HashSet<(String, String, String)>,
     pub local_panel_open: bool,
-    pub local_ranking_index: usize,
     pub local_sort_index: usize,
     pub local_sort_descending: bool,
     local_filters: crate::tui::widgets::content::discovery::DiscoveryFilters,
@@ -241,7 +240,6 @@ impl Default for ContentListState {
             requested_provider_icons: HashSet::new(),
             local_panel_open: false,
             local_sort_index: 0,
-            local_ranking_index: 0,
             local_sort_descending: false,
             local_filters: crate::tui::widgets::content::discovery::DiscoveryFilters {
                 game_version: crate::tui::widgets::content::discovery::GameVersionFilter::Any,
@@ -1160,27 +1158,20 @@ impl ContentListState {
             })
             .map(|(i, _)| i)
             .collect();
-        if self.local_sort_index != 0 || self.local_ranking_index != 0 {
+        if self.local_sort_index != 0 {
             indices.sort_by(|&a, &b| {
                 let left = &self.entries[a];
                 let right = &self.entries[b];
-                let compare = |index, descending| {
-                    let left_key = self.installed_sort_key(left, index);
-                    let right_key = self.installed_sort_key(right, index);
-                    match (left_key, right_key) {
-                        (Some(left), Some(right)) if descending => right.cmp(&left),
-                        (Some(left), Some(right)) => left.cmp(&right),
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => std::cmp::Ordering::Equal,
-                    }
+                let order = match (
+                    self.installed_sort_key(left),
+                    self.installed_sort_key(right),
+                ) {
+                    (Some(left), Some(right)) if self.local_sort_descending => right.cmp(&left),
+                    (Some(left), Some(right)) => left.cmp(&right),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
                 };
-                let order = if self.local_sort_index != 0 {
-                    compare(self.local_sort_index, self.local_sort_descending)
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-                .then_with(|| compare(self.local_ranking_index, true));
                 order.then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
             });
         }
@@ -1190,7 +1181,6 @@ impl ContentListState {
     fn needs_local_metadata(&self) -> bool {
         use crate::tui::widgets::content::discovery::{EnvironmentFilter, GameVersionFilter};
         self.local_panel_open
-            || self.local_ranking_index != 0
             || !self.local_filters.categories.is_empty()
             || self.local_filters.environment != EnvironmentFilter::Any
             || self.local_filters.game_version != GameVersionFilter::Any
@@ -1199,7 +1189,6 @@ impl ContentListState {
     pub fn set_installed_options(
         &mut self,
         filters: &crate::tui::widgets::content::discovery::DiscoveryFilters,
-        ranking_index: usize,
         sort_index: usize,
         descending: bool,
         game_version: &str,
@@ -1208,7 +1197,6 @@ impl ContentListState {
         let selected = self.selected_file_stem();
         let previously_needed_metadata = self.needs_local_metadata();
         self.local_filters = filters.clone();
-        self.local_ranking_index = ranking_index;
         self.local_sort_index = sort_index;
         self.local_sort_descending = descending;
         self.local_game_version = game_version.to_owned();
@@ -1289,35 +1277,8 @@ impl ContentListState {
         true
     }
 
-    fn installed_sort_key(&self, entry: &ContentEntry, index: usize) -> Option<String> {
-        let project = entry.provider_project.as_ref().and_then(|installed| {
-            self.project_metadata
-                .get(&(installed.provider.clone(), installed.project_id.clone()))
-        });
-        match index {
-            1 => project.map(|project| {
-                let popularity = if entry
-                    .provider_project
-                    .as_ref()
-                    .is_some_and(|source| source.provider == "modrinth")
-                {
-                    project.followers
-                } else {
-                    project.downloads
-                };
-                format!("{popularity:020}")
-            }),
-            2 => project
-                .and_then(|project| {
-                    chrono::DateTime::parse_from_rfc3339(&project.date_created).ok()
-                })
-                .map(|date| format!("{:020}", date.timestamp())),
-            3 => project.map(|project| format!("{:020}", project.downloads)),
-            4 => project
-                .and_then(|project| {
-                    chrono::DateTime::parse_from_rfc3339(&project.date_modified).ok()
-                })
-                .map(|date| format!("{:020}", date.timestamp())),
+    fn installed_sort_key(&self, entry: &ContentEntry) -> Option<String> {
+        match self.local_sort_index {
             5 => Some(entry.name.to_lowercase()),
             // ponytail: file metadata is read during a local sort; cache it if large installed lists make this slow.
             6 => std::fs::metadata(&entry.path)

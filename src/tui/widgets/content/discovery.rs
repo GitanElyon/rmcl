@@ -735,7 +735,6 @@ pub struct DiscoveryState {
     pub sort_panel_page: DiscoveryPanelPage,
     pub sort_panel_selected: usize,
     pub local_mode: bool,
-    pub local_ranking_index: usize,
     pub local_sort_index: usize,
     pub local_sort_descending: bool,
     pub filter_panel_selected: usize,
@@ -859,7 +858,6 @@ impl DiscoveryState {
             sort_panel_page: DiscoveryPanelPage::default(),
             sort_panel_selected: 0,
             local_mode: false,
-            local_ranking_index: 0,
             local_sort_index: 5,
             local_sort_descending: false,
             filter_panel_selected: 0,
@@ -931,6 +929,14 @@ impl DiscoveryState {
             return;
         }
         self.local_mode = installed;
+        self.sort_panel_selected = if installed {
+            self.local_sort_index - 5
+        } else {
+            crate::instance::content::provider::DiscoverySort::ALL
+                .iter()
+                .position(|sort| *sort == self.sort)
+                .unwrap_or(0)
+        };
         if installed {
             let local = self.installed_filters.take().unwrap_or_default();
             self.discovery_filters = Some(std::mem::replace(&mut self.filters, local));
@@ -964,7 +970,6 @@ impl DiscoveryState {
 
     fn reset_sort(&mut self) {
         if self.local_mode {
-            self.local_ranking_index = 0;
             self.local_sort_index = 5;
             self.local_sort_descending = false;
             return;
@@ -1617,21 +1622,18 @@ impl DiscoveryState {
 
     fn apply_selected_sort(&mut self) {
         if self.local_mode {
-            if self.sort_panel_selected >= 5 {
-                if self.local_sort_index == self.sort_panel_selected {
-                    if self.local_sort_descending {
-                        self.local_sort_index = 5;
-                        self.local_sort_descending = false;
-                    } else {
-                        self.local_sort_descending = true;
-                    }
-                } else {
-                    self.local_sort_index = self.sort_panel_selected;
+            let selected = self.sort_panel_selected + 5;
+            if self.local_sort_index == selected {
+                if self.local_sort_descending {
+                    self.local_sort_index = 5;
                     self.local_sort_descending = false;
+                } else {
+                    self.local_sort_descending = true;
                 }
-                return;
+            } else {
+                self.local_sort_index = selected;
+                self.local_sort_descending = false;
             }
-            self.local_ranking_index = self.sort_panel_selected;
             return;
         }
         let sort = crate::instance::content::provider::DiscoverySort::ALL[self.sort_panel_selected];
@@ -2313,7 +2315,7 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut DiscoveryState) -> bool {
                 KeyCode::Char('j') | KeyCode::Down => {
                     state.sort_panel_selected =
                         (state.sort_panel_selected + 1).min(if state.local_mode {
-                            7
+                            2
                         } else {
                             crate::instance::content::provider::DiscoverySort::ALL.len() - 1
                         });
@@ -2343,7 +2345,7 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut DiscoveryState) -> bool {
         state.sort_panel_focused = true;
         state.sort_panel_page = DiscoveryPanelPage::Filters;
         state.sort_panel_selected = if state.local_mode {
-            state.local_sort_index
+            state.local_sort_index - 5
         } else {
             crate::instance::content::provider::DiscoverySort::ALL
                 .iter()

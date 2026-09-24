@@ -166,22 +166,20 @@ impl From<DiscoverySearchHit> for DiscoveryProject {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn search_discovery(
     client: &crate::net::HttpClient,
     kind: ContentKind,
     query: &str,
     game_version: &str,
     loader: ModLoader,
+    sort: crate::instance::content::provider::DiscoverySort,
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, crate::net::NetError> {
     let facets = discovery_facets(kind, game_version, loader);
     let query = query.trim();
-    let index = if query.is_empty() {
-        "downloads"
-    } else {
-        "relevance"
-    };
+    let index = discovery_index(sort, query);
     let url = format!(
         "{API_BASE}/search?query={}&facets={}&index={index}&offset={offset}&limit={limit}",
         url_encode(query),
@@ -204,15 +202,12 @@ pub async fn search_discovery(
 pub async fn search_modpacks(
     client: &crate::net::HttpClient,
     query: &str,
+    sort: crate::instance::content::provider::DiscoverySort,
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, crate::net::NetError> {
     let query = query.trim();
-    let index = if query.is_empty() {
-        "downloads"
-    } else {
-        "relevance"
-    };
+    let index = discovery_index(sort, query);
     let facets = r#"[["project_type:modpack"]]"#;
     let url = format!(
         "{API_BASE}/search?query={}&facets={}&index={index}&offset={offset}&limit={limit}",
@@ -230,6 +225,19 @@ pub async fn search_modpacks(
             .map(DiscoveryProject::from)
             .collect(),
     })
+}
+
+fn discovery_index(
+    sort: crate::instance::content::provider::DiscoverySort,
+    query: &str,
+) -> &'static str {
+    use crate::instance::content::provider::DiscoverySort;
+    match sort {
+        DiscoverySort::Relevance if !query.is_empty() => "relevance",
+        DiscoverySort::Relevance | DiscoverySort::Downloads => "downloads",
+        DiscoverySort::Updated => "updated",
+        DiscoverySort::Newest => "newest",
+    }
 }
 
 fn discovery_facets(kind: ContentKind, game_version: &str, loader: ModLoader) -> String {

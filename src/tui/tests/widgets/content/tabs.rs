@@ -98,6 +98,24 @@ fn discovery_version_popup_renders_over_a_project_page() {
 }
 
 #[test]
+fn discovery_sort_panel_renders_beside_results() {
+    use crate::instance::ContentKind;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.sort_panel_open = true;
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    terminal
+        .draw(|frame| render_discovery_popup(frame, frame.area(), &mut state, &picker))
+        .unwrap();
+
+    let rendered = format!("{}", terminal.backend());
+    assert!(rendered.contains("Sort"));
+    assert!(rendered.contains("Most downloaded"));
+}
+
+#[test]
 fn confirmation_metadata_is_human_readable() {
     assert_eq!(
         confirmation_loaders(&["fabric".to_owned(), "neoforge".to_owned()]),

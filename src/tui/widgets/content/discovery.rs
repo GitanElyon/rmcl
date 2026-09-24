@@ -81,6 +81,7 @@ pub struct DiscoveryRequest {
     pub reconcile: bool,
     pub loaded_icon_stems: std::collections::HashSet<String>,
     pub known_projects: std::collections::HashMap<String, (String, String)>,
+    pub sort: crate::instance::content::provider::DiscoverySort,
 }
 
 pub(crate) struct ContentDiscoveryTarget {
@@ -100,6 +101,7 @@ async fn search_provider(
     enabled: bool,
     target: &DiscoveryTarget,
     query: &str,
+    sort: crate::instance::content::provider::DiscoverySort,
     offset: usize,
     limit: usize,
 ) -> Option<Result<DiscoveryResults, crate::net::NetError>> {
@@ -107,10 +109,10 @@ async fn search_provider(
     Some(match target {
         DiscoveryTarget::Content(content) => {
             provider
-                .search(content.kind, query, &content.instance, offset, limit)
+                .search(content.kind, query, &content.instance, sort, offset, limit)
                 .await
         }
-        DiscoveryTarget::Modpacks => provider.search_modpacks(query, offset, limit).await,
+        DiscoveryTarget::Modpacks => provider.search_modpacks(query, sort, offset, limit).await,
     })
 }
 
@@ -129,6 +131,7 @@ pub(crate) fn spawn_provider_search(
         reconcile,
         loaded_icon_stems,
         known_projects,
+        sort,
     } = request;
     tokio::spawn(async move {
         let client = crate::net::HttpClient::new();
@@ -143,6 +146,7 @@ pub(crate) fn spawn_provider_search(
                     .discovery_provider_enabled("modrinth"),
                 &target,
                 &query,
+                sort,
                 offset,
                 limit,
             ),
@@ -154,6 +158,7 @@ pub(crate) fn spawn_provider_search(
                     .discovery_provider_enabled("curseforge"),
                 &target,
                 &query,
+                sort,
                 offset,
                 limit,
             )
@@ -541,6 +546,10 @@ pub struct DiscoveryState {
     pub modpacks: bool,
     pub list: ContentListState,
     pub search: crate::tui::widgets::search::SearchState,
+    pub sort: crate::instance::content::provider::DiscoverySort,
+    pub sort_panel_open: bool,
+    pub sort_panel_focused: bool,
+    pub sort_panel_selected: usize,
     pub total_hits: usize,
     pub error: Option<String>,
     context: Option<String>,
@@ -571,6 +580,10 @@ impl DiscoveryState {
             modpacks: false,
             list: ContentListState::default(),
             search: crate::tui::widgets::search::SearchState::default(),
+            sort: crate::instance::content::provider::DiscoverySort::default(),
+            sort_panel_open: false,
+            sort_panel_focused: false,
+            sort_panel_selected: 0,
             total_hits: 0,
             error: None,
             context: None,
@@ -672,6 +685,7 @@ impl DiscoveryState {
             reconcile,
             loaded_icon_stems,
             known_projects: std::collections::HashMap::new(),
+            sort: self.sort,
         }
     }
 
@@ -710,6 +724,7 @@ impl DiscoveryState {
             reconcile: false,
             loaded_icon_stems,
             known_projects,
+            sort: self.sort,
         })
     }
 
@@ -1196,6 +1211,14 @@ impl DiscoveryState {
             .is_some_and(|changed| changed.elapsed() >= SEARCH_DEBOUNCE)
     }
 
+    fn apply_selected_sort(&mut self) {
+        let sort = crate::instance::content::provider::DiscoverySort::ALL[self.sort_panel_selected];
+        if self.sort != sort {
+            self.sort = sort;
+            self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+        }
+    }
+
     fn search_changed(&mut self) {
         self.list.search.query.clone_from(&self.search.query);
         self.list.set_search_filtering(false);
@@ -1587,6 +1610,46 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut DiscoveryState) -> bool {
             KeyCode::Char('G') | KeyCode::End => page.scroll = page.max_scroll,
             _ => {}
         }
+        return true;
+    }
+    if state.sort_panel_open && !state.search.active {
+        if state.sort_panel_focused {
+            match key_event.code {
+                KeyCode::Char('s') | KeyCode::Esc => {
+                    state.sort_panel_open = false;
+                    state.sort_panel_focused = false;
+                }
+                KeyCode::Left | KeyCode::Char('h') => state.sort_panel_focused = false,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    state.sort_panel_selected = (state.sort_panel_selected + 1)
+                        .min(crate::instance::content::provider::DiscoverySort::ALL.len() - 1);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    state.sort_panel_selected = state.sort_panel_selected.saturating_sub(1);
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => state.apply_selected_sort(),
+                _ => {}
+            }
+            return true;
+        }
+        match key_event.code {
+            KeyCode::Char('s') | KeyCode::Esc => {
+                state.sort_panel_open = false;
+                return true;
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                state.sort_panel_focused = true;
+                return true;
+            }
+            _ => {}
+        }
+    } else if !state.search.active && key_event.code == KeyCode::Char('s') {
+        state.sort_panel_open = true;
+        state.sort_panel_focused = false;
+        state.sort_panel_selected = crate::instance::content::provider::DiscoverySort::ALL
+            .iter()
+            .position(|sort| *sort == state.sort)
+            .unwrap_or(0);
         return true;
     }
     if state.search.active {

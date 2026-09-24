@@ -91,6 +91,30 @@ fn content_mode_toggles_both_ways() {
 }
 
 #[test]
+fn sort_panel_keeps_results_navigation_available() {
+    use crate::instance::content::provider::DiscoverySort;
+
+    let mut state = DiscoveryState::new_modpacks();
+    state.list.entries = vec![
+        project_entry(project("one"), None),
+        project_entry(project("two"), None),
+    ];
+    state.list.list_state.selected = Some(0);
+
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('s')), &mut state));
+    assert!(state.sort_panel_open);
+    assert!(!state.sort_panel_focused);
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state));
+    assert_eq!(state.list.list_state.selected, Some(1));
+
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('l')), &mut state));
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state));
+    assert!(handle_key(&KeyEvent::from(KeyCode::Enter), &mut state));
+    assert_eq!(state.sort, DiscoverySort::Downloads);
+    assert!(state.search_due());
+}
+
+#[test]
 fn duplicate_provider_titles_share_one_identity() {
     let mut modrinth = project("sodium");
     modrinth.title = "Sodium".to_owned();

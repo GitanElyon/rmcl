@@ -182,6 +182,7 @@ pub async fn search_discovery(
     query: &str,
     game_version: &str,
     loader: ModLoader,
+    sort: crate::instance::content::provider::DiscoverySort,
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, NetError> {
@@ -192,6 +193,7 @@ pub async fn search_discovery(
         query,
         game_version,
         (kind == ContentKind::Mod).then_some(loader),
+        sort,
         offset,
         limit,
     )
@@ -202,6 +204,7 @@ pub async fn search_modpacks(
     client: &HttpClient,
     api_key: &str,
     query: &str,
+    sort: crate::instance::content::provider::DiscoverySort,
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, NetError> {
@@ -212,6 +215,7 @@ pub async fn search_modpacks(
         query,
         "",
         None,
+        sort,
         offset,
         limit,
     )
@@ -226,6 +230,7 @@ async fn search(
     query: &str,
     game_version: &str,
     loader: Option<ModLoader>,
+    sort: crate::instance::content::provider::DiscoverySort,
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, NetError> {
@@ -240,7 +245,7 @@ async fn search(
             format!("classId={class_id}"),
             format!("index={}", offset + received),
             format!("pageSize={page_size}"),
-            "sortField=6".to_owned(),
+            format!("sortField={}", curseforge_sort_field(sort, query)),
             "sortOrder=desc".to_owned(),
         ];
         if !query.trim().is_empty() {
@@ -271,6 +276,18 @@ async fn search(
         total_hits,
         projects: projects.into_iter().filter_map(discovery_project).collect(),
     })
+}
+
+fn curseforge_sort_field(
+    sort: crate::instance::content::provider::DiscoverySort,
+    query: &str,
+) -> u8 {
+    use crate::instance::content::provider::DiscoverySort;
+    match sort {
+        DiscoverySort::Relevance if !query.is_empty() => 2,
+        DiscoverySort::Relevance | DiscoverySort::Downloads => 6,
+        DiscoverySort::Updated | DiscoverySort::Newest => 3,
+    }
 }
 
 fn discovery_project(project: Mod) -> Option<DiscoveryProject> {

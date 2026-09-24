@@ -161,27 +161,33 @@ fn handle_discovery_key(key_event: &KeyEvent, instances_state: &mut instances::S
     let search_active = discovery.search.active;
     let popup_open = discovery.version_popup.is_some();
     let project_page_open = discovery.project_page_open();
+    let sort_panel_open = discovery.sort_panel_open;
+    let sort_panel_focused = discovery.sort_panel_focused;
     match key_event.code {
-        KeyCode::Esc if !search_active && !popup_open && !project_page_open => {
+        KeyCode::Esc if !search_active && !popup_open && !project_page_open && !sort_panel_open => {
             drop(discovery);
             if let Ok(mut state) = IMPORT_STATE.lock() {
                 close_popup(&mut state, instances_state);
             }
         }
-        KeyCode::Char('i') if !search_active && !popup_open && !project_page_open => {
+        KeyCode::Char('i')
+            if !search_active && !popup_open && !project_page_open && !sort_panel_focused =>
+        {
             drop(discovery);
             if let Ok(mut state) = IMPORT_STATE.lock() {
                 state.step = ImportStep::Input;
             }
         }
-        KeyCode::Enter if !search_active && !popup_open && !project_page_open => {
+        KeyCode::Enter
+            if !search_active && !popup_open && !project_page_open && !sort_panel_focused =>
+        {
             let request = discovery.begin_project_page();
             drop(discovery);
             if let Some(request) = request {
                 crate::tui::widgets::content::discovery::spawn_project_page(request);
             }
         }
-        KeyCode::Char('v') if !search_active && !popup_open => {
+        KeyCode::Char('v') if !search_active && !popup_open && !sort_panel_focused => {
             let request = discovery.begin_versions();
             drop(discovery);
             if let Some(request) = request {

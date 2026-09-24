@@ -7,10 +7,10 @@
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Margin, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, ListItem, Paragraph, Widget, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap},
 };
 use throbber_widgets_tui::{Throbber, ThrobberState};
 
@@ -436,6 +436,10 @@ pub fn render(
     };
 
     let mut keybinds = kb.map_or_else(Vec::new, <[_]>::to_vec);
+    if is_focused && mode == ContentMode::Discover && !discovery_page_open && !discovery_unavailable
+    {
+        keybinds.push(("s", " sort"));
+    }
     if is_focused && mode == ContentMode::Installed && !has_updates {
         keybinds.retain(|(key, _)| *key != "u");
     }
@@ -746,18 +750,28 @@ fn render_discovery_body(
     loading_text: &str,
     picker: &ratatui_image::picker::Picker,
 ) {
+    let show_sort_panel =
+        state.sort_panel_open && state.project_page.is_none() && state.version_popup.is_none();
+    let areas = show_sort_panel.then(|| {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .split(area)
+    });
+    let results_area = areas.as_ref().map_or(area, |areas| areas[0]);
+    state.set_viewport_rows(results_area.height);
     if let Some(page) = state.project_page.as_mut() {
         if let Some(error) = page.error.as_deref() {
             frame.render_widget(
                 Paragraph::new(error)
                     .style(Style::default().fg(THEME.as_ref().error()))
                     .wrap(Wrap { trim: true }),
-                area,
+                results_area,
             );
         } else if let Some(document) = page.document.as_mut() {
             page.max_scroll = crate::tui::widgets::markdown::render(
                 frame,
-                area,
+                results_area,
                 document,
                 &mut page.scroll,
                 picker,
@@ -766,7 +780,7 @@ fn render_discovery_body(
             frame.render_widget(
                 Paragraph::new(format!("Loading {}...", page.title))
                     .style(Style::default().fg(THEME.as_ref().text_dim())),
-                area,
+                results_area,
             );
         }
     } else {
@@ -774,9 +788,9 @@ fn render_discovery_body(
         let paginate = !state.search.active && state.version_popup.is_none();
         super::list::render(
             frame,
-            area,
+            results_area,
             &mut state.list,
-            is_focused,
+            is_focused && !state.sort_panel_focused,
             loading_text,
             &empty_text,
             picker,
@@ -784,9 +798,55 @@ fn render_discovery_body(
             false,
         );
     }
+    if let Some(areas) = areas {
+        render_sort_panel(frame, areas[1], state);
+    }
     if state.version_popup.is_some() {
         render_version_popup(frame, area, state, picker);
     }
+}
+
+fn render_sort_panel(frame: &mut Frame, area: Rect, state: &DiscoveryState) {
+    let theme = THEME.as_ref();
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .border_type(BORDER_STYLE.to_border_type())
+        .border_style(Style::default().fg(if state.sort_panel_focused {
+            theme.accent()
+        } else {
+            theme.border()
+        }));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(" Sort").style(
+            Style::default()
+                .fg(if state.sort_panel_focused {
+                    theme.accent()
+                } else {
+                    theme.text_dim()
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+        rows[0],
+    );
+
+    let items = crate::instance::content::provider::DiscoverySort::ALL.map(|sort| {
+        let marker = if sort == state.sort { "●" } else { "○" };
+        ListItem::new(format!(" {marker} {}", sort.label()))
+    });
+    let list = List::new(items).highlight_style(
+        Style::default()
+            .fg(theme.accent())
+            .add_modifier(Modifier::BOLD),
+    );
+    let mut list_state = ListState::default().with_selected(Some(state.sort_panel_selected));
+    StatefulWidget::render(list, rows[1], frame.buffer_mut(), &mut list_state);
 }
 
 pub(crate) fn render_version_popup(

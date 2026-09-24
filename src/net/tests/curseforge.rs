@@ -81,6 +81,17 @@ fn datapack_discovery_uses_the_curseforge_data_packs_class() {
     assert_eq!(class_id(ContentKind::DataPack), 6945);
 }
 
+#[test]
+fn discovery_sort_maps_to_curseforge_fields() {
+    use crate::instance::content::provider::DiscoverySort;
+
+    assert_eq!(curseforge_sort_field(DiscoverySort::Relevance, "sodium"), 2);
+    assert_eq!(curseforge_sort_field(DiscoverySort::Relevance, ""), 6);
+    assert_eq!(curseforge_sort_field(DiscoverySort::Downloads, ""), 6);
+    assert_eq!(curseforge_sort_field(DiscoverySort::Updated, ""), 3);
+    assert_eq!(curseforge_sort_field(DiscoverySort::Newest, ""), 3);
+}
+
 #[tokio::test]
 async fn curseforge_versions_follow_pagination() {
     use wiremock::matchers::{method, path, query_param};

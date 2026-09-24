@@ -301,6 +301,23 @@ fn discovery_search_treats_blank_icon_urls_as_missing() {
     assert!(DiscoveryProject::from(hit).icon_url.is_none());
 }
 
+#[test]
+fn discovery_sort_maps_to_modrinth_indexes() {
+    use crate::instance::content::provider::DiscoverySort;
+
+    assert_eq!(
+        discovery_index(DiscoverySort::Relevance, "sodium"),
+        "relevance"
+    );
+    assert_eq!(discovery_index(DiscoverySort::Relevance, ""), "downloads");
+    assert_eq!(
+        discovery_index(DiscoverySort::Downloads, "sodium"),
+        "downloads"
+    );
+    assert_eq!(discovery_index(DiscoverySort::Updated, ""), "updated");
+    assert_eq!(discovery_index(DiscoverySort::Newest, ""), "newest");
+}
+
 // covers each branch of url_encode: unreserved bytes pass through; the
 // reserved set + spaces + non-ascii bytes get percent-encoded. emoji
 // exercises multi-byte UTF-8 since the encoder operates on bytes, not

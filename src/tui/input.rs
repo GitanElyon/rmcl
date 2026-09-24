@@ -424,31 +424,38 @@ impl App {
             && (self.content_mode == widgets::content::ContentMode::Discover
                 || discovery_popup_open)
         {
-            let (search_active, popup_open, project_page_open) = self
+            let (search_active, popup_open, project_page_open, sort_panel_focused) = self
                 .active_discovery_state_mut()
                 .map(|state| {
                     (
                         state.search.active,
                         state.version_popup.is_some(),
                         state.project_page_open(),
+                        state.sort_panel_focused,
                     )
                 })
                 .unwrap_or_default();
             if !search_active
                 && !popup_open
                 && !project_page_open
+                && !sort_panel_focused
                 && key_event.code == KeyCode::Enter
             {
                 self.spawn_active_discovery_project_page();
                 return Ok(());
             }
-            if !search_active && !popup_open && key_event.code == KeyCode::Char('v') {
+            if !search_active
+                && !popup_open
+                && !sort_panel_focused
+                && key_event.code == KeyCode::Char('v')
+            {
                 self.spawn_active_discovery_versions();
                 return Ok(());
             }
             if !search_active
                 && !popup_open
                 && !project_page_open
+                && !sort_panel_focused
                 && key_event.code == KeyCode::Char('d')
             {
                 if let Some(pending) = self

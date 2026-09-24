@@ -144,6 +144,7 @@ async fn modrinth_discovery_returns_unique_compatible_mods() {
         "sodium",
         "1.21.1",
         ModLoader::Fabric,
+        rmcl::instance::content::provider::DiscoverySort::Relevance,
         0,
         100,
     )
@@ -175,6 +176,7 @@ async fn modrinth_discovery_returns_unique_compatible_mods() {
             "sodium",
             "1.21.1",
             ModLoader::Fabric,
+            rmcl::instance::content::provider::DiscoverySort::Relevance,
             offset,
             100,
         )
@@ -201,6 +203,7 @@ async fn curseforge_discovery_returns_compatible_mods() {
         "sodium",
         "1.21.1",
         ModLoader::Fabric,
+        rmcl::instance::content::provider::DiscoverySort::Relevance,
         0,
         20,
     )

@@ -158,6 +158,7 @@ fn discovery_keybinds(project_page_open: bool) -> &'static [(&'static str, &'sta
             ("Enter", " view"),
             ("v", " versions"),
             ("/", " search"),
+            ("s", " sort"),
             ("i", " import"),
             ("Esc", " close"),
         ]

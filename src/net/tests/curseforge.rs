@@ -5,7 +5,7 @@ use super::*;
 
 #[test]
 fn search_category_ids_match_the_selected_class() {
-    let response: ApiResponse<Vec<SearchCategory>> = serde_json::from_str(r#"{"data":[{"id":6,"slug":"mc-mods","classId":null},{"id":11,"slug":"magic","classId":6},{"id":22,"slug":"magic","classId":4471}]}"#).unwrap();
+    let response: ApiResponse<Vec<SearchCategory>> = serde_json::from_str(r#"{"data":[{"id":6,"slug":"mc-mods","name":"Mods","classId":null},{"id":11,"slug":"magic","name":"Magic","classId":6},{"id":22,"slug":"magic","name":"Magic","classId":4471}]}"#).unwrap();
     assert_eq!(category_id(&response.data, 6, "magic"), Some(11));
     assert_eq!(category_id(&response.data, 4471, "magic"), Some(22));
     assert_eq!(category_id(&response.data, 12, "magic"), None);

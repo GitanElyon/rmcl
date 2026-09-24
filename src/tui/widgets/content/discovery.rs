@@ -283,6 +283,7 @@ pub(crate) enum DiscoveryTarget {
 #[allow(clippy::too_many_arguments)]
 async fn search_provider(
     provider: Option<&dyn crate::instance::content::provider::ContentProvider>,
+    client: &crate::net::HttpClient,
     enabled: bool,
     target: &DiscoveryTarget,
     query: &str,
@@ -292,6 +293,11 @@ async fn search_provider(
     limit: usize,
 ) -> Option<Result<DiscoveryResults, crate::net::NetError>> {
     let provider = provider.filter(|_| enabled)?;
+    if provider.id() == "curseforge"
+        && let Err(error) = crate::net::curseforge::ensure_discovery_categories(client).await
+    {
+        tracing::warn!("CurseForge categories unavailable: {error}");
+    }
     let (game_versions, excluded_versions) = match (&filters.game_version, target) {
         (GameVersionFilter::Current, DiscoveryTarget::Content(content)) => {
             (vec![content.instance.game_version.clone()], Vec::new())
@@ -416,6 +422,7 @@ pub(crate) fn spawn_provider_search(
             crate::instance::content::provider::ProviderRegistry::configured(client.clone());
         let modrinth_search = search_provider(
             registry.get("modrinth"),
+            &client,
             crate::config::SETTINGS
                 .read()
                 .content
@@ -429,6 +436,7 @@ pub(crate) fn spawn_provider_search(
         );
         let curseforge_search = search_provider(
             registry.get("curseforge"),
+            &client,
             crate::config::SETTINGS
                 .read()
                 .content
@@ -1020,128 +1028,10 @@ pub fn discovery_categories(
     }
 }
 
-// Category slugs and names from CurseForge's Minecraft /v1/categories endpoint (gameId 432).
-fn curseforge_categories(
-    kind: ContentKind,
-    modpacks: bool,
-) -> &'static [(&'static str, &'static str)] {
-    if modpacks {
-        return &[
-            ("adventure-and-rpg", "Adventure and RPG"),
-            ("combat-pvp", "Combat / PvP"),
-            ("expert", "Expert"),
-            ("exploration", "Exploration"),
-            ("extra-large", "Extra Large"),
-            ("ftb-official-pack", "FTB Official Pack"),
-            ("hardcore", "Hardcore"),
-            ("horror", "Horror"),
-            ("magic", "Magic"),
-            ("map-based", "Map Based"),
-            ("mini-game", "Mini Game"),
-            ("multiplayer", "Multiplayer"),
-            ("quests", "Quests"),
-            ("rlcraft", "RLCraft"),
-            ("sci-fi", "Sci-Fi"),
-            ("skyblock", "Skyblock"),
-            ("small-light", "Small / Light"),
-            ("tech", "Tech"),
-            ("vanilla", "Vanilla+"),
-        ];
-    }
-    match kind {
-        ContentKind::Mod => &[
-            ("addons-buildcraft", "Buildcraft"),
-            ("addons-forestry", "Forestry"),
-            ("addons-industrialcraft", "Industrial Craft"),
-            ("addons-thermalexpansion", "Thermal Expansion"),
-            ("addons-thaumcraft", "Thaumcraft"),
-            ("addons-tinkers-construct", "Tinker's Construct"),
-            ("adventure-rpg", "Adventure and RPG"),
-            ("applied-energistics-2", "Applied Energistics 2"),
-            ("armor-weapons-tools", "Armor, Tools, and Weapons"),
-            ("blood-magic", "Blood Magic"),
-            ("bug-fixes", "Bug Fixes"),
-            ("cosmetic", "Cosmetic"),
-            ("crafttweaker", "CraftTweaker"),
-            ("create", "Create"),
-            ("creativemode", "CreativeMode"),
-            ("education", "Education"),
-            ("farmers-delight", "Farmer's Delight"),
-            ("galacticraft", "Galacticraft"),
-            ("horror", "Horror"),
-            ("integrated-dynamics", "Integrated Dynamics"),
-            ("kubejs", "KubeJS"),
-            ("library-api", "API and Library"),
-            ("magic", "Magic"),
-            ("map-information", "Map and Information"),
-            ("mc-addons", "Addons"),
-            ("mc-creator", "MCreator"),
-            ("mc-food", "Food"),
-            ("mc-miscellaneous", "Miscellaneous"),
-            ("modjam-2025", "ModJam 2025"),
-            ("performance", "Performance"),
-            ("redstone", "Redstone"),
-            ("refined-storage", "Refined Storage"),
-            ("server-utility", "Server Utility"),
-            ("skyblock", "Skyblock"),
-            ("storage", "Storage"),
-            ("technology", "Technology"),
-            ("technology-automation", "Automation"),
-            ("technology-energy", "Energy"),
-            ("technology-farming", "Farming"),
-            ("technology-genetics", "Genetics"),
-            (
-                "technology-item-fluid-energy-transport",
-                "Energy, Fluid, and Item Transport",
-            ),
-            ("technology-player-transport", "Player Transport"),
-            ("technology-processing", "Processing"),
-            ("twitch-integration", "Twitch Integration"),
-            ("twilight-forest", "Twilight Forest"),
-            ("utility-qol", "Utility & QoL"),
-            ("world-biomes", "Biomes"),
-            ("world-dimensions", "Dimensions"),
-            ("world-gen", "World Gen"),
-            ("world-mobs", "Mobs"),
-            ("world-ores-resources", "Ores and Resources"),
-            ("world-structures", "Structures"),
-        ],
-        ContentKind::ResourcePack => &[
-            ("animated", "Animated"),
-            ("data-packs", "Data Packs"),
-            ("five-twelve-x-and-beyond", "512x and Higher"),
-            ("font-packs", "Font Packs"),
-            ("medieval", "Medieval"),
-            ("miscellaneous", "Miscellaneous"),
-            ("mod-support", "Mod Support"),
-            ("modern", "Modern"),
-            ("modjam-2025", "ModJam 2025"),
-            ("one-twenty-eight-x", "128x"),
-            ("photo-realistic", "Photo Realistic"),
-            ("sixteen-x", "16x"),
-            ("sixty-four-x", "64x"),
-            ("steampunk", "Steampunk"),
-            ("thirty-two-x", "32x"),
-            ("traditional", "Traditional"),
-            ("two-fifty-six-x", "256x"),
-        ],
-        ContentKind::Shader => &[
-            ("fantasy", "Fantasy"),
-            ("realistic", "Realistic"),
-            ("vanilla", "Vanilla"),
-        ],
-        ContentKind::DataPack => &[
-            ("adventure", "Adventure"),
-            ("fantasy", "Fantasy"),
-            ("library", "Library"),
-            ("magic", "Magic"),
-            ("miscellaneous", "Miscellaneous"),
-            ("mod-support", "Mod Support"),
-            ("modjam-2025", "ModJam 2025"),
-            ("tech", "Tech"),
-            ("utility", "Utility"),
-        ],
-    }
+fn curseforge_categories(kind: ContentKind, modpacks: bool) -> Vec<(&'static str, &'static str)> {
+    crate::net::curseforge::discovery_categories(crate::net::curseforge::discovery_class_id(
+        kind, modpacks,
+    ))
 }
 
 fn category_for_provider(
@@ -1154,12 +1044,12 @@ fn category_for_provider(
     let from_categories = if from == "curseforge" {
         curseforge_categories(kind, modpacks)
     } else {
-        discovery_categories(kind, modpacks)
+        discovery_categories(kind, modpacks).to_vec()
     };
     let to_categories = if to == "curseforge" {
         curseforge_categories(kind, modpacks)
     } else {
-        discovery_categories(kind, modpacks)
+        discovery_categories(kind, modpacks).to_vec()
     };
     if from == to {
         return to_categories
@@ -1317,11 +1207,11 @@ impl DiscoveryState {
             + self.filters.categories.len()
     }
 
-    pub(crate) fn categories(&self) -> &'static [(&'static str, &'static str)] {
+    pub(crate) fn categories(&self) -> Vec<(&'static str, &'static str)> {
         if !self.local_mode && self.category_provider == "curseforge" {
             curseforge_categories(self.kind, self.modpacks)
         } else {
-            discovery_categories(self.kind, self.modpacks)
+            discovery_categories(self.kind, self.modpacks).to_vec()
         }
     }
 
@@ -2168,7 +2058,8 @@ impl DiscoveryState {
                 self.filters.environment = self.filters.environment.next()
             }
             index => {
-                let Some((slug, _)) = self.categories().get(index - self.category_start()) else {
+                let categories = self.categories();
+                let Some((slug, _)) = categories.get(index - self.category_start()) else {
                     return;
                 };
                 match self.filters.categories.get(*slug) {

@@ -613,6 +613,7 @@ fn discovery_stream_shows_each_row_after_its_icon_is_ready() {
     state.show_source_rows_progressively();
     let mut alpha = entry("Alpha");
     alpha.provider_icon = true;
+    alpha.icon_bytes = Some(vec![1]);
     stream.upsert(alpha);
     stream.upsert(entry("Beta"));
     state.drain_pending();
@@ -632,11 +633,70 @@ fn discovery_stream_shows_each_row_after_its_icon_is_ready() {
         .push(PendingContentImage {
             file_stem: "alpha".to_owned(),
             path: state.entries[0].path.clone(),
+            source: None,
+            icon_bytes: vec![1],
             icon_lines: crate::instance::content::fallback_icon(),
             image: None,
         });
     state.drain_image_loads(&ratatui_image::picker::Picker::halfblocks());
     assert_eq!(state.filtered_indices().len(), 2);
+}
+
+#[test]
+fn stale_decoded_icon_does_not_replace_a_new_source_or_new_bytes() {
+    let mut state = ContentListState::default();
+    let mut project = entry("Alpha");
+    project.provider_project = Some(crate::instance::ProviderProject {
+        provider: "modrinth".to_owned(),
+        project_id: "123".to_owned(),
+        version_id: String::new(),
+    });
+    project.icon_bytes = Some(vec![1]);
+    state.entries.push(project.clone());
+    let stale = PendingContentImage {
+        file_stem: project.file_stem.clone(),
+        path: project.path.clone(),
+        source: project.provider_project.clone(),
+        icon_bytes: vec![1],
+        icon_lines: crate::instance::content::fallback_icon(),
+        image: None,
+    };
+    state.pending_entry_images.insert(project.file_stem.clone());
+    state.entries[0].provider_project.as_mut().unwrap().provider = "curseforge".to_owned();
+    state.pending_images.lock().unwrap().push(stale);
+    state.drain_image_loads(&ratatui_image::picker::Picker::halfblocks());
+    assert!(state.pending_entry_images.contains(&project.file_stem));
+
+    state.entries[0].provider_project = project.provider_project;
+    state.entries[0].icon_bytes = Some(vec![2]);
+    state
+        .pending_images
+        .lock()
+        .unwrap()
+        .push(PendingContentImage {
+            file_stem: project.file_stem.clone(),
+            path: project.path,
+            source: state.entries[0].provider_project.clone(),
+            icon_bytes: vec![1],
+            icon_lines: crate::instance::content::fallback_icon(),
+            image: None,
+        });
+    state.drain_image_loads(&ratatui_image::picker::Picker::halfblocks());
+    assert!(state.pending_entry_images.contains(&project.file_stem));
+}
+
+#[test]
+fn current_version_keeps_unidentified_installed_files_visible() {
+    let mut state = ContentListState::default();
+    state.entries.push(entry("Local file"));
+    state.set_installed_options(
+        &crate::tui::widgets::content::discovery::DiscoveryFilters::default(),
+        5,
+        false,
+        "1.21.1",
+        false,
+    );
+    assert_eq!(state.filtered_indices(), [0]);
 }
 
 #[test]

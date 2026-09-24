@@ -217,6 +217,8 @@ impl FileSortMetadata {
 struct PendingContentImage {
     file_stem: String,
     path: std::path::PathBuf,
+    source: Option<crate::instance::ProviderProject>,
+    icon_bytes: Vec<u8>,
     icon_lines: Vec<Vec<IconCell>>,
     image: Option<image::DynamicImage>,
 }
@@ -740,6 +742,7 @@ impl ContentListState {
             }
             let file_stem = entry.file_stem.clone();
             let path = entry.path.clone();
+            let source = entry.provider_project.clone();
             let bytes = entry.icon_bytes.clone().unwrap_or_default();
             let rows = entry.icon_lines.as_ref().map_or(3, Vec::len) as u32;
             let columns = square_icon_columns(rows as u16, font_dimensions);
@@ -751,6 +754,8 @@ impl ContentListState {
                         return PendingContentImage {
                             file_stem,
                             path,
+                            source,
+                            icon_bytes: bytes,
                             icon_lines: crate::instance::content::fallback_icon(),
                             image: None,
                         };
@@ -775,6 +780,8 @@ impl ContentListState {
                     PendingContentImage {
                         file_stem,
                         path,
+                        source,
+                        icon_bytes: bytes,
                         icon_lines,
                         image,
                     }
@@ -799,11 +806,12 @@ impl ContentListState {
         };
 
         for result in images {
-            if let Some(entry) = self
-                .entries
-                .iter_mut()
-                .find(|entry| entry.file_stem == result.file_stem && entry.path == result.path)
-            {
+            if let Some(entry) = self.entries.iter_mut().find(|entry| {
+                entry.file_stem == result.file_stem
+                    && entry.path == result.path
+                    && entry.provider_project == result.source
+                    && entry.icon_bytes.as_ref() == Some(&result.icon_bytes)
+            }) {
                 self.pending_entry_images.remove(&result.file_stem);
                 self.filtered_cache.get_mut().take();
                 entry.icon_lines = Some(result.icon_lines);
@@ -1488,7 +1496,7 @@ impl ContentListState {
             return true;
         }
         let Some(installed) = entry.provider_project.as_ref() else {
-            return false;
+            return filters.categories.is_empty() && filters.environment == EnvironmentFilter::Any;
         };
         let project = self
             .project_metadata
@@ -1514,7 +1522,7 @@ impl ContentListState {
                 .version_metadata
                 .get(&(installed.provider.clone(), installed.version_id.clone()))
             else {
-                return false;
+                return true; // No provider version to compare; keep locally installed content visible.
             };
             if let Some(specific) = specific {
                 let includes = specific

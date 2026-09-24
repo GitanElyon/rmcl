@@ -231,6 +231,7 @@ fn filters_match_environment_and_include_exclude_categories() {
 
 #[test]
 fn preferred_provider_categories_only_map_shared_meanings() {
+    crate::net::curseforge::seed_discovery_categories_for_test();
     let map =
         |slug, from, to, kind, modpacks| category_for_provider(slug, from, to, kind, modpacks);
     assert_eq!(
@@ -309,6 +310,7 @@ fn preferred_provider_categories_only_map_shared_meanings() {
 
 #[test]
 fn curseforge_discovery_uses_its_categories_and_supported_sorts() {
+    crate::net::curseforge::seed_discovery_categories_for_test();
     let mut state = DiscoveryState::new(ContentKind::Mod);
     state.category_provider = "curseforge".to_owned();
     assert!(

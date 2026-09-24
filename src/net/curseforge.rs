@@ -71,6 +71,7 @@ struct Category {
 struct SearchCategory {
     id: u32,
     slug: String,
+    name: String,
     class_id: Option<u32>,
 }
 
@@ -90,7 +91,15 @@ async fn search_category_id(
     class_id: u32,
     slug: &str,
 ) -> Result<Option<u32>, NetError> {
-    let categories = SEARCH_CATEGORIES
+    let categories = load_search_categories(client, api_key).await?;
+    Ok(category_id(categories, class_id, slug))
+}
+
+async fn load_search_categories(
+    client: &HttpClient,
+    api_key: &str,
+) -> Result<&'static Vec<SearchCategory>, NetError> {
+    SEARCH_CATEGORIES
         .get_or_try_init(|| async {
             let response: ApiResponse<Vec<SearchCategory>> = get(
                 client,
@@ -98,10 +107,59 @@ async fn search_category_id(
                 &format!("{API_BASE}/categories?gameId={MINECRAFT_GAME_ID}"),
             )
             .await?;
+            crate::feedback::request_redraw();
             Ok::<_, NetError>(response.data)
         })
-        .await?;
-    Ok(category_id(categories, class_id, slug))
+        .await
+}
+
+pub(crate) async fn ensure_discovery_categories(client: &HttpClient) -> Result<(), NetError> {
+    if let Some(api_key) = api_key() {
+        load_search_categories(client, api_key).await?;
+    }
+    Ok(())
+}
+
+pub(crate) fn discovery_categories(class_id: u32) -> Vec<(&'static str, &'static str)> {
+    let mut categories = SEARCH_CATEGORIES
+        .get()
+        .into_iter()
+        .flatten()
+        .filter(|category| category.class_id == Some(class_id))
+        .map(|category| (category.slug.as_str(), category.name.as_str()))
+        .collect::<Vec<_>>();
+    categories.sort_by(|a, b| a.1.cmp(b.1));
+    categories
+}
+
+#[cfg(test)]
+pub(crate) fn seed_discovery_categories_for_test() {
+    let categories = [
+        (MODS_CLASS_ID, "library-api", "API and Library"),
+        (MODS_CLASS_ID, "performance", "Performance"),
+        (MODS_CLASS_ID, "magic", "Magic"),
+        (MODS_CLASS_ID, "create", "Create"),
+        (MODPACKS_CLASS_ID, "tech", "Tech"),
+        (DATA_PACKS_CLASS_ID, "magic", "Magic"),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(id, (class_id, slug, name))| SearchCategory {
+        id: id as u32,
+        class_id: Some(class_id),
+        slug: slug.to_owned(),
+        name: name.to_owned(),
+    })
+    .collect();
+    let _ = SEARCH_CATEGORIES.set(categories);
+}
+
+pub(crate) fn discovery_class_id(kind: ContentKind, modpacks: bool) -> u32 {
+    if modpacks {
+        MODPACKS_CLASS_ID
+    } else {
+        class_id(kind)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,6 +339,9 @@ async fn search(
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, NetError> {
+    if let Err(error) = load_search_categories(client, api_key).await {
+        tracing::warn!("CurseForge categories unavailable: {error}");
+    }
     let loader = loader.and_then(loader_type);
     // Multiple selected categories use OR; leave them local until categoryIds semantics are confirmed.
     let category = if let [slug] = included_categories {

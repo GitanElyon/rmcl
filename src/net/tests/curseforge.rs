@@ -88,6 +88,7 @@ fn discovery_sort_maps_to_curseforge_fields() {
     assert_eq!(curseforge_sort_field(DiscoverySort::Relevance, "sodium"), 2);
     assert_eq!(curseforge_sort_field(DiscoverySort::Relevance, ""), 6);
     assert_eq!(curseforge_sort_field(DiscoverySort::Downloads, ""), 6);
+    assert_eq!(curseforge_sort_field(DiscoverySort::Popular, ""), 2);
     assert_eq!(curseforge_sort_field(DiscoverySort::Updated, ""), 3);
     assert_eq!(curseforge_sort_field(DiscoverySort::Newest, ""), 3);
 }

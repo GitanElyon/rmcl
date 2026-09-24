@@ -138,6 +138,9 @@ struct PendingProviderIcon {
     project_id: String,
     bytes: Vec<u8>,
     description: String,
+    project: crate::net::modrinth::ProjectInfo,
+    version_id: String,
+    version: Option<crate::net::modrinth::VersionInfo>,
 }
 
 struct DisplayMetadata {
@@ -183,7 +186,15 @@ pub struct ContentListState {
     pending_entry_images: HashSet<String>,
     pending_images: Arc<Mutex<Vec<PendingContentImage>>>,
     pending_provider_icons: Arc<Mutex<Vec<PendingProviderIcon>>>,
-    requested_provider_icons: HashSet<(String, String)>,
+    project_metadata: HashMap<(String, String), crate::net::modrinth::ProjectInfo>,
+    version_metadata: HashMap<(String, String), crate::net::modrinth::VersionInfo>,
+    requested_provider_icons: HashSet<(String, String, String)>,
+    pub local_panel_open: bool,
+    pub local_ranking_index: usize,
+    pub local_sort_index: usize,
+    pub local_sort_descending: bool,
+    local_filters: crate::tui::widgets::content::discovery::DiscoveryFilters,
+    local_game_version: String,
     provider_icon_meta_dir: Option<std::path::PathBuf>,
     provider_icon_client: Option<crate::net::HttpClient>,
     images_dirty: bool,
@@ -225,7 +236,18 @@ impl Default for ContentListState {
             pending_entry_images: HashSet::new(),
             pending_images: Arc::new(Mutex::new(Vec::new())),
             pending_provider_icons: Arc::new(Mutex::new(Vec::new())),
+            project_metadata: HashMap::new(),
+            version_metadata: HashMap::new(),
             requested_provider_icons: HashSet::new(),
+            local_panel_open: false,
+            local_sort_index: 0,
+            local_ranking_index: 0,
+            local_sort_descending: false,
+            local_filters: crate::tui::widgets::content::discovery::DiscoveryFilters {
+                game_version: crate::tui::widgets::content::discovery::GameVersionFilter::Any,
+                ..Default::default()
+            },
+            local_game_version: String::new(),
             provider_icon_meta_dir: None,
             provider_icon_client: None,
             images_dirty: true,
@@ -300,8 +322,11 @@ impl ContentListState {
             };
             if entry.provider_project != project {
                 if let Some(previous) = &entry.provider_project {
-                    self.requested_provider_icons
-                        .remove(&(previous.provider.clone(), previous.project_id.clone()));
+                    self.requested_provider_icons.remove(&(
+                        previous.provider.clone(),
+                        previous.project_id.clone(),
+                        previous.version_id.clone(),
+                    ));
                 }
                 if entry.title_suffix.as_deref() == Some("Update") {
                     entry.title_suffix = None;
@@ -370,6 +395,19 @@ impl ContentListState {
         };
         let mut changed = false;
         for metadata in pending {
+            if let Some(version) = metadata.version {
+                self.version_metadata.insert(
+                    (metadata.provider.clone(), metadata.version_id.clone()),
+                    version,
+                );
+            }
+            if !metadata.project.id.is_empty() {
+                self.project_metadata.insert(
+                    (metadata.provider.clone(), metadata.project_id.clone()),
+                    metadata.project,
+                );
+            }
+            changed = true;
             for entry in &mut self.entries {
                 let matches_project = entry.provider_project.as_ref().is_some_and(|project| {
                     project.provider == metadata.provider
@@ -406,9 +444,20 @@ impl ContentListState {
         let Some(client) = self.provider_icon_client.clone() else {
             return;
         };
-        let projects = self.visible_provider_projects(filtered, viewport_height);
+        let projects = if self.needs_local_metadata() {
+            self.entries
+                .iter()
+                .filter_map(|entry| entry.provider_project.clone())
+                .collect()
+        } else {
+            self.visible_provider_projects(filtered, viewport_height)
+        };
         for project in projects {
-            let key = (project.provider.clone(), project.project_id.clone());
+            let key = (
+                project.provider.clone(),
+                project.project_id.clone(),
+                project.version_id.clone(),
+            );
             if !self.requested_provider_icons.insert(key) {
                 continue;
             }
@@ -416,18 +465,27 @@ impl ContentListState {
             let slots = PROVIDER_ICON_SLOTS.clone();
             let meta_dir = meta_dir.clone();
             let client = client.clone();
+            let refresh_stats = self.needs_local_metadata();
             tokio::spawn(async move {
                 let Ok(_permit) = slots.acquire_owned().await else {
                     return;
                 };
-                match load_provider_metadata(&client, &meta_dir, &project).await {
-                    Ok((bytes, description)) => {
+                match load_provider_metadata(&client, &meta_dir, &project, refresh_stats).await {
+                    Ok((bytes, project_info)) => {
+                        let version = if refresh_stats {
+                            load_installed_version(&client, &meta_dir, &project).await
+                        } else {
+                            None
+                        };
                         if let Ok(mut pending) = pending.lock() {
                             pending.push(PendingProviderIcon {
                                 provider: project.provider,
                                 project_id: project.project_id,
+                                version_id: project.version_id,
+                                version,
                                 bytes,
-                                description,
+                                description: project_info.description.clone(),
+                                project: project_info,
                             });
                             crate::feedback::request_redraw();
                         }
@@ -1089,7 +1147,8 @@ impl ContentListState {
     }
 
     pub fn filtered_indices(&self) -> Vec<usize> {
-        self.entries
+        let mut indices: Vec<_> = self
+            .entries
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
@@ -1097,9 +1156,180 @@ impl ContentListState {
                     && (!self.filter_search
                         || self.search.matches(&entry.name)
                         || self.search.matches(&entry.description))
+                    && self.matches_installed_filters(entry)
             })
             .map(|(i, _)| i)
-            .collect()
+            .collect();
+        if self.local_sort_index != 0 || self.local_ranking_index != 0 {
+            indices.sort_by(|&a, &b| {
+                let left = &self.entries[a];
+                let right = &self.entries[b];
+                let compare = |index, descending| {
+                    let left_key = self.installed_sort_key(left, index);
+                    let right_key = self.installed_sort_key(right, index);
+                    match (left_key, right_key) {
+                        (Some(left), Some(right)) if descending => right.cmp(&left),
+                        (Some(left), Some(right)) => left.cmp(&right),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                };
+                let order = if self.local_sort_index != 0 {
+                    compare(self.local_sort_index, self.local_sort_descending)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+                .then_with(|| compare(self.local_ranking_index, true));
+                order.then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            });
+        }
+        indices
+    }
+
+    fn needs_local_metadata(&self) -> bool {
+        use crate::tui::widgets::content::discovery::{EnvironmentFilter, GameVersionFilter};
+        self.local_panel_open
+            || self.local_ranking_index != 0
+            || !self.local_filters.categories.is_empty()
+            || self.local_filters.environment != EnvironmentFilter::Any
+            || self.local_filters.game_version != GameVersionFilter::Any
+    }
+
+    pub fn set_installed_options(
+        &mut self,
+        filters: &crate::tui::widgets::content::discovery::DiscoveryFilters,
+        ranking_index: usize,
+        sort_index: usize,
+        descending: bool,
+        game_version: &str,
+        panel_open: bool,
+    ) {
+        let selected = self.selected_file_stem();
+        let previously_needed_metadata = self.needs_local_metadata();
+        self.local_filters = filters.clone();
+        self.local_ranking_index = ranking_index;
+        self.local_sort_index = sort_index;
+        self.local_sort_descending = descending;
+        self.local_game_version = game_version.to_owned();
+        if (panel_open && !self.local_panel_open)
+            || (!previously_needed_metadata && self.needs_local_metadata())
+        {
+            self.requested_provider_icons.clear();
+        }
+        self.local_panel_open = panel_open;
+        self.restore_selected_file_stem(selected.as_deref());
+    }
+
+    fn matches_installed_filters(&self, entry: &ContentEntry) -> bool {
+        use crate::tui::widgets::content::discovery::{
+            CategoryFilter, EnvironmentFilter, GameVersionFilter,
+        };
+        let filters = &self.local_filters;
+        let specific = match &filters.game_version {
+            GameVersionFilter::Specific(versions) => Some(versions),
+            _ => None,
+        };
+        if filters.categories.is_empty()
+            && filters.environment == EnvironmentFilter::Any
+            && filters.game_version == GameVersionFilter::Any
+        {
+            return true;
+        }
+        let Some(installed) = entry.provider_project.as_ref() else {
+            return false;
+        };
+        let project = self
+            .project_metadata
+            .get(&(installed.provider.clone(), installed.project_id.clone()));
+        if !filters.categories.is_empty() || filters.environment != EnvironmentFilter::Any {
+            let metadata = project.map(|project| crate::net::modrinth::DiscoveryMetadata {
+                categories: project
+                    .categories
+                    .iter()
+                    .chain(&project.additional_categories)
+                    .cloned()
+                    .collect(),
+                client_side: project.client_side.clone(),
+                server_side: project.server_side.clone(),
+                ..Default::default()
+            });
+            if !filters.matches(metadata.as_ref()) {
+                return false;
+            }
+        }
+        if filters.game_version != GameVersionFilter::Any {
+            let Some(version) = self
+                .version_metadata
+                .get(&(installed.provider.clone(), installed.version_id.clone()))
+            else {
+                return false;
+            };
+            if let Some(specific) = specific {
+                let includes = specific
+                    .iter()
+                    .filter(|(_, mode)| **mode == CategoryFilter::Include)
+                    .map(|(id, _)| id);
+                if includes.clone().count() > 0
+                    && !includes
+                        .into_iter()
+                        .any(|id| version.game_versions.contains(id))
+                {
+                    return false;
+                }
+                if specific.iter().any(|(id, mode)| {
+                    *mode == CategoryFilter::Exclude && version.game_versions.contains(id)
+                }) {
+                    return false;
+                }
+            } else if !version.game_versions.contains(&self.local_game_version) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn installed_sort_key(&self, entry: &ContentEntry, index: usize) -> Option<String> {
+        let project = entry.provider_project.as_ref().and_then(|installed| {
+            self.project_metadata
+                .get(&(installed.provider.clone(), installed.project_id.clone()))
+        });
+        match index {
+            1 => project.map(|project| {
+                let popularity = if entry
+                    .provider_project
+                    .as_ref()
+                    .is_some_and(|source| source.provider == "modrinth")
+                {
+                    project.followers
+                } else {
+                    project.downloads
+                };
+                format!("{popularity:020}")
+            }),
+            2 => project
+                .and_then(|project| {
+                    chrono::DateTime::parse_from_rfc3339(&project.date_created).ok()
+                })
+                .map(|date| format!("{:020}", date.timestamp())),
+            3 => project.map(|project| format!("{:020}", project.downloads)),
+            4 => project
+                .and_then(|project| {
+                    chrono::DateTime::parse_from_rfc3339(&project.date_modified).ok()
+                })
+                .map(|date| format!("{:020}", date.timestamp())),
+            5 => Some(entry.name.to_lowercase()),
+            // ponytail: file metadata is read during a local sort; cache it if large installed lists make this slow.
+            6 => std::fs::metadata(&entry.path)
+                .ok()
+                .map(|metadata| format!("{:020}", metadata.len())),
+            7 => std::fs::metadata(&entry.path)
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|elapsed| format!("{:020}", elapsed.as_secs())),
+            _ => None,
+        }
     }
 
     pub fn set_search_filtering(&mut self, enabled: bool) {
@@ -1156,6 +1386,35 @@ impl ContentListState {
             path: entry.path.clone(),
         })
     }
+}
+
+async fn load_installed_version(
+    client: &crate::net::HttpClient,
+    meta_dir: &Path,
+    installed: &crate::instance::ProviderProject,
+) -> Option<crate::net::modrinth::VersionInfo> {
+    if installed.version_id.is_empty() {
+        return None;
+    }
+    let cache = crate::storage::MetadataPaths::new(meta_dir)
+        .provider_versions(&installed.provider)
+        .join(&installed.project_id)
+        .join(format!("{}-installed.json", installed.version_id));
+    if let Ok(bytes) = tokio::fs::read(&cache).await
+        && let Ok(version) = serde_json::from_slice(&bytes)
+    {
+        return Some(version);
+    }
+    let registry = crate::instance::content::provider::ProviderRegistry::configured(client.clone());
+    let version = registry
+        .get(&installed.provider)?
+        .version(&installed.version_id)
+        .await
+        .ok()?;
+    if let Ok(bytes) = serde_json::to_vec(&version) {
+        let _ = crate::storage::write_atomic(&cache, &bytes);
+    }
+    Some(version)
 }
 
 impl ContentListState {
@@ -1435,7 +1694,8 @@ async fn load_provider_metadata(
     client: &crate::net::HttpClient,
     meta_dir: &Path,
     installed: &crate::instance::ProviderProject,
-) -> Result<(Vec<u8>, String), crate::net::NetError> {
+    refresh_stats: bool,
+) -> Result<(Vec<u8>, crate::net::modrinth::ProjectInfo), crate::net::NetError> {
     let provider_id = &installed.provider;
     let project_id = &installed.project_id;
     let metadata = crate::storage::MetadataPaths::new(meta_dir);
@@ -1458,22 +1718,33 @@ async fn load_provider_metadata(
         .await
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-    let project = match cached_project {
-        Some(project) => project,
-        None => {
-            let project = match provider.project(project_id).await {
-                Ok(project) => project,
-                Err(error) => {
-                    return cached_icon.map(|bytes| (bytes, String::new())).ok_or(error);
+    let refresh =
+        cached_project
+            .as_ref()
+            .is_none_or(|project: &crate::net::modrinth::ProjectInfo| {
+                refresh_stats && project.date_modified.is_empty()
+            });
+    let project = if refresh {
+        match provider.project(project_id).await {
+            Ok(project) => {
+                crate::storage::write_atomic(
+                    &project_path,
+                    &serde_json::to_vec_pretty(&project)
+                        .map_err(|error| crate::net::NetError::Parse(error.to_string()))?,
+                )?;
+                project
+            }
+            Err(error) => match cached_project {
+                Some(project) => project,
+                None => {
+                    return cached_icon
+                        .map(|bytes| (bytes, crate::net::modrinth::ProjectInfo::default()))
+                        .ok_or(error);
                 }
-            };
-            crate::storage::write_atomic(
-                &project_path,
-                &serde_json::to_vec_pretty(&project)
-                    .map_err(|error| crate::net::NetError::Parse(error.to_string()))?,
-            )?;
-            project
+            },
         }
+    } else {
+        cached_project.unwrap_or_default()
     };
     let bytes = match (cached_icon, project.icon_url.as_deref()) {
         (Some(bytes), _) => bytes,
@@ -1493,7 +1764,7 @@ async fn load_provider_metadata(
         },
         (None, None) => Vec::new(),
     };
-    Ok((bytes, project.description))
+    Ok((bytes, project))
 }
 
 pub fn handle_key_no_toggle(key_event: &KeyEvent, state: &mut ContentListState) -> bool {
@@ -1576,6 +1847,9 @@ pub fn render(
     }
 
     let filtered = state.filtered_indices();
+    if state.needs_local_metadata() {
+        state.request_visible_provider_icons(&filtered, area.height);
+    }
 
     if filtered.is_empty() {
         state.list_state.selected = None;

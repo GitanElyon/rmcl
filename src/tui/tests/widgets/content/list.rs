@@ -64,6 +64,169 @@ fn selected_provider_project_tracks_the_filtered_selection() {
 }
 
 #[test]
+fn installed_provider_sorts_keep_unknown_entries_last() {
+    let mut state = ContentListState {
+        entries: vec![entry("Unknown"), entry("Low"), entry("High")],
+        ..Default::default()
+    };
+    for (name, downloads) in [("Low", 10), ("High", 100)] {
+        let project_id = name.to_lowercase();
+        let entry = state
+            .entries
+            .iter_mut()
+            .find(|entry| entry.name == name)
+            .unwrap();
+        entry.provider_project = Some(crate::instance::ProviderProject {
+            provider: "modrinth".to_owned(),
+            project_id: project_id.clone(),
+            version_id: String::new(),
+        });
+        state.project_metadata.insert(
+            ("modrinth".to_owned(), project_id),
+            crate::net::modrinth::ProjectInfo {
+                downloads,
+                ..Default::default()
+            },
+        );
+    }
+    state.local_ranking_index = 3;
+    let names = state
+        .filtered_indices()
+        .into_iter()
+        .map(|index| state.entries[index].name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["High", "Low", "Unknown"]);
+}
+
+#[test]
+fn installed_file_size_sort_changes_direction() {
+    let temp = tempfile::tempdir().unwrap();
+    let small = temp.path().join("small.jar");
+    let large = temp.path().join("large.jar");
+    std::fs::write(&small, b"a").unwrap();
+    std::fs::write(&large, b"longer").unwrap();
+    let mut state = ContentListState {
+        entries: vec![entry("Small"), entry("Large")],
+        local_sort_index: 6,
+        ..Default::default()
+    };
+    state.entries[0].path = small;
+    state.entries[1].path = large;
+    assert_eq!(state.filtered_indices(), [0, 1]);
+    state.local_sort_descending = true;
+    assert_eq!(state.filtered_indices(), [1, 0]);
+}
+
+#[test]
+fn installed_name_fallback_sorts_both_directions() {
+    let mut state = ContentListState {
+        entries: vec![entry("Zebra"), entry("Axiom")],
+        ..Default::default()
+    };
+    state.set_installed_options(
+        &crate::tui::widgets::content::discovery::DiscoveryFilters {
+            game_version: crate::tui::widgets::content::discovery::GameVersionFilter::Any,
+            ..Default::default()
+        },
+        0,
+        5,
+        false,
+        "1.21.1",
+        false,
+    );
+    assert_eq!(state.filtered_indices(), [1, 0]);
+    state.local_sort_descending = true;
+    assert_eq!(state.filtered_indices(), [0, 1]);
+}
+
+#[test]
+fn installed_file_order_breaks_ties_with_project_ranking() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = ContentListState {
+        entries: vec![entry("Low"), entry("High"), entry("Large")],
+        local_sort_index: 6,
+        local_ranking_index: 3,
+        ..Default::default()
+    };
+    for (index, downloads, size) in [(0, 10, 1), (1, 100, 1), (2, 1000, 2)] {
+        let path = temp.path().join(format!("{index}.jar"));
+        std::fs::write(&path, vec![0; size]).unwrap();
+        state.entries[index].path = path;
+        let project_id = index.to_string();
+        state.entries[index].provider_project = Some(crate::instance::ProviderProject {
+            provider: "modrinth".to_owned(),
+            project_id: project_id.clone(),
+            version_id: String::new(),
+        });
+        state.project_metadata.insert(
+            ("modrinth".to_owned(), project_id),
+            crate::net::modrinth::ProjectInfo {
+                downloads,
+                ..Default::default()
+            },
+        );
+    }
+    assert_eq!(state.filtered_indices(), [1, 0, 2]);
+    state.local_sort_descending = true;
+    assert_eq!(state.filtered_indices(), [2, 1, 0]);
+}
+
+#[test]
+fn installed_filters_use_cached_project_and_version_metadata() {
+    use crate::tui::widgets::content::discovery::{
+        CategoryFilter, DiscoveryFilters, GameVersionFilter,
+    };
+
+    let mut state = ContentListState {
+        entries: vec![entry("Unmatched"), entry("Matching")],
+        ..Default::default()
+    };
+    state.entries[1].provider_project = Some(crate::instance::ProviderProject {
+        provider: "modrinth".to_owned(),
+        project_id: "matching".to_owned(),
+        version_id: "version".to_owned(),
+    });
+    state.project_metadata.insert(
+        ("modrinth".to_owned(), "matching".to_owned()),
+        crate::net::modrinth::ProjectInfo {
+            categories: vec!["adventure".to_owned()],
+            ..Default::default()
+        },
+    );
+    state.version_metadata.insert(
+        ("modrinth".to_owned(), "version".to_owned()),
+        crate::net::modrinth::VersionInfo {
+            id: "version".to_owned(),
+            project_id: "matching".to_owned(),
+            name: String::new(),
+            version_number: String::new(),
+            game_versions: vec!["1.21.1".to_owned()],
+            loaders: Vec::new(),
+            version_type: Default::default(),
+            dependencies: Vec::new(),
+            date_published: String::new(),
+            files: Vec::new(),
+        },
+    );
+    let filters = DiscoveryFilters {
+        game_version: GameVersionFilter::Specific(std::collections::BTreeMap::from([(
+            "1.21.1".to_owned(),
+            CategoryFilter::Include,
+        )])),
+        categories: std::collections::BTreeMap::from([(
+            "adventure".to_owned(),
+            CategoryFilter::Include,
+        )]),
+        ..Default::default()
+    };
+    state.set_installed_options(&filters, 0, 0, false, "1.21.1", true);
+    assert_eq!(state.filtered_indices(), [1]);
+    state.local_game_version = "1.20.1".to_owned();
+    state.local_filters.game_version = GameVersionFilter::Current;
+    assert!(state.filtered_indices().is_empty());
+}
+
+#[test]
 fn world_cards_preview_up_to_three_datapacks() {
     let lines = world_descriptions(&WorldDetails {
         game_mode: None,
@@ -717,6 +880,9 @@ fn provider_metadata_fills_a_missing_installed_description() {
             project_id: "shader-project".to_owned(),
             bytes: Vec::new(),
             description: "A cached shader description".to_owned(),
+            project: crate::net::modrinth::ProjectInfo::default(),
+            version_id: "version".to_owned(),
+            version: None,
         });
 
     assert!(state.drain_provider_icons());
@@ -755,6 +921,7 @@ async fn provider_metadata_loads_from_cache_without_network() {
             additional_categories: Vec::new(),
             project_type: "mod".to_owned(),
             loaders: Vec::new(),
+            ..crate::net::modrinth::ProjectInfo::default()
         })
         .unwrap(),
     )
@@ -765,11 +932,15 @@ async fn provider_metadata_loads_from_cache_without_network() {
         project_id: "cached-project".to_owned(),
         version_id: "cached-version".to_owned(),
     };
-    let (bytes, description) =
-        load_provider_metadata(&crate::net::HttpClient::new(), temp.path(), &installed)
-            .await
-            .unwrap();
+    let (bytes, project) = load_provider_metadata(
+        &crate::net::HttpClient::new(),
+        temp.path(),
+        &installed,
+        false,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(bytes, png);
-    assert_eq!(description, "Cached description");
+    assert_eq!(project.description, "Cached description");
 }

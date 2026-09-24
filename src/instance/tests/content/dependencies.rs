@@ -91,6 +91,7 @@ impl ContentProvider for FakeProvider {
         _kind: ContentKind,
         _query: &str,
         _instance: &InstanceConfig,
+        _game_versions: &[String],
         _sort: DiscoverySort,
         _offset: usize,
         _limit: usize,
@@ -101,6 +102,7 @@ impl ContentProvider for FakeProvider {
     async fn search_modpacks(
         &self,
         _query: &str,
+        _game_versions: &[String],
         _sort: DiscoverySort,
         _offset: usize,
         _limit: usize,
@@ -151,6 +153,7 @@ impl ContentProvider for FakeProvider {
                 .cloned()
                 .unwrap_or_else(|| "mod".to_owned()),
             loaders: Vec::new(),
+            ..ProjectInfo::default()
         })
     }
 
@@ -435,6 +438,7 @@ fn legacy_modrinth_datapack_projects_are_classified_by_loader() {
         additional_categories: Vec::new(),
         project_type: "mod".to_owned(),
         loaders: vec!["datapack".to_owned()],
+        ..ProjectInfo::default()
     };
 
     assert_eq!(

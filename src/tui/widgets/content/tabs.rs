@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap},
+    widgets::{Block, Borders, ListItem, Paragraph, Widget, Wrap},
 };
 use throbber_widgets_tui::{Throbber, ThrobberState};
 
@@ -253,6 +253,31 @@ pub fn render(
         Span::raw(" "),
     ];
     content_titles.extend(tab_titles);
+    let active_filter_count = if matches!(mode, ContentMode::Discover | ContentMode::Installed) {
+        match tab {
+            ContentTab::Mods => mods_discovery_state.active_filter_count(),
+            ContentTab::ResourcePacks => resource_packs_discovery_state.active_filter_count(),
+            ContentTab::Shaders => shaders_discovery_state.active_filter_count(),
+            ContentTab::DataPacks => datapacks_discovery_state.active_filter_count(),
+            ContentTab::Worlds if open_world_datapacks.is_some() => {
+                datapacks_discovery_state.active_filter_count()
+            }
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    if active_filter_count > 0 {
+        let label = if active_filter_count == 1 {
+            "1 filter".to_owned()
+        } else {
+            format!("{active_filter_count} filters")
+        };
+        content_titles.extend([
+            Span::raw(" "),
+            crate::tui::widgets::status_badge(label, theme.warning()),
+        ]);
+    }
 
     let mut block = Block::default()
         .title_top(Line::from(content_titles))
@@ -276,6 +301,26 @@ pub fn render(
         ContentTab::ResourcePacks => resource_packs_discovery_state.project_page_open(),
         ContentTab::Shaders => shaders_discovery_state.project_page_open(),
         ContentTab::DataPacks => datapacks_discovery_state.project_page_open(),
+        _ => false,
+    };
+    let discovery_panel_focused = match tab {
+        ContentTab::Mods => mods_discovery_state.sort_panel_focused,
+        ContentTab::ResourcePacks => resource_packs_discovery_state.sort_panel_focused,
+        ContentTab::Shaders => shaders_discovery_state.sort_panel_focused,
+        ContentTab::DataPacks => datapacks_discovery_state.sort_panel_focused,
+        ContentTab::Worlds if open_world_datapacks.is_some() => {
+            datapacks_discovery_state.sort_panel_focused
+        }
+        _ => false,
+    };
+    let discovery_filter_version_picker = match tab {
+        ContentTab::Mods => mods_discovery_state.filter_version_picker_open,
+        ContentTab::ResourcePacks => resource_packs_discovery_state.filter_version_picker_open,
+        ContentTab::Shaders => shaders_discovery_state.filter_version_picker_open,
+        ContentTab::DataPacks => datapacks_discovery_state.filter_version_picker_open,
+        ContentTab::Worlds if open_world_datapacks.is_some() => {
+            datapacks_discovery_state.filter_version_picker_open
+        }
         _ => false,
     };
     let discovery_unavailable = mode == ContentMode::Discover
@@ -319,6 +364,21 @@ pub fn render(
             (ContentMode::Discover, _) if discovery_unavailable => {
                 &[("h/l", " tabs"), ("Tab", " installed")]
             }
+            (_, _) if discovery_filter_version_picker => &[
+                ("j/k", " navigate"),
+                ("/", " search"),
+                ("s", " snapshots"),
+                ("r", " reset"),
+                ("h", " back"),
+                ("Enter", " select"),
+            ],
+            (_, _) if discovery_panel_focused => &[
+                ("j/k", " navigate"),
+                ("Enter", " select"),
+                ("r", " reset"),
+                ("h/l", " tabs"),
+                ("f", " filters"),
+            ],
             (ContentMode::Discover, _) if discovery_page_open => &[
                 ("j/k", " scroll"),
                 ("g/G", " top/bottom"),
@@ -436,9 +496,18 @@ pub fn render(
     };
 
     let mut keybinds = kb.map_or_else(Vec::new, <[_]>::to_vec);
-    if is_focused && mode == ContentMode::Discover && !discovery_page_open && !discovery_unavailable
+    if is_focused
+        && (mode == ContentMode::Installed || (!discovery_page_open && !discovery_unavailable))
+        && (matches!(
+            tab,
+            ContentTab::Mods
+                | ContentTab::ResourcePacks
+                | ContentTab::Shaders
+                | ContentTab::DataPacks
+        ) || tab == ContentTab::Worlds && open_world_datapacks.is_some())
+        && !keybinds.iter().any(|(key, _)| *key == "f")
     {
-        keybinds.push(("s", " sort"));
+        keybinds.push(("f", " filters"));
     }
     if is_focused && mode == ContentMode::Installed && !has_updates {
         keybinds.retain(|(key, _)| *key != "u");
@@ -592,16 +661,16 @@ pub fn render(
                         );
                         world_datapacks_state.watch_dir(content_dir);
                     }
-                    super::list::render(
+                    render_installed_list_panel(
                         frame,
                         content_area,
                         world_datapacks_state,
+                        datapacks_discovery_state,
+                        instance,
                         is_focused,
                         "Loading datapacks...",
                         "No datapacks installed.",
                         picker,
-                        false,
-                        false,
                     );
                     if datapacks_discovery_state.version_popup.is_some() {
                         render_version_popup(
@@ -695,20 +764,65 @@ fn render_downloadable(
             picker,
         );
     } else {
-        super::list::render(
+        render_installed_list_panel(
             frame,
             area,
             state,
+            discovery_state,
+            instance,
             is_focused,
             tab.loading_text,
             tab.empty_text,
             picker,
-            false,
-            false,
         );
         if discovery_state.version_popup.is_some() {
             render_version_popup(frame, area, discovery_state, picker);
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_installed_list_panel(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut super::list::ContentListState,
+    discovery_state: &mut DiscoveryState,
+    instance: &crate::instance::InstanceConfig,
+    is_focused: bool,
+    loading_text: &str,
+    empty_text: &str,
+    picker: &ratatui_image::picker::Picker,
+) {
+    discovery_state.set_local_mode(true);
+    discovery_state.set_filter_loader(instance.loader);
+    state.set_installed_options(
+        &discovery_state.filters,
+        discovery_state.local_ranking_index,
+        discovery_state.local_sort_index,
+        discovery_state.local_sort_descending,
+        &instance.game_version,
+        discovery_state.sort_panel_open,
+    );
+    let areas = discovery_state.sort_panel_open.then(|| {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .split(area)
+    });
+    let results_area = areas.as_ref().map_or(area, |areas| areas[0]);
+    super::list::render(
+        frame,
+        results_area,
+        state,
+        is_focused && !discovery_state.sort_panel_focused,
+        loading_text,
+        empty_text,
+        picker,
+        false,
+        false,
+    );
+    if let Some(areas) = areas {
+        render_sort_panel(frame, areas[1], discovery_state);
     }
 }
 
@@ -721,6 +835,7 @@ fn render_discovery(
     loading_text: &str,
     picker: &ratatui_image::picker::Picker,
 ) {
+    state.set_local_mode(false);
     state.set_viewport_rows(area.height);
     if let Some(message) = state.unavailable_message(instance) {
         frame.render_widget(
@@ -806,8 +921,13 @@ fn render_discovery_body(
     }
 }
 
-fn render_sort_panel(frame: &mut Frame, area: Rect, state: &DiscoveryState) {
+fn render_sort_panel(frame: &mut Frame, area: Rect, state: &mut DiscoveryState) {
     let theme = THEME.as_ref();
+    let background = if state.modpacks {
+        theme.surface()
+    } else {
+        theme.background()
+    };
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_type(BORDER_STYLE.to_border_type())
@@ -815,38 +935,434 @@ fn render_sort_panel(frame: &mut Frame, area: Rect, state: &DiscoveryState) {
             theme.accent()
         } else {
             theme.border()
-        }));
+        }))
+        .style(Style::default().bg(background));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(inner);
-    frame.render_widget(
-        Paragraph::new(" Sort").style(
-            Style::default()
-                .fg(if state.sort_panel_focused {
+    if state.sort_panel_page == super::discovery::DiscoveryPanelPage::Filters {
+        if state.filter_version_picker_open {
+            render_filter_version_picker(frame, inner, state);
+        } else {
+            render_filter_panel(frame, inner, state);
+        }
+        render_discovery_panel_title(frame, area, state);
+        return;
+    }
+    let selected_row = if state.local_mode && state.sort_panel_selected >= 5 {
+        state.sort_panel_selected + 3
+    } else {
+        state.sort_panel_selected + 1
+    };
+    let offset = selected_row.saturating_sub(usize::from(inner.height).saturating_sub(1));
+    let row_count = if state.local_mode { 11 } else { 6 };
+    for row in offset..row_count.min(offset + usize::from(inner.height)) {
+        let rect = Rect {
+            x: inner.x,
+            y: inner.y + (row - offset) as u16,
+            width: inner.width,
+            height: 1,
+        };
+        if row == 0 || (state.local_mode && row == 7) {
+            frame.render_widget(
+                Paragraph::new(if row == 0 {
+                    if state.local_mode {
+                        "  Project ranking"
+                    } else {
+                        "  Sort by"
+                    }
+                } else {
+                    "  File order"
+                })
+                .style(
+                    Style::default()
+                        .fg(theme.text())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                rect,
+            );
+            continue;
+        }
+        if row == 6 {
+            continue;
+        }
+        let index = if state.local_mode && row >= 8 {
+            row - 3
+        } else {
+            row - 1
+        };
+        let label = if index < 5 {
+            crate::instance::content::provider::DiscoverySort::ALL[index].label()
+        } else {
+            ["Name", "File size", "Date modified"][index - 5]
+        };
+        let selected = state.sort_panel_focused && index == state.sort_panel_selected;
+        let active = if state.local_mode {
+            if index < 5 {
+                index == state.local_ranking_index
+            } else {
+                index == state.local_sort_index
+            }
+        } else {
+            crate::instance::content::provider::DiscoverySort::ALL[index] == state.sort
+        };
+        let spans = vec![
+            Span::styled(
+                if selected { "▌ " } else { "  " },
+                Style::default().fg(theme.accent()),
+            ),
+            Span::styled(
+                if active && index >= 5 {
+                    if state.local_sort_descending {
+                        "▼ "
+                    } else {
+                        "▲ "
+                    }
+                } else if active {
+                    "● "
+                } else {
+                    "· "
+                },
+                Style::default().fg(if active {
+                    theme.success()
+                } else {
+                    theme.text_dim()
+                }),
+            ),
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(if active {
+                        theme.text()
+                    } else if selected {
+                        theme.accent()
+                    } else {
+                        theme.text_dim()
+                    })
+                    .add_modifier(if selected || active {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+        ];
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(if selected {
+                theme.stripe()
+            } else {
+                background
+            })),
+            rect,
+        );
+    }
+
+    render_discovery_panel_title(frame, area, state);
+}
+
+fn render_discovery_panel_title(frame: &mut Frame, area: Rect, state: &DiscoveryState) {
+    let theme = THEME.as_ref();
+    let active = |page| {
+        Style::default()
+            .fg(
+                if state.sort_panel_focused && state.sort_panel_page == page {
                     theme.accent()
                 } else {
                     theme.text_dim()
-                })
-                .add_modifier(Modifier::BOLD),
-        ),
-        rows[0],
+                },
+            )
+            .add_modifier(if state.sort_panel_page == page {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            })
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                "Filters",
+                active(super::discovery::DiscoveryPanelPage::Filters),
+            ),
+            Span::styled(" • ", Style::default().fg(theme.text_dim())),
+            Span::styled("Sort", active(super::discovery::DiscoveryPanelPage::Sort)),
+            Span::raw(" "),
+        ])),
+        Rect {
+            x: area.x.saturating_add(1),
+            y: area.y.saturating_sub(1),
+            width: 18.min(area.width.saturating_sub(1)),
+            height: 1,
+        },
     );
+}
 
-    let items = crate::instance::content::provider::DiscoverySort::ALL.map(|sort| {
-        let marker = if sort == state.sort { "●" } else { "○" };
-        ListItem::new(format!(" {marker} {}", sort.label()))
-    });
-    let list = List::new(items).highlight_style(
-        Style::default()
-            .fg(theme.accent())
-            .add_modifier(Modifier::BOLD),
+fn render_filter_panel(frame: &mut Frame, area: Rect, state: &DiscoveryState) {
+    use super::discovery::{CategoryFilter, discovery_categories};
+
+    let theme = THEME.as_ref();
+    let background = if state.modpacks {
+        theme.surface()
+    } else {
+        theme.background()
+    };
+    let heading = |title: &str| {
+        Paragraph::new(format!("  {title}")).style(
+            Style::default()
+                .fg(theme.text())
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    frame.render_widget(heading("Compatibility"), Rect { height: 1, ..area });
+
+    let values = [
+        ("MC version", state.filters.game_version.label()),
+        ("Environment", state.filters.environment.label().to_owned()),
+    ];
+    for (index, (label, value)) in values.into_iter().enumerate() {
+        let selected = state.sort_panel_focused && state.filter_panel_selected == index;
+        let y = area.y.saturating_add(1 + index as u16);
+        let background = if selected { theme.stripe() } else { background };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    if selected { "▌ " } else { "  " },
+                    Style::default().fg(theme.accent()),
+                ),
+                Span::styled(
+                    format!("{label:<18}"),
+                    Style::default().fg(theme.text_dim()),
+                ),
+                Span::styled(
+                    value,
+                    Style::default()
+                        .fg(if selected {
+                            theme.accent()
+                        } else {
+                            theme.text()
+                        })
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            ]))
+            .style(Style::default().bg(background)),
+            Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: 1,
+            },
+        );
+    }
+
+    let category_heading_y = area.y.saturating_add(4);
+    if category_heading_y >= area.bottom() {
+        return;
+    }
+    frame.render_widget(
+        heading("Categories"),
+        Rect {
+            y: category_heading_y,
+            height: 1,
+            ..area
+        },
     );
-    let mut list_state = ListState::default().with_selected(Some(state.sort_panel_selected));
-    StatefulWidget::render(list, rows[1], frame.buffer_mut(), &mut list_state);
+    let categories = discovery_categories(state.kind, state.modpacks);
+    let available = area.bottom().saturating_sub(category_heading_y + 1) as usize;
+    let selected_category = state.filter_panel_selected.saturating_sub(2);
+    let offset = selected_category.saturating_sub(available.saturating_sub(1));
+    for (visible, (slug, label)) in categories.iter().skip(offset).take(available).enumerate() {
+        let index = offset + visible + 2;
+        let selected = state.sort_panel_focused && state.filter_panel_selected == index;
+        let mode = state.filters.categories.get(*slug);
+        let mut spans = vec![Span::styled(
+            if selected { "▌ " } else { "  " },
+            Style::default().fg(theme.accent()),
+        )];
+        let (marker, color) = match mode {
+            Some(CategoryFilter::Include) => ("+ ", theme.success()),
+            Some(CategoryFilter::Exclude) => ("− ", theme.error()),
+            None => ("· ", theme.text_dim()),
+        };
+        spans.extend([
+            Span::styled(
+                marker,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                (*label).to_owned(),
+                Style::default().fg(if mode.is_some() {
+                    theme.text()
+                } else {
+                    theme.text_dim()
+                }),
+            ),
+        ]);
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(if selected {
+                theme.stripe()
+            } else {
+                background
+            })),
+            Rect {
+                x: area.x,
+                y: category_heading_y + 1 + visible as u16,
+                width: area.width,
+                height: 1,
+            },
+        );
+    }
+}
+
+fn render_filter_version_picker(frame: &mut Frame, area: Rect, state: &mut DiscoveryState) {
+    use super::discovery::CategoryFilter;
+
+    state.initialize_filter_version_picker();
+    let theme = THEME.as_ref();
+    let background = if state.modpacks {
+        theme.surface()
+    } else {
+        theme.background()
+    };
+    let heading = state.filter_version_search.title_line().unwrap_or_else(|| {
+        Line::from(Span::styled(
+            "  Minecraft version",
+            Style::default()
+                .fg(theme.text())
+                .add_modifier(Modifier::BOLD),
+        ))
+    });
+    frame.render_widget(Paragraph::new(heading), Rect { height: 1, ..area });
+    let list_area = Rect {
+        y: area.y.saturating_add(1),
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let load = state
+        .filter_game_versions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    match load {
+        crate::tui::widgets::popups::LoadState::Idle
+        | crate::tui::widgets::popups::LoadState::Loading => {
+            frame.render_widget(
+                Paragraph::new("  Loading versions...")
+                    .style(Style::default().fg(theme.text_dim())),
+                list_area,
+            );
+        }
+        crate::tui::widgets::popups::LoadState::Error(error) => {
+            frame.render_widget(
+                Paragraph::new(error)
+                    .style(Style::default().fg(theme.error()))
+                    .wrap(Wrap { trim: true }),
+                list_area,
+            );
+        }
+        crate::tui::widgets::popups::LoadState::Loaded(_) => {
+            let versions = state.visible_filter_game_versions();
+            if versions.is_empty() {
+                frame.render_widget(
+                    Paragraph::new("  No versions found.")
+                        .style(Style::default().fg(theme.text_dim())),
+                    list_area,
+                );
+            } else {
+                let selected_versions = match &state.filters.game_version {
+                    super::discovery::GameVersionFilter::Specific(versions) => Some(versions),
+                    _ => None,
+                };
+                let mut choices = vec![
+                    (
+                        "Current".to_owned(),
+                        None,
+                        state.filters.game_version == super::discovery::GameVersionFilter::Current,
+                        true,
+                    ),
+                    (
+                        "Any".to_owned(),
+                        None,
+                        state.filters.game_version == super::discovery::GameVersionFilter::Any,
+                        true,
+                    ),
+                ];
+                choices.extend(versions.into_iter().map(|version| {
+                    let mode = selected_versions.and_then(|selected| selected.get(&version.id));
+                    (version.id, mode.copied(), false, false)
+                }));
+                let available = usize::from(list_area.height);
+                let selected_row = state.filter_version_picker_index
+                    + usize::from(state.filter_version_picker_index >= 2);
+                let offset = selected_row.saturating_sub(available.saturating_sub(1));
+                for row in offset..(choices.len() + 1).min(offset + available) {
+                    if row == 2 {
+                        continue;
+                    }
+                    let index = row - usize::from(row > 2);
+                    let (label, mode, active, scope) = &choices[index];
+                    let selected = index == state.filter_version_picker_index;
+                    let (marker, marker_color) = if *scope {
+                        (
+                            if *active { "● " } else { "· " },
+                            if *active {
+                                theme.success()
+                            } else {
+                                theme.text_dim()
+                            },
+                        )
+                    } else {
+                        match mode {
+                            Some(CategoryFilter::Include) => ("+ ", theme.success()),
+                            Some(CategoryFilter::Exclude) => ("− ", theme.error()),
+                            None => ("· ", theme.text_dim()),
+                        }
+                    };
+                    let spans = vec![
+                        Span::styled(
+                            if selected { "▌ " } else { "  " },
+                            Style::default().fg(theme.accent()),
+                        ),
+                        Span::styled(
+                            marker,
+                            Style::default()
+                                .fg(marker_color)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            label.clone(),
+                            Style::default()
+                                .fg(if (*scope && *active) || mode.is_some() {
+                                    theme.text()
+                                } else {
+                                    theme.text_dim()
+                                })
+                                .add_modifier(if *scope {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                }),
+                        ),
+                    ];
+                    frame.render_widget(
+                        Paragraph::new(Line::from(spans)).style(Style::default().bg(if selected {
+                            theme.stripe()
+                        } else {
+                            background
+                        })),
+                        Rect {
+                            x: list_area.x,
+                            y: list_area.y.saturating_add((row - offset) as u16),
+                            width: list_area.width,
+                            height: 1,
+                        },
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn render_version_popup(

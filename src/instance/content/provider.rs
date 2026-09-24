@@ -14,22 +14,25 @@ pub enum DiscoverySort {
     #[default]
     Relevance,
     Downloads,
+    Popular,
     Updated,
     Newest,
 }
 
 impl DiscoverySort {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Relevance,
+        Self::Popular,
+        Self::Newest,
         Self::Downloads,
         Self::Updated,
-        Self::Newest,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Relevance => "Best match",
             Self::Downloads => "Most downloaded",
+            Self::Popular => "Popular",
             Self::Updated => "Recently updated",
             Self::Newest => "Newest",
         }
@@ -53,11 +56,13 @@ pub struct ResolvedFile {
 pub trait ContentProvider: Send + Sync {
     fn id(&self) -> &'static str;
 
+    #[allow(clippy::too_many_arguments)]
     async fn search(
         &self,
         kind: ContentKind,
         query: &str,
         instance: &InstanceConfig,
+        game_versions: &[String],
         sort: DiscoverySort,
         offset: usize,
         limit: usize,
@@ -66,6 +71,7 @@ pub trait ContentProvider: Send + Sync {
     async fn search_modpacks(
         &self,
         query: &str,
+        game_versions: &[String],
         sort: DiscoverySort,
         offset: usize,
         limit: usize,
@@ -123,6 +129,7 @@ impl ContentProvider for ModrinthProvider {
         kind: ContentKind,
         query: &str,
         instance: &InstanceConfig,
+        game_versions: &[String],
         sort: DiscoverySort,
         offset: usize,
         limit: usize,
@@ -131,7 +138,7 @@ impl ContentProvider for ModrinthProvider {
             &self.client,
             kind,
             query,
-            &instance.game_version,
+            game_versions,
             instance.loader,
             sort,
             offset,
@@ -143,11 +150,20 @@ impl ContentProvider for ModrinthProvider {
     async fn search_modpacks(
         &self,
         query: &str,
+        game_versions: &[String],
         sort: DiscoverySort,
         offset: usize,
         limit: usize,
     ) -> Result<DiscoveryResults, crate::net::NetError> {
-        crate::net::modrinth::search_modpacks(&self.client, query, sort, offset, limit).await
+        crate::net::modrinth::search_modpacks(
+            &self.client,
+            query,
+            game_versions,
+            sort,
+            offset,
+            limit,
+        )
+        .await
     }
 
     async fn resolve_files(
@@ -267,6 +283,7 @@ impl ContentProvider for CurseForgeProvider {
         kind: ContentKind,
         query: &str,
         instance: &InstanceConfig,
+        game_versions: &[String],
         sort: DiscoverySort,
         offset: usize,
         limit: usize,
@@ -276,7 +293,10 @@ impl ContentProvider for CurseForgeProvider {
             &self.api_key,
             kind,
             query,
-            &instance.game_version,
+            game_versions
+                .first()
+                .map(String::as_str)
+                .unwrap_or_default(),
             instance.loader,
             sort,
             offset,
@@ -288,6 +308,7 @@ impl ContentProvider for CurseForgeProvider {
     async fn search_modpacks(
         &self,
         query: &str,
+        game_versions: &[String],
         sort: DiscoverySort,
         offset: usize,
         limit: usize,
@@ -296,6 +317,10 @@ impl ContentProvider for CurseForgeProvider {
             &self.client,
             &self.api_key,
             query,
+            game_versions
+                .first()
+                .map(String::as_str)
+                .unwrap_or_default(),
             sort,
             offset,
             limit,

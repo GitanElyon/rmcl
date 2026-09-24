@@ -42,6 +42,135 @@ impl ContentMode {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryPanelPage {
+    Sort,
+    #[default]
+    Filters,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum EnvironmentFilter {
+    #[default]
+    Any,
+    Client,
+    Server,
+    Both,
+}
+
+impl EnvironmentFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Any => "Any",
+            Self::Client => "Client",
+            Self::Server => "Server",
+            Self::Both => "Both",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Any => Self::Client,
+            Self::Client => Self::Server,
+            Self::Server => Self::Both,
+            Self::Both => Self::Any,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Any => Self::Both,
+            Self::Client => Self::Any,
+            Self::Server => Self::Client,
+            Self::Both => Self::Server,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CategoryFilter {
+    Include,
+    Exclude,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DiscoveryFilters {
+    pub game_version: GameVersionFilter,
+    pub environment: EnvironmentFilter,
+    pub categories: std::collections::BTreeMap<String, CategoryFilter>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum GameVersionFilter {
+    #[default]
+    Current,
+    Any,
+    Specific(std::collections::BTreeMap<String, CategoryFilter>),
+}
+
+impl GameVersionFilter {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Current => "Current".to_owned(),
+            Self::Any => "Any".to_owned(),
+            Self::Specific(versions) if versions.len() == 1 => versions
+                .first_key_value()
+                .map(|(version, _)| version.clone())
+                .unwrap_or_default(),
+            Self::Specific(versions) => format!("{} versions", versions.len()),
+        }
+    }
+}
+
+impl DiscoveryFilters {
+    pub(crate) fn matches(
+        &self,
+        metadata: Option<&crate::net::modrinth::DiscoveryMetadata>,
+    ) -> bool {
+        let Some(metadata) = metadata else {
+            return self.categories.is_empty() && self.environment == EnvironmentFilter::Any;
+        };
+        let categories = metadata
+            .categories
+            .iter()
+            .map(|category| category.to_ascii_lowercase())
+            .collect::<std::collections::HashSet<_>>();
+        let included = self
+            .categories
+            .iter()
+            .filter(|(_, mode)| **mode == CategoryFilter::Include)
+            .map(|(category, _)| category);
+        let excluded = self
+            .categories
+            .iter()
+            .filter(|(_, mode)| **mode == CategoryFilter::Exclude)
+            .map(|(category, _)| category);
+        let categories_match = included.clone().count() == 0
+            || included
+                .into_iter()
+                .any(|category| categories.contains(category));
+        let categories_excluded = excluded
+            .into_iter()
+            .any(|category| categories.contains(category));
+        let version_excluded = match &self.game_version {
+            GameVersionFilter::Specific(versions) => versions.iter().any(|(version, mode)| {
+                *mode == CategoryFilter::Exclude && metadata.versions.contains(version)
+            }),
+            GameVersionFilter::Current | GameVersionFilter::Any => false,
+        };
+        let supported = |side: &str| matches!(side, "required" | "optional");
+        let client = supported(&metadata.client_side);
+        let server = supported(&metadata.server_side);
+        let environment_match = match self.environment {
+            EnvironmentFilter::Any => true,
+            EnvironmentFilter::Client => client,
+            EnvironmentFilter::Server => server,
+            EnvironmentFilter::Both => client && server,
+        };
+        categories_match && !categories_excluded && !version_excluded && environment_match
+    }
+}
+
 pub struct PendingDiscoveryResult {
     generation: u64,
     offset: usize,
@@ -82,6 +211,7 @@ pub struct DiscoveryRequest {
     pub loaded_icon_stems: std::collections::HashSet<String>,
     pub known_projects: std::collections::HashMap<String, (String, String)>,
     pub sort: crate::instance::content::provider::DiscoverySort,
+    pub filters: DiscoveryFilters,
 }
 
 pub(crate) struct ContentDiscoveryTarget {
@@ -96,24 +226,69 @@ pub(crate) enum DiscoveryTarget {
     Modpacks,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn search_provider(
     provider: Option<&dyn crate::instance::content::provider::ContentProvider>,
     enabled: bool,
     target: &DiscoveryTarget,
     query: &str,
     sort: crate::instance::content::provider::DiscoverySort,
+    filters: &DiscoveryFilters,
     offset: usize,
     limit: usize,
 ) -> Option<Result<DiscoveryResults, crate::net::NetError>> {
     let provider = provider.filter(|_| enabled)?;
-    Some(match target {
+    let (game_versions, excluded_game_versions) = match (&filters.game_version, target) {
+        (GameVersionFilter::Current, DiscoveryTarget::Content(content)) => {
+            (vec![content.instance.game_version.clone()], Vec::new())
+        }
+        (GameVersionFilter::Specific(versions), _) => (
+            versions
+                .iter()
+                .filter(|(_, mode)| **mode == CategoryFilter::Include)
+                .map(|(version, _)| version.clone())
+                .collect(),
+            versions
+                .iter()
+                .filter(|(_, mode)| **mode == CategoryFilter::Exclude)
+                .map(|(version, _)| version.clone())
+                .collect(),
+        ),
+        (GameVersionFilter::Current | GameVersionFilter::Any, _) => (Vec::new(), Vec::new()),
+    };
+    if provider.id() == "curseforge"
+        && (filters.environment != EnvironmentFilter::Any
+            || game_versions.len() > 1
+            || !excluded_game_versions.is_empty())
+    {
+        return None;
+    }
+    let result = match target {
         DiscoveryTarget::Content(content) => {
             provider
-                .search(content.kind, query, &content.instance, sort, offset, limit)
+                .search(
+                    content.kind,
+                    query,
+                    &content.instance,
+                    &game_versions,
+                    sort,
+                    offset,
+                    limit,
+                )
                 .await
         }
-        DiscoveryTarget::Modpacks => provider.search_modpacks(query, sort, offset, limit).await,
-    })
+        DiscoveryTarget::Modpacks => {
+            provider
+                .search_modpacks(query, &game_versions, sort, offset, limit)
+                .await
+        }
+    };
+    Some(result.map(|mut results| {
+        results
+            .projects
+            .retain(|project| filters.matches(results.metadata.get(&project.id)));
+        results
+    }))
 }
 
 pub(crate) fn spawn_provider_search(
@@ -132,6 +307,7 @@ pub(crate) fn spawn_provider_search(
         loaded_icon_stems,
         known_projects,
         sort,
+        filters,
     } = request;
     tokio::spawn(async move {
         let client = crate::net::HttpClient::new();
@@ -147,6 +323,7 @@ pub(crate) fn spawn_provider_search(
                 &target,
                 &query,
                 sort,
+                &filters,
                 offset,
                 limit,
             ),
@@ -159,6 +336,7 @@ pub(crate) fn spawn_provider_search(
                 &target,
                 &query,
                 sort,
+                &filters,
                 offset,
                 limit,
             )
@@ -293,7 +471,7 @@ pub(crate) fn spawn_project_page(request: ProjectPageRequest) {
                             DiscoveryActionResult::ProjectPage {
                                 request_id: request.request_id,
                                 project_id: request.project_id.clone(),
-                                result: Ok(project),
+                                result: Box::new(Ok(project)),
                             },
                         );
                         progress.finish();
@@ -305,7 +483,7 @@ pub(crate) fn spawn_project_page(request: ProjectPageRequest) {
                             DiscoveryActionResult::ProjectPage {
                                 request_id: request.request_id,
                                 project_id: request.project_id,
-                                result: Err(error.to_string()),
+                                result: Box::new(Err(error.to_string())),
                             },
                         );
                         return;
@@ -319,7 +497,7 @@ pub(crate) fn spawn_project_page(request: ProjectPageRequest) {
                         DiscoveryActionResult::ProjectPage {
                             request_id: request.request_id,
                             project_id: request.project_id,
-                            result: Err(error),
+                            result: Box::new(Err(error)),
                         },
                     );
                     return;
@@ -387,6 +565,8 @@ pub struct VersionPopupState {
     pub current_version_id: Option<String>,
     pub minecraft_versions: Vec<String>,
     pub selected_minecraft_version: Option<String>,
+    all_game_versions: bool,
+    game_version_overrides: Vec<String>,
     pub selecting_minecraft_version: bool,
     pub selecting_world: bool,
     pub worlds: ContentListState,
@@ -458,6 +638,8 @@ pub struct VersionsRequest {
     pub project_id: String,
     pub provider: String,
     pub current_version_id: Option<String>,
+    pub all_game_versions: bool,
+    pub game_version_overrides: Vec<String>,
     pub pending: PendingActions,
 }
 
@@ -498,6 +680,7 @@ pub struct DependencyRequest {
     pub request_id: u64,
     pub project_id: String,
     pub root: crate::instance::content::dependencies::InstallRoot,
+    pub game_version: Option<String>,
     pub pending: PendingActions,
 }
 
@@ -512,7 +695,7 @@ pub enum DiscoveryActionResult {
     ProjectPage {
         request_id: u64,
         project_id: String,
-        result: Result<crate::net::modrinth::ProjectInfo, String>,
+        result: Box<Result<crate::net::modrinth::ProjectInfo, String>>,
     },
     ProjectImage {
         request_id: u64,
@@ -549,7 +732,25 @@ pub struct DiscoveryState {
     pub sort: crate::instance::content::provider::DiscoverySort,
     pub sort_panel_open: bool,
     pub sort_panel_focused: bool,
+    pub sort_panel_page: DiscoveryPanelPage,
     pub sort_panel_selected: usize,
+    pub local_mode: bool,
+    pub local_ranking_index: usize,
+    pub local_sort_index: usize,
+    pub local_sort_descending: bool,
+    pub filter_panel_selected: usize,
+    pub filters: DiscoveryFilters,
+    installed_filters: Option<DiscoveryFilters>,
+    discovery_filters: Option<DiscoveryFilters>,
+    pub(crate) filter_version_picker_open: bool,
+    pub(crate) filter_version_picker_index: usize,
+    filter_version_picker_initialized: bool,
+    pub(crate) filter_version_search: crate::tui::widgets::search::SearchState,
+    pub(crate) filter_show_snapshots: bool,
+    pub(crate) filter_game_versions: Arc<
+        Mutex<crate::tui::widgets::popups::LoadState<Vec<crate::instance::loader::GameVersion>>>,
+    >,
+    filter_loader: ModLoader,
     pub total_hits: usize,
     pub error: Option<String>,
     context: Option<String>,
@@ -573,6 +774,78 @@ pub struct DiscoveryState {
     page_retry_attempt: u32,
 }
 
+pub fn discovery_categories(
+    kind: ContentKind,
+    modpacks: bool,
+) -> &'static [(&'static str, &'static str)] {
+    if modpacks {
+        return &[
+            ("adventure", "Adventure"),
+            ("challenging", "Challenging"),
+            ("combat", "Combat"),
+            ("expert", "Expert"),
+            ("kitchen-sink", "Kitchen Sink"),
+            ("lightweight", "Lightweight"),
+            ("magic", "Magic"),
+            ("multiplayer", "Multiplayer"),
+            ("optimization", "Optimization"),
+            ("quests", "Quests"),
+            ("skyblock", "Skyblock"),
+            ("technology", "Technology"),
+        ];
+    }
+    match kind {
+        ContentKind::Mod | ContentKind::DataPack => &[
+            ("adventure", "Adventure"),
+            ("cursed", "Cursed"),
+            ("decoration", "Decoration"),
+            ("economy", "Economy"),
+            ("equipment", "Equipment"),
+            ("food", "Food"),
+            ("game-mechanics", "Game Mechanics"),
+            ("library", "Library"),
+            ("magic", "Magic"),
+            ("management", "Management"),
+            ("minigame", "Minigame"),
+            ("mobs", "Mobs"),
+            ("optimization", "Optimization"),
+            ("social", "Social"),
+            ("storage", "Storage"),
+            ("technology", "Technology"),
+            ("transportation", "Transportation"),
+            ("utility", "Utility"),
+            ("worldgen", "World Generation"),
+        ],
+        ContentKind::ResourcePack => &[
+            ("audio", "Audio"),
+            ("blocks", "Blocks"),
+            ("cursed", "Cursed"),
+            ("decoration", "Decoration"),
+            ("entities", "Entities"),
+            ("environment", "Environment"),
+            ("equipment", "Equipment"),
+            ("fonts", "Fonts"),
+            ("gui", "GUI"),
+            ("items", "Items"),
+            ("models", "Models"),
+            ("realistic", "Realistic"),
+            ("simplistic", "Simplistic"),
+            ("themed", "Themed"),
+            ("tweaks", "Tweaks"),
+            ("utility", "Utility"),
+            ("vanilla-like", "Vanilla-like"),
+        ],
+        ContentKind::Shader => &[
+            ("cartoon", "Cartoon"),
+            ("cursed", "Cursed"),
+            ("fantasy", "Fantasy"),
+            ("realistic", "Realistic"),
+            ("semi-realistic", "Semi-realistic"),
+            ("vanilla-like", "Vanilla-like"),
+        ],
+    }
+}
+
 impl DiscoveryState {
     pub fn new(kind: ContentKind) -> Self {
         Self {
@@ -583,7 +856,25 @@ impl DiscoveryState {
             sort: crate::instance::content::provider::DiscoverySort::default(),
             sort_panel_open: false,
             sort_panel_focused: false,
+            sort_panel_page: DiscoveryPanelPage::default(),
             sort_panel_selected: 0,
+            local_mode: false,
+            local_ranking_index: 0,
+            local_sort_index: 5,
+            local_sort_descending: false,
+            filter_panel_selected: 0,
+            filters: DiscoveryFilters::default(),
+            installed_filters: None,
+            discovery_filters: None,
+            filter_version_picker_open: false,
+            filter_version_picker_index: 0,
+            filter_version_picker_initialized: false,
+            filter_version_search: crate::tui::widgets::search::SearchState::default(),
+            filter_show_snapshots: false,
+            filter_game_versions: Arc::new(Mutex::new(
+                crate::tui::widgets::popups::LoadState::Idle,
+            )),
+            filter_loader: ModLoader::Vanilla,
             total_hits: 0,
             error: None,
             context: None,
@@ -611,6 +902,7 @@ impl DiscoveryState {
     pub fn new_modpacks() -> Self {
         let mut state = Self::new(ContentKind::ResourcePack);
         state.modpacks = true;
+        state.filters.game_version = GameVersionFilter::Any;
         state
     }
 
@@ -620,6 +912,68 @@ impl DiscoveryState {
 
     pub fn unavailable_message(&self, instance: &InstanceConfig) -> Option<&'static str> {
         self.kind.unavailable_message(instance.loader)
+    }
+
+    pub fn active_filter_count(&self) -> usize {
+        let version_count = match &self.filters.game_version {
+            GameVersionFilter::Current if !self.modpacks => 0,
+            GameVersionFilter::Any if self.modpacks => 0,
+            GameVersionFilter::Specific(versions) => versions.len(),
+            _ => 1,
+        };
+        version_count
+            + usize::from(self.filters.environment != EnvironmentFilter::Any)
+            + self.filters.categories.len()
+    }
+
+    pub(crate) fn set_local_mode(&mut self, installed: bool) {
+        if self.local_mode == installed {
+            return;
+        }
+        self.local_mode = installed;
+        if installed {
+            let local = self.installed_filters.take().unwrap_or_default();
+            self.discovery_filters = Some(std::mem::replace(&mut self.filters, local));
+        } else {
+            let discovery = self.discovery_filters.take().unwrap_or_default();
+            self.installed_filters = Some(std::mem::replace(&mut self.filters, discovery));
+        }
+        self.filter_version_picker_initialized = false;
+    }
+
+    fn reset_filters(&mut self) {
+        if self.filters.environment != EnvironmentFilter::Any || !self.filters.categories.is_empty()
+        {
+            self.filters.environment = EnvironmentFilter::Any;
+            self.filters.categories.clear();
+            self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+        }
+    }
+
+    fn reset_game_versions(&mut self) {
+        let default = if self.modpacks {
+            GameVersionFilter::Any
+        } else {
+            GameVersionFilter::Current
+        };
+        if self.filters.game_version != default {
+            self.filters.game_version = default;
+            self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+        }
+    }
+
+    fn reset_sort(&mut self) {
+        if self.local_mode {
+            self.local_ranking_index = 0;
+            self.local_sort_index = 5;
+            self.local_sort_descending = false;
+            return;
+        }
+        let default = crate::instance::content::provider::DiscoverySort::default();
+        if self.sort != default {
+            self.sort = default;
+            self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+        }
     }
 
     pub fn set_unavailable(&mut self, instance: &InstanceConfig) {
@@ -635,7 +989,19 @@ impl DiscoveryState {
     }
 
     pub fn begin_search(&mut self, instance: &InstanceConfig) -> DiscoveryRequest {
+        self.set_filter_loader(instance.loader);
         self.begin_search_context(discovery_context(instance))
+    }
+
+    pub(crate) fn set_filter_loader(&mut self, loader: ModLoader) {
+        if self.filter_loader != loader {
+            *self
+                .filter_game_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                crate::tui::widgets::popups::LoadState::Idle;
+        }
+        self.filter_loader = loader;
     }
 
     pub fn begin_modpack_search(&mut self) -> DiscoveryRequest {
@@ -686,6 +1052,7 @@ impl DiscoveryState {
             loaded_icon_stems,
             known_projects: std::collections::HashMap::new(),
             sort: self.sort,
+            filters: self.filters.clone(),
         }
     }
 
@@ -725,6 +1092,7 @@ impl DiscoveryState {
             loaded_icon_stems,
             known_projects,
             sort: self.sort,
+            filters: self.filters.clone(),
         })
     }
 
@@ -757,7 +1125,24 @@ impl DiscoveryState {
             .get(&entry.file_stem)
             .cloned()
             .unwrap_or_else(|| entry.provider_project.clone().into_iter().collect());
-        self.open_version_popup(&entry.name, sources, installed_path, None)
+        let game_version_overrides = match &self.filters.game_version {
+            GameVersionFilter::Specific(versions) => versions
+                .iter()
+                .filter(|(_, mode)| **mode == CategoryFilter::Include)
+                .map(|(version, _)| version.clone())
+                .collect::<Vec<_>>(),
+            GameVersionFilter::Current | GameVersionFilter::Any => Vec::new(),
+        };
+        self.open_version_popup(
+            &entry.name,
+            sources,
+            installed_path,
+            None,
+            self.modpacks
+                || self.filters.game_version == GameVersionFilter::Any
+                || game_version_overrides.len() > 1,
+            game_version_overrides,
+        )
     }
 
     pub fn begin_installed_versions(
@@ -792,7 +1177,14 @@ impl DiscoveryState {
                 }
             }
         }
-        self.open_version_popup(&entry.name, sources, Some(entry.path.clone()), target_world)
+        self.open_version_popup(
+            &entry.name,
+            sources,
+            Some(entry.path.clone()),
+            target_world,
+            false,
+            Vec::new(),
+        )
     }
 
     pub fn begin_managed_modpack_versions(
@@ -800,7 +1192,8 @@ impl DiscoveryState {
         project_title: &str,
         source: crate::instance::ProviderProject,
     ) -> Option<VersionsRequest> {
-        let request = self.open_version_popup(project_title, vec![source], None, None)?;
+        let request =
+            self.open_version_popup(project_title, vec![source], None, None, true, Vec::new())?;
         self.version_popup.as_mut()?.selecting_minecraft_version = false;
         Some(request)
     }
@@ -811,6 +1204,8 @@ impl DiscoveryState {
         mut sources: Vec<crate::instance::ProviderProject>,
         installed_path: Option<PathBuf>,
         target_world: Option<(String, PathBuf)>,
+        all_game_versions: bool,
+        game_version_overrides: Vec<String>,
     ) -> Option<VersionsRequest> {
         let preferred = crate::config::SETTINGS
             .read()
@@ -833,7 +1228,9 @@ impl DiscoveryState {
             current_version_id: current_version_id.clone(),
             minecraft_versions: Vec::new(),
             selected_minecraft_version: None,
-            selecting_minecraft_version: self.modpacks,
+            all_game_versions,
+            game_version_overrides: game_version_overrides.clone(),
+            selecting_minecraft_version: all_game_versions,
             selecting_world: false,
             worlds: ContentListState::default(),
             target_world,
@@ -851,12 +1248,13 @@ impl DiscoveryState {
             project_id: source.project_id,
             provider: source.provider,
             current_version_id,
+            all_game_versions,
+            game_version_overrides,
             pending: self.pending_actions.clone(),
         })
     }
 
     pub fn switch_version_source(&mut self) -> Option<VersionsRequest> {
-        let selecting_minecraft_version = self.modpacks;
         let popup = self.version_popup.as_mut()?;
         if popup.loading || popup.installing || popup.selecting_world || popup.sources.len() < 2 {
             return None;
@@ -869,7 +1267,7 @@ impl DiscoveryState {
         popup.provider.clone_from(&source.provider);
         popup.minecraft_versions.clear();
         popup.selected_minecraft_version = None;
-        popup.selecting_minecraft_version = selecting_minecraft_version;
+        popup.selecting_minecraft_version = popup.all_game_versions;
         popup.selecting_world = false;
         popup.worlds = ContentListState::default();
         if self.kind != ContentKind::DataPack || popup.current_version_id.is_none() {
@@ -889,6 +1287,8 @@ impl DiscoveryState {
             project_id: source.project_id,
             provider: source.provider,
             current_version_id: popup.current_version_id.clone(),
+            all_game_versions: popup.all_game_versions,
+            game_version_overrides: popup.game_version_overrides.clone(),
             pending: self.pending_actions.clone(),
         })
     }
@@ -1185,6 +1585,10 @@ impl DiscoveryState {
                 target_world: popup.target_world.as_ref().map(|(_, path)| path.clone()),
                 force_reinstall,
             },
+            game_version: popup
+                .selected_minecraft_version
+                .clone()
+                .or_else(|| popup.game_version_overrides.first().cloned()),
             pending: self.pending_actions.clone(),
         })
     }
@@ -1212,11 +1616,192 @@ impl DiscoveryState {
     }
 
     fn apply_selected_sort(&mut self) {
+        if self.local_mode {
+            if self.sort_panel_selected >= 5 {
+                if self.local_sort_index == self.sort_panel_selected {
+                    if self.local_sort_descending {
+                        self.local_sort_index = 5;
+                        self.local_sort_descending = false;
+                    } else {
+                        self.local_sort_descending = true;
+                    }
+                } else {
+                    self.local_sort_index = self.sort_panel_selected;
+                    self.local_sort_descending = false;
+                }
+                return;
+            }
+            self.local_ranking_index = self.sort_panel_selected;
+            return;
+        }
         let sort = crate::instance::content::provider::DiscoverySort::ALL[self.sort_panel_selected];
         if self.sort != sort {
             self.sort = sort;
             self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
         }
+    }
+
+    fn apply_selected_filter(&mut self) {
+        match self.filter_panel_selected {
+            0 => {
+                self.open_filter_version_picker();
+                return;
+            }
+            1 => self.filters.environment = self.filters.environment.next(),
+            index => {
+                let Some((slug, _)) = discovery_categories(self.kind, self.modpacks).get(index - 2)
+                else {
+                    return;
+                };
+                match self.filters.categories.get(*slug) {
+                    None => {
+                        self.filters
+                            .categories
+                            .insert((*slug).to_owned(), CategoryFilter::Include);
+                    }
+                    Some(CategoryFilter::Include) => {
+                        self.filters
+                            .categories
+                            .insert((*slug).to_owned(), CategoryFilter::Exclude);
+                    }
+                    Some(CategoryFilter::Exclude) => {
+                        self.filters.categories.remove(*slug);
+                    }
+                }
+            }
+        }
+        self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+    }
+
+    fn cycle_selected_filter(&mut self, forward: bool) {
+        match self.filter_panel_selected {
+            0 => return,
+            1 => {
+                self.filters.environment = if forward {
+                    self.filters.environment.next()
+                } else {
+                    self.filters.environment.previous()
+                };
+            }
+            _ => return,
+        }
+        self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+    }
+
+    fn open_filter_version_picker(&mut self) {
+        self.filter_version_picker_open = true;
+        self.filter_version_picker_index = 0;
+        self.filter_version_picker_initialized = false;
+        self.filter_version_search.deactivate();
+        let mut load = self
+            .filter_game_versions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(
+            *load,
+            crate::tui::widgets::popups::LoadState::Idle
+                | crate::tui::widgets::popups::LoadState::Error(_)
+        ) {
+            *load = crate::tui::widgets::popups::LoadState::Loading;
+            let target = self.filter_game_versions.clone();
+            let loader = self.filter_loader;
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let result =
+                        crate::tui::widgets::popups::version_lists::game_versions(loader).await;
+                    *target
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = match result {
+                        Ok(versions) => crate::tui::widgets::popups::LoadState::Loaded(versions),
+                        Err(error) => crate::tui::widgets::popups::LoadState::Error(error),
+                    };
+                    crate::feedback::request_redraw();
+                });
+            } else {
+                *load = crate::tui::widgets::popups::LoadState::Idle;
+            }
+        }
+    }
+
+    pub(crate) fn visible_filter_game_versions(&self) -> Vec<crate::instance::loader::GameVersion> {
+        match &*self
+            .filter_game_versions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            crate::tui::widgets::popups::LoadState::Loaded(versions) => versions
+                .iter()
+                .filter(|version| self.filter_show_snapshots || version.stable)
+                .filter(|version| self.filter_version_search.matches(&version.id))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub(crate) fn initialize_filter_version_picker(&mut self) {
+        if self.filter_version_picker_initialized {
+            return;
+        }
+        let versions = self.visible_filter_game_versions();
+        if versions.is_empty() {
+            return;
+        }
+        self.filter_version_picker_index = match &self.filters.game_version {
+            GameVersionFilter::Current => 0,
+            GameVersionFilter::Any => 1,
+            GameVersionFilter::Specific(selected) => selected
+                .first_key_value()
+                .and_then(|(selected, _)| {
+                    versions.iter().position(|version| &version.id == selected)
+                })
+                .map(|index| index + 2)
+                .unwrap_or(0),
+        };
+        self.filter_version_picker_initialized = true;
+    }
+
+    fn toggle_filter_game_version(&mut self) {
+        match self.filter_version_picker_index {
+            0 => self.filters.game_version = GameVersionFilter::Current,
+            1 => self.filters.game_version = GameVersionFilter::Any,
+            index => {
+                let Some(version) = self
+                    .visible_filter_game_versions()
+                    .get(index - 2)
+                    .map(|version| version.id.clone())
+                else {
+                    return;
+                };
+                let mut selected = match std::mem::take(&mut self.filters.game_version) {
+                    GameVersionFilter::Specific(versions) => versions,
+                    GameVersionFilter::Current | GameVersionFilter::Any => {
+                        std::collections::BTreeMap::new()
+                    }
+                };
+                match selected.get(&version) {
+                    None => {
+                        selected.insert(version, CategoryFilter::Include);
+                    }
+                    Some(CategoryFilter::Include) => {
+                        selected.insert(version, CategoryFilter::Exclude);
+                    }
+                    Some(CategoryFilter::Exclude) => {
+                        selected.remove(&version);
+                    }
+                }
+                self.filters.game_version = if selected.is_empty() {
+                    if self.modpacks || self.local_mode {
+                        GameVersionFilter::Any
+                    } else {
+                        GameVersionFilter::Current
+                    }
+                } else {
+                    GameVersionFilter::Specific(selected)
+                };
+            }
+        }
+        self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
     }
 
     fn search_changed(&mut self) {
@@ -1346,7 +1931,7 @@ impl DiscoveryState {
                     }) else {
                         continue;
                     };
-                    match result {
+                    match *result {
                         Ok(project) => {
                             page.title.clone_from(&project.title);
                             page.document = Some(crate::tui::widgets::markdown::Document::new(
@@ -1526,6 +2111,63 @@ impl DiscoveryState {
     }
 }
 
+fn handle_filter_version_picker(key_event: &KeyEvent, state: &mut DiscoveryState) {
+    state.initialize_filter_version_picker();
+    if state.filter_version_search.active {
+        match key_event.code {
+            KeyCode::Esc => state.filter_version_search.deactivate(),
+            KeyCode::Backspace => {
+                state.filter_version_search.backspace(key_event.modifiers);
+                state.filter_version_picker_index = 0;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {}
+            KeyCode::Char('k') | KeyCode::Up => {}
+            KeyCode::Enter => state.filter_version_search.deactivate(),
+            KeyCode::Char(character) => {
+                state.filter_version_search.push(character);
+                state.filter_version_picker_index = 0;
+            }
+            _ => {}
+        }
+        if !matches!(
+            key_event.code,
+            KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Down | KeyCode::Up
+        ) {
+            return;
+        }
+    }
+
+    let count = state.visible_filter_game_versions().len() + 2;
+    match key_event.code {
+        KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
+            state.filter_version_picker_open = false;
+        }
+        KeyCode::Char('f') => {
+            state.filter_version_picker_open = false;
+            state.sort_panel_open = false;
+            state.sort_panel_focused = false;
+        }
+        KeyCode::Char('j') | KeyCode::Down if count > 0 => {
+            state.filter_version_picker_index =
+                (state.filter_version_picker_index + 1).min(count - 1);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.filter_version_picker_index = state.filter_version_picker_index.saturating_sub(1);
+        }
+        KeyCode::Char('s') => {
+            state.filter_show_snapshots = !state.filter_show_snapshots;
+            state.filter_version_picker_index = 0;
+        }
+        KeyCode::Char('/') => {
+            state.filter_version_search.activate();
+            state.filter_version_picker_index = 0;
+        }
+        KeyCode::Char('r') => state.reset_game_versions(),
+        KeyCode::Enter => state.toggle_filter_game_version(),
+        _ => {}
+    }
+}
+
 pub fn handle_key(key_event: &KeyEvent, state: &mut DiscoveryState) -> bool {
     if let Some(popup) = state.version_popup.as_mut() {
         if popup.confirming
@@ -1614,26 +2256,79 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut DiscoveryState) -> bool {
     }
     if state.sort_panel_open && !state.search.active {
         if state.sort_panel_focused {
+            if state.filter_version_picker_open {
+                handle_filter_version_picker(key_event, state);
+                return true;
+            }
+            if key_event.code == KeyCode::Tab {
+                state.sort_panel_page = match state.sort_panel_page {
+                    DiscoveryPanelPage::Sort => DiscoveryPanelPage::Filters,
+                    DiscoveryPanelPage::Filters => DiscoveryPanelPage::Sort,
+                };
+                return true;
+            }
+            match (state.sort_panel_page, key_event.code) {
+                (DiscoveryPanelPage::Filters, KeyCode::Char('h')) => {
+                    state.sort_panel_focused = false;
+                    return true;
+                }
+                (DiscoveryPanelPage::Filters, KeyCode::Char('l')) => {
+                    state.sort_panel_page = DiscoveryPanelPage::Sort;
+                    return true;
+                }
+                (DiscoveryPanelPage::Sort, KeyCode::Char('h')) => {
+                    state.sort_panel_page = DiscoveryPanelPage::Filters;
+                    return true;
+                }
+                (DiscoveryPanelPage::Sort, KeyCode::Char('l')) => return true,
+                _ => {}
+            }
+            if state.sort_panel_page == DiscoveryPanelPage::Filters {
+                let count = discovery_categories(state.kind, state.modpacks).len() + 2;
+                match key_event.code {
+                    KeyCode::Char('f') | KeyCode::Esc => {
+                        state.sort_panel_open = false;
+                        state.sort_panel_focused = false;
+                    }
+                    KeyCode::Left => state.cycle_selected_filter(false),
+                    KeyCode::Right => state.cycle_selected_filter(true),
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        state.filter_panel_selected =
+                            (state.filter_panel_selected + 1).min(count - 1);
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        state.filter_panel_selected = state.filter_panel_selected.saturating_sub(1);
+                    }
+                    KeyCode::Char('r') => state.reset_filters(),
+                    KeyCode::Enter | KeyCode::Char(' ') => state.apply_selected_filter(),
+                    _ => {}
+                }
+                return true;
+            }
             match key_event.code {
-                KeyCode::Char('s') | KeyCode::Esc => {
+                KeyCode::Char('f') | KeyCode::Esc => {
                     state.sort_panel_open = false;
                     state.sort_panel_focused = false;
                 }
-                KeyCode::Left | KeyCode::Char('h') => state.sort_panel_focused = false,
                 KeyCode::Char('j') | KeyCode::Down => {
-                    state.sort_panel_selected = (state.sort_panel_selected + 1)
-                        .min(crate::instance::content::provider::DiscoverySort::ALL.len() - 1);
+                    state.sort_panel_selected =
+                        (state.sort_panel_selected + 1).min(if state.local_mode {
+                            7
+                        } else {
+                            crate::instance::content::provider::DiscoverySort::ALL.len() - 1
+                        });
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     state.sort_panel_selected = state.sort_panel_selected.saturating_sub(1);
                 }
+                KeyCode::Char('r') => state.reset_sort(),
                 KeyCode::Enter | KeyCode::Char(' ') => state.apply_selected_sort(),
                 _ => {}
             }
             return true;
         }
         match key_event.code {
-            KeyCode::Char('s') | KeyCode::Esc => {
+            KeyCode::Char('f') | KeyCode::Esc => {
                 state.sort_panel_open = false;
                 return true;
             }
@@ -1643,13 +2338,18 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut DiscoveryState) -> bool {
             }
             _ => {}
         }
-    } else if !state.search.active && key_event.code == KeyCode::Char('s') {
+    } else if !state.search.active && key_event.code == KeyCode::Char('f') {
         state.sort_panel_open = true;
-        state.sort_panel_focused = false;
-        state.sort_panel_selected = crate::instance::content::provider::DiscoverySort::ALL
-            .iter()
-            .position(|sort| *sort == state.sort)
-            .unwrap_or(0);
+        state.sort_panel_focused = true;
+        state.sort_panel_page = DiscoveryPanelPage::Filters;
+        state.sort_panel_selected = if state.local_mode {
+            state.local_sort_index
+        } else {
+            crate::instance::content::provider::DiscoverySort::ALL
+                .iter()
+                .position(|sort| *sort == state.sort)
+                .unwrap_or(0)
+        };
         return true;
     }
     if state.search.active {

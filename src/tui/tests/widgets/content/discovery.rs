@@ -101,17 +101,274 @@ fn sort_panel_keeps_results_navigation_available() {
     ];
     state.list.list_state.selected = Some(0);
 
-    assert!(handle_key(&KeyEvent::from(KeyCode::Char('s')), &mut state));
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('f')), &mut state));
     assert!(state.sort_panel_open);
-    assert!(!state.sort_panel_focused);
+    assert!(state.sort_panel_focused);
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('h')), &mut state));
     assert!(handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state));
     assert_eq!(state.list.list_state.selected, Some(1));
 
     assert!(handle_key(&KeyEvent::from(KeyCode::Char('l')), &mut state));
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('l')), &mut state));
     assert!(handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state));
     assert!(handle_key(&KeyEvent::from(KeyCode::Enter), &mut state));
-    assert_eq!(state.sort, DiscoverySort::Downloads);
+    assert_eq!(state.sort, DiscoverySort::Popular);
     assert!(state.search_due());
+}
+
+#[test]
+fn filter_panel_applies_version_environment_and_category_filters() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    handle_key(&KeyEvent::from(KeyCode::Char('f')), &mut state);
+    assert_eq!(state.sort_panel_page, DiscoveryPanelPage::Filters);
+
+    handle_key(&KeyEvent::from(KeyCode::Right), &mut state);
+    assert_eq!(state.filters.game_version, GameVersionFilter::Current);
+    handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    assert_eq!(state.filters.environment, EnvironmentFilter::Client);
+    handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    assert_eq!(
+        state.filters.categories.get("adventure"),
+        Some(&CategoryFilter::Include)
+    );
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    assert_eq!(
+        state.filters.categories.get("adventure"),
+        Some(&CategoryFilter::Exclude)
+    );
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    assert!(!state.filters.categories.contains_key("adventure"));
+    handle_key(&KeyEvent::from(KeyCode::Char('h')), &mut state);
+    assert!(!state.sort_panel_focused);
+    assert!(state.search_due());
+}
+
+#[test]
+fn filters_match_environment_and_include_exclude_categories() {
+    let filters = DiscoveryFilters {
+        game_version: GameVersionFilter::Specific(std::collections::BTreeMap::from([(
+            "1.20.1".to_owned(),
+            CategoryFilter::Exclude,
+        )])),
+        environment: EnvironmentFilter::Client,
+        categories: std::collections::BTreeMap::from([
+            ("adventure".to_owned(), CategoryFilter::Include),
+            ("cursed".to_owned(), CategoryFilter::Exclude),
+        ]),
+    };
+    let metadata = crate::net::modrinth::DiscoveryMetadata {
+        categories: vec!["adventure".to_owned()],
+        versions: vec!["1.21.1".to_owned()],
+        client_side: "required".to_owned(),
+        server_side: "unsupported".to_owned(),
+    };
+    assert!(filters.matches(Some(&metadata)));
+    let excluded_version = crate::net::modrinth::DiscoveryMetadata {
+        versions: vec!["1.20.1".to_owned()],
+        ..metadata.clone()
+    };
+    assert!(!filters.matches(Some(&excluded_version)));
+    let excluded = crate::net::modrinth::DiscoveryMetadata {
+        categories: vec!["adventure".to_owned(), "cursed".to_owned()],
+        ..metadata
+    };
+    assert!(!filters.matches(Some(&excluded)));
+}
+
+#[test]
+fn any_version_filter_requests_all_project_versions() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.filters.game_version = GameVersionFilter::Any;
+    state
+        .list
+        .entries
+        .push(project_entry(project("project"), None));
+    state.list.list_state.selected = Some(0);
+
+    assert!(state.begin_versions().unwrap().all_game_versions);
+}
+
+#[test]
+fn specific_version_filter_is_kept_for_project_versions() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.filters.game_version = GameVersionFilter::Specific(std::collections::BTreeMap::from([(
+        "1.20.1".to_owned(),
+        CategoryFilter::Include,
+    )]));
+    state
+        .list
+        .entries
+        .push(project_entry(project("project"), None));
+    state.list.list_state.selected = Some(0);
+
+    let request = state.begin_versions().unwrap();
+    assert!(!request.all_game_versions);
+    assert_eq!(request.game_version_overrides, ["1.20.1"]);
+}
+
+#[test]
+fn multiple_version_filter_is_kept_for_project_versions() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.filters.game_version = GameVersionFilter::Specific(
+        [
+            ("1.20.1".to_owned(), CategoryFilter::Include),
+            ("1.21.1".to_owned(), CategoryFilter::Include),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    state
+        .list
+        .entries
+        .push(project_entry(project("project"), None));
+    state.list.list_state.selected = Some(0);
+
+    let request = state.begin_versions().unwrap();
+    assert!(request.all_game_versions);
+    assert_eq!(request.game_version_overrides, ["1.20.1", "1.21.1"]);
+}
+
+#[test]
+fn filter_version_picker_cycles_include_and_exclude_inline() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    handle_key(&KeyEvent::from(KeyCode::Char('f')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    assert!(state.filter_version_picker_open);
+    *state.filter_game_versions.lock().unwrap() =
+        crate::tui::widgets::popups::LoadState::Loaded(vec![
+            crate::instance::loader::GameVersion {
+                id: "1.21.1".to_owned(),
+                stable: true,
+            },
+            crate::instance::loader::GameVersion {
+                id: "1.20.1".to_owned(),
+                stable: true,
+            },
+        ]);
+
+    handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+
+    assert_eq!(
+        state.filters.game_version,
+        GameVersionFilter::Specific(std::collections::BTreeMap::from([
+            ("1.20.1".to_owned(), CategoryFilter::Include),
+            ("1.21.1".to_owned(), CategoryFilter::Exclude),
+        ]))
+    );
+    assert!(state.filter_version_picker_open);
+    assert!(state.search_due());
+}
+
+#[test]
+fn resets_only_the_active_filter_section_or_sort() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.filters.environment = EnvironmentFilter::Client;
+    state
+        .filters
+        .categories
+        .insert("adventure".to_owned(), CategoryFilter::Include);
+    state.filters.game_version = GameVersionFilter::Any;
+    handle_key(&KeyEvent::from(KeyCode::Char('f')), &mut state);
+
+    handle_key(&KeyEvent::from(KeyCode::Char('r')), &mut state);
+
+    assert_eq!(state.filters.game_version, GameVersionFilter::Any);
+    assert_eq!(state.filters.environment, EnvironmentFilter::Any);
+    assert!(state.filters.categories.is_empty());
+    assert!(state.search_due());
+
+    state.sort = crate::instance::content::provider::DiscoverySort::Popular;
+    handle_key(&KeyEvent::from(KeyCode::Char('l')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Char('r')), &mut state);
+    assert_eq!(
+        state.sort,
+        crate::instance::content::provider::DiscoverySort::Relevance
+    );
+    assert_eq!(state.filters.game_version, GameVersionFilter::Any);
+
+    handle_key(&KeyEvent::from(KeyCode::Char('h')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    assert!(state.filter_version_picker_open);
+    handle_key(&KeyEvent::from(KeyCode::Char('r')), &mut state);
+    assert_eq!(state.filters.game_version, GameVersionFilter::Current);
+}
+
+#[test]
+fn modpack_version_reset_restores_any() {
+    let mut state = DiscoveryState::new_modpacks();
+    state.filters.game_version = GameVersionFilter::Current;
+    handle_key(&KeyEvent::from(KeyCode::Char('f')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Char('r')), &mut state);
+    assert_eq!(state.filters.game_version, GameVersionFilter::Any);
+}
+
+#[test]
+fn installed_and_discovery_filters_stay_separate() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.filters.environment = EnvironmentFilter::Client;
+    state.set_local_mode(true);
+    assert_eq!(state.filters.game_version, GameVersionFilter::Current);
+    assert_eq!(state.filters.environment, EnvironmentFilter::Any);
+    state.filters.environment = EnvironmentFilter::Server;
+    state.filters.game_version = GameVersionFilter::Any;
+    state.set_local_mode(false);
+    assert_eq!(state.filters.environment, EnvironmentFilter::Client);
+    assert_eq!(state.filters.game_version, GameVersionFilter::Current);
+    state.set_local_mode(true);
+    assert_eq!(state.filters.environment, EnvironmentFilter::Server);
+    assert_eq!(state.filters.game_version, GameVersionFilter::Any);
+    state.reset_game_versions();
+    assert_eq!(state.filters.game_version, GameVersionFilter::Current);
+}
+
+#[test]
+fn installed_sort_panel_has_local_fields_and_direction() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.set_local_mode(true);
+    assert_eq!(state.local_sort_index, 5);
+    assert!(!state.local_sort_descending);
+    handle_key(&KeyEvent::from(KeyCode::Char('f')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Char('l')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    assert_eq!(state.local_sort_index, 6);
+    assert!(!state.local_sort_descending);
+    handle_key(&KeyEvent::from(KeyCode::Right), &mut state);
+    assert_eq!(state.local_sort_index, 6);
+    assert!(!state.local_sort_descending);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    assert!(state.local_sort_descending);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    assert_eq!(state.local_sort_index, 5);
+    assert!(!state.local_sort_descending);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    assert_eq!(state.local_sort_index, 6);
+    assert!(!state.local_sort_descending);
+    for _ in 0..3 {
+        handle_key(&KeyEvent::from(KeyCode::Char('k')), &mut state);
+    }
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    assert_eq!(state.local_ranking_index, 3);
+    assert_eq!(state.local_sort_index, 6);
+    handle_key(&KeyEvent::from(KeyCode::Char('r')), &mut state);
+    assert_eq!(state.local_sort_index, 5);
+    assert_eq!(state.local_ranking_index, 0);
+    handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    assert_eq!(state.local_sort_index, 5);
+    assert!(state.local_sort_descending);
+    handle_key(&KeyEvent::from(KeyCode::Enter), &mut state);
+    assert_eq!(state.local_sort_index, 5);
+    assert!(!state.local_sort_descending);
 }
 
 #[test]
@@ -150,6 +407,7 @@ fn provider_merge_preserves_ranking_and_appends_fallbacks() {
                 "modrinth",
                 DiscoveryResults {
                     projects: vec![modrinth_first, modrinth_second],
+                    metadata: HashMap::new(),
                     received: 2,
                     total_hits: 2,
                 },
@@ -158,6 +416,7 @@ fn provider_merge_preserves_ranking_and_appends_fallbacks() {
                 "curseforge",
                 DiscoveryResults {
                     projects: vec![curseforge_duplicate, curseforge_fallback],
+                    metadata: HashMap::new(),
                     received: 2,
                     total_hits: 2,
                 },
@@ -191,6 +450,7 @@ fn provider_merge_keeps_same_provider_title_collisions() {
             "modrinth",
             DiscoveryResults {
                 projects: vec![first, second],
+                metadata: HashMap::new(),
                 received: 2,
                 total_hits: 2,
             },
@@ -215,6 +475,7 @@ fn provider_merge_keeps_the_preferred_project_across_pages() {
             "curseforge",
             DiscoveryResults {
                 projects: vec![fallback],
+                metadata: HashMap::new(),
                 received: 1,
                 total_hits: 200,
             },
@@ -236,6 +497,7 @@ fn provider_merge_uses_the_longest_provider_result_range() {
                 "modrinth",
                 DiscoveryResults {
                     projects: vec![],
+                    metadata: HashMap::new(),
                     received: 20,
                     total_hits: 20,
                 },
@@ -244,6 +506,7 @@ fn provider_merge_uses_the_longest_provider_result_range() {
                 "curseforge",
                 DiscoveryResults {
                     projects: vec![],
+                    metadata: HashMap::new(),
                     received: 50,
                     total_hits: 200,
                 },
@@ -624,7 +887,7 @@ fn project_page_loads_for_the_selected_discovery_entry() {
         DiscoveryActionResult::ProjectPage {
             request_id: request.request_id,
             project_id: request.project_id,
-            result: Ok(crate::net::modrinth::ProjectInfo {
+            result: Box::new(Ok(crate::net::modrinth::ProjectInfo {
                 id: "project".to_owned(),
                 slug: "project".to_owned(),
                 title: "Project page".to_owned(),
@@ -635,7 +898,8 @@ fn project_page_loads_for_the_selected_discovery_entry() {
                 additional_categories: Vec::new(),
                 project_type: "mod".to_owned(),
                 loaders: Vec::new(),
-            }),
+                ..crate::net::modrinth::ProjectInfo::default()
+            })),
         },
     );
 

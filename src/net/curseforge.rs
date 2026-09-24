@@ -8,8 +8,8 @@ use serde::Deserialize;
 
 use crate::instance::{ContentKind, ModLoader};
 use crate::net::modrinth::{
-    DependencyType, DiscoveryProject, DiscoveryResults, ProjectInfo, VersionDependency,
-    VersionFile, VersionInfo, VersionType, url_encode,
+    DependencyType, DiscoveryMetadata, DiscoveryProject, DiscoveryResults, ProjectInfo,
+    VersionDependency, VersionFile, VersionInfo, VersionType, url_encode,
 };
 use crate::net::{HttpClient, NetError};
 
@@ -52,6 +52,10 @@ struct Mod {
     summary: String,
     #[serde(default)]
     download_count: u64,
+    #[serde(default)]
+    date_created: String,
+    #[serde(default)]
+    date_modified: String,
     allow_mod_distribution: Option<bool>,
     logo: Option<Logo>,
     #[serde(default)]
@@ -204,6 +208,7 @@ pub async fn search_modpacks(
     client: &HttpClient,
     api_key: &str,
     query: &str,
+    game_version: &str,
     sort: crate::instance::content::provider::DiscoverySort,
     offset: usize,
     limit: usize,
@@ -213,7 +218,7 @@ pub async fn search_modpacks(
         api_key,
         MODPACKS_CLASS_ID,
         query,
-        "",
+        game_version,
         None,
         sort,
         offset,
@@ -271,9 +276,24 @@ async fn search(
             break;
         }
     }
+    let mut metadata = std::collections::HashMap::new();
+    for project in &projects {
+        metadata.insert(
+            project.id.to_string(),
+            DiscoveryMetadata {
+                categories: project
+                    .categories
+                    .iter()
+                    .map(|category| category.slug.clone())
+                    .collect(),
+                ..DiscoveryMetadata::default()
+            },
+        );
+    }
     Ok(DiscoveryResults {
         received,
         total_hits,
+        metadata,
         projects: projects.into_iter().filter_map(discovery_project).collect(),
     })
 }
@@ -286,6 +306,7 @@ fn curseforge_sort_field(
     match sort {
         DiscoverySort::Relevance if !query.is_empty() => 2,
         DiscoverySort::Relevance | DiscoverySort::Downloads => 6,
+        DiscoverySort::Popular => 2,
         DiscoverySort::Updated | DiscoverySort::Newest => 3,
     }
 }
@@ -360,6 +381,12 @@ fn project_info(project: Mod, body: String) -> ProjectInfo {
         }
         .to_owned(),
         loaders: Vec::new(),
+        downloads: project.download_count,
+        followers: 0,
+        date_created: project.date_created,
+        date_modified: project.date_modified,
+        client_side: String::new(),
+        server_side: String::new(),
     }
 }
 

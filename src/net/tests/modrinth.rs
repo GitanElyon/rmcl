@@ -66,6 +66,7 @@ fn only_exclusively_library_categorized_projects_are_cleanup_eligible() {
         additional_categories: Vec::new(),
         project_type: "mod".to_owned(),
         loaders: Vec::new(),
+        ..ProjectInfo::default()
     };
 
     assert!(project(&["library"]).is_library_only());
@@ -75,8 +76,21 @@ fn only_exclusively_library_categorized_projects_are_cleanup_eligible() {
 }
 
 #[test]
+fn project_metadata_caches_sort_and_environment_fields() {
+    let project: ProjectInfo = serde_json::from_str(
+        r#"{"id":"test","slug":"test","title":"Test","downloads":120,"followers":5,"published":"2025-01-01T00:00:00Z","updated":"2025-02-01T00:00:00Z","client_side":"required","server_side":"unsupported"}"#,
+    )
+    .unwrap();
+    assert_eq!(project.downloads, 120);
+    assert_eq!(project.followers, 5);
+    assert_eq!(project.date_created, "2025-01-01T00:00:00Z");
+    assert_eq!(project.date_modified, "2025-02-01T00:00:00Z");
+    assert_eq!(project.client_side, "required");
+}
+
+#[test]
 fn discovery_mod_facets_include_instance_compatibility() {
-    let facets = discovery_facets(ContentKind::Mod, "1.21.1", ModLoader::Fabric);
+    let facets = discovery_facets(ContentKind::Mod, &["1.21.1".to_owned()], ModLoader::Fabric);
     assert_eq!(
         serde_json::from_str::<Vec<Vec<String>>>(&facets).unwrap(),
         vec![
@@ -88,8 +102,29 @@ fn discovery_mod_facets_include_instance_compatibility() {
 }
 
 #[test]
+fn discovery_facets_match_any_selected_minecraft_version() {
+    let facets = discovery_facets(
+        ContentKind::Mod,
+        &["1.21.1".to_owned(), "1.20.1".to_owned()],
+        ModLoader::Fabric,
+    );
+    assert_eq!(
+        serde_json::from_str::<Vec<Vec<String>>>(&facets).unwrap(),
+        vec![
+            vec!["project_type:mod"],
+            vec!["versions:1.21.1", "versions:1.20.1"],
+            vec!["categories:fabric"],
+        ]
+    );
+}
+
+#[test]
 fn discovery_resource_pack_facets_do_not_require_loader() {
-    let facets = discovery_facets(ContentKind::ResourcePack, "1.20.1", ModLoader::Forge);
+    let facets = discovery_facets(
+        ContentKind::ResourcePack,
+        &["1.20.1".to_owned()],
+        ModLoader::Forge,
+    );
     assert_eq!(
         serde_json::from_str::<Vec<Vec<String>>>(&facets).unwrap(),
         vec![vec!["project_type:resourcepack"], vec!["versions:1.20.1"]]
@@ -98,7 +133,11 @@ fn discovery_resource_pack_facets_do_not_require_loader() {
 
 #[test]
 fn discovery_datapack_facets_use_the_datapack_project_type() {
-    let facets = discovery_facets(ContentKind::DataPack, "1.21.1", ModLoader::Fabric);
+    let facets = discovery_facets(
+        ContentKind::DataPack,
+        &["1.21.1".to_owned()],
+        ModLoader::Fabric,
+    );
     assert_eq!(
         serde_json::from_str::<Vec<Vec<String>>>(&facets).unwrap(),
         vec![vec!["all_project_types:datapack"], vec!["versions:1.21.1"]]
@@ -147,6 +186,21 @@ fn compatible_datapack_versions_filter_by_datapack_loader() {
     assert_eq!(
         url,
         "https://example.test/v2/project/terralith/version?include_changelog=false&game_versions=%5B%221.21.1%22%5D&loaders=%5B%22datapack%22%5D"
+    );
+}
+
+#[test]
+fn compatible_versions_can_span_all_minecraft_versions() {
+    let url = content_versions_url(
+        "https://example.test/v2",
+        "fabric-api",
+        ContentKind::Mod,
+        "",
+        ModLoader::Fabric,
+    );
+    assert_eq!(
+        url,
+        "https://example.test/v2/project/fabric-api/version?include_changelog=false&loaders=%5B%22fabric%22%5D"
     );
 }
 
@@ -314,6 +368,7 @@ fn discovery_sort_maps_to_modrinth_indexes() {
         discovery_index(DiscoverySort::Downloads, "sodium"),
         "downloads"
     );
+    assert_eq!(discovery_index(DiscoverySort::Popular, ""), "follows");
     assert_eq!(discovery_index(DiscoverySort::Updated, ""), "updated");
     assert_eq!(discovery_index(DiscoverySort::Newest, ""), "newest");
 }

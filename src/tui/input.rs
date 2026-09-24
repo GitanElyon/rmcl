@@ -417,6 +417,18 @@ impl App {
 
         // content area delegates to whichever tab is active.
         // worlds use the same list navigation without the toggle
+        if self.focused == FocusedArea::Content
+            && self.content_mode == widgets::content::ContentMode::Installed
+            && let Some(state) = self.active_discovery_state_mut()
+            && state.version_popup.is_none()
+            && !state.project_page_open()
+            && (state.sort_panel_open || key_event.code == KeyCode::Char('f'))
+        {
+            state.set_local_mode(true);
+            if widgets::content::discovery::handle_key(&key_event, state) {
+                return Ok(());
+            }
+        }
         let discovery_popup_open = self
             .active_discovery_state()
             .is_some_and(|state| state.version_popup.is_some() || state.project_page_open());
@@ -528,9 +540,10 @@ impl App {
                 self.spawn_active_discovery_version_source();
                 return Ok(());
             }
-            let handled = self
-                .active_discovery_state_mut()
-                .is_some_and(|state| widgets::content::discovery::handle_key(&key_event, state));
+            let handled = self.active_discovery_state_mut().is_some_and(|state| {
+                state.set_local_mode(false);
+                widgets::content::discovery::handle_key(&key_event, state)
+            });
             if handled {
                 if matches!(
                     key_event.code,
@@ -998,6 +1011,11 @@ impl App {
                         };
                         if self.content_mode == widgets::content::ContentMode::Discover {
                             self.open_world_datapacks = None;
+                        }
+                        let installed =
+                            self.content_mode == widgets::content::ContentMode::Installed;
+                        if let Some(state) = self.active_discovery_state_mut() {
+                            state.set_local_mode(installed);
                         }
                         self.ensure_active_discovery_loaded();
                     }
@@ -1690,7 +1708,7 @@ impl App {
     }
 
     fn spawn_active_discovery_dependencies(&mut self) {
-        let Some(instance) = self.instances_state.selected_instance().cloned() else {
+        let Some(mut instance) = self.instances_state.selected_instance().cloned() else {
             return;
         };
         let Some(request) = self
@@ -1703,6 +1721,9 @@ impl App {
             self.instance_manager.instances_dir.join(&instance.name),
         );
         tokio::spawn(async move {
+            if let Some(game_version) = request.game_version {
+                instance.game_version = game_version;
+            }
             let result = async {
                 let manifest = crate::instance::ContentManifest::load(&paths.content_manifest())
                     .map_err(|error| crate::net::NetError::Parse(error.to_string()))?;
@@ -1737,12 +1758,19 @@ impl App {
         kind: crate::instance::ContentKind,
         request: widgets::content::discovery::VersionsRequest,
     ) {
+        let game_version = if !request.game_version_overrides.is_empty() {
+            request.game_version_overrides.join("+")
+        } else if request.all_game_versions {
+            "any".to_owned()
+        } else {
+            instance.game_version.clone()
+        };
         let version_cache = crate::storage::MetadataPaths::new(&self.instance_manager.meta_dir)
             .provider_versions(&request.provider)
             .join(&request.project_id)
             .join(format!(
                 "{}-{}.json",
-                instance.game_version,
+                game_version,
                 instance.loader.to_string().to_lowercase()
             ));
         tokio::spawn(async move {
@@ -1754,12 +1782,25 @@ impl App {
                     .compatible_versions(
                         &request.project_id,
                         kind,
-                        &instance.game_version,
+                        if request.game_version_overrides.len() == 1 {
+                            &request.game_version_overrides[0]
+                        } else if request.all_game_versions {
+                            ""
+                        } else {
+                            &instance.game_version
+                        },
                         instance.loader,
                     )
                     .await
                 {
                     Ok(mut versions) => {
+                        if request.game_version_overrides.len() > 1 {
+                            versions.retain(|version| {
+                                version.game_versions.iter().any(|game_version| {
+                                    request.game_version_overrides.contains(game_version)
+                                })
+                            });
+                        }
                         if let Some(current) = request.current_version_id.as_deref()
                             && !versions.iter().any(|version| version.id == current)
                             && let Ok(version) = provider.version(current).await

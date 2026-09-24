@@ -104,15 +104,227 @@ fn discovery_sort_panel_renders_beside_results() {
 
     let mut state = DiscoveryState::new(ContentKind::Mod);
     state.sort_panel_open = true;
+    state.sort_panel_page = crate::tui::widgets::content::discovery::DiscoveryPanelPage::Sort;
     let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
     let picker = ratatui_image::picker::Picker::halfblocks();
     terminal
-        .draw(|frame| render_discovery_popup(frame, frame.area(), &mut state, &picker))
+        .draw(|frame| {
+            render_discovery_popup(frame, Rect::new(0, 1, 80, 19), &mut state, &picker);
+        })
         .unwrap();
 
     let rendered = format!("{}", terminal.backend());
     assert!(rendered.contains("Sort"));
+    assert!(rendered.contains("Sort by"));
+    assert!(!rendered.contains("Active"));
+    assert!(rendered.contains("●"));
     assert!(rendered.contains("Most downloaded"));
+}
+
+#[test]
+fn installed_sort_panel_shows_local_fields_after_provider_presets() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut state = DiscoveryState::new(crate::instance::ContentKind::Mod);
+    state.set_local_mode(true);
+    state.sort_panel_open = true;
+    state.sort_panel_page = crate::tui::widgets::content::discovery::DiscoveryPanelPage::Sort;
+    state.local_sort_index = 6;
+    state.local_sort_descending = true;
+    let mut terminal = Terminal::new(TestBackend::new(100, 25)).unwrap();
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    terminal
+        .draw(|frame| render_discovery_popup(frame, Rect::new(0, 1, 100, 24), &mut state, &picker))
+        .unwrap();
+    let rendered = format!("{}", terminal.backend());
+    let positions = [
+        "Best match",
+        "Popular",
+        "Newest",
+        "Most downloaded",
+        "Recently updated",
+        "Name",
+        "File size",
+        "Date modified",
+    ]
+    .map(|label| {
+        rendered
+            .find(label)
+            .unwrap_or_else(|| panic!("missing {label}: {rendered}"))
+    });
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(rendered.contains("Project ranking"));
+    assert!(rendered.contains("File order"));
+    assert!(rendered.contains("File size"));
+    assert!(rendered.contains("▼ File size"));
+    assert!(!rendered.contains("Largest"));
+    assert!(!rendered.contains("Oldest"));
+
+    state.sort_panel_selected = 6;
+    state.local_ranking_index = 3;
+    state.local_sort_descending = false;
+    terminal
+        .draw(|frame| render_discovery_popup(frame, Rect::new(0, 1, 100, 24), &mut state, &picker))
+        .unwrap();
+    let rendered = format!("{}", terminal.backend());
+    assert!(rendered.contains("▲ File size"));
+    assert!(!rendered.contains("Smallest"));
+    assert!(rendered.contains("Most downloaded"));
+    assert!(rendered.contains("File order"));
+}
+
+#[test]
+fn discovery_filter_panel_renders_compatibility_and_categories() {
+    use crate::instance::ContentKind;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut state = DiscoveryState::new(ContentKind::Shader);
+    state.sort_panel_open = true;
+    state.sort_panel_page = crate::tui::widgets::content::discovery::DiscoveryPanelPage::Filters;
+    state.filters.categories.insert(
+        "cartoon".to_owned(),
+        crate::tui::widgets::content::discovery::CategoryFilter::Include,
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    terminal
+        .draw(|frame| {
+            render_discovery_popup(frame, Rect::new(0, 1, 100, 29), &mut state, &picker);
+        })
+        .unwrap();
+
+    let rendered = format!("{}", terminal.backend());
+    assert!(rendered.contains("MC version"));
+    assert!(rendered.contains("Categories"));
+    assert!(rendered.contains("Vanilla-like"));
+    assert!(rendered.contains("+ Cartoon"));
+    assert!(!rendered.contains("Include"));
+}
+
+#[test]
+fn discovery_filter_panel_renders_version_picker_inline() {
+    use crate::instance::ContentKind;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.sort_panel_open = true;
+    state.filter_version_picker_open = true;
+    state.filters.game_version =
+        crate::tui::widgets::content::discovery::GameVersionFilter::Specific(
+            std::collections::BTreeMap::from([
+                (
+                    "1.21.1".to_owned(),
+                    crate::tui::widgets::content::discovery::CategoryFilter::Include,
+                ),
+                (
+                    "1.20.1".to_owned(),
+                    crate::tui::widgets::content::discovery::CategoryFilter::Exclude,
+                ),
+            ]),
+        );
+    *state.filter_game_versions.lock().unwrap() =
+        crate::tui::widgets::popups::LoadState::Loaded(vec![
+            crate::instance::loader::GameVersion {
+                id: "1.21.1".to_owned(),
+                stable: true,
+            },
+            crate::instance::loader::GameVersion {
+                id: "1.20.1".to_owned(),
+                stable: true,
+            },
+        ]);
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    terminal
+        .draw(|frame| {
+            render_discovery_popup(frame, Rect::new(0, 1, 100, 29), &mut state, &picker);
+        })
+        .unwrap();
+
+    let rendered = format!("{}", terminal.backend());
+    assert!(rendered.contains("Minecraft version"));
+    assert!(rendered.contains("Current"));
+    assert!(rendered.contains("Any"));
+    assert!(!rendered.contains("Scope"));
+    assert!(rendered.contains("+ 1.21.1"));
+    assert!(rendered.contains("− 1.20.1"));
+    let lines: Vec<_> = rendered.lines().collect();
+    let any = lines
+        .iter()
+        .position(|line| line.contains("· Any"))
+        .unwrap();
+    let first_version = lines
+        .iter()
+        .position(|line| line.contains("+ 1.21.1"))
+        .unwrap();
+    assert_eq!(first_version, any + 2);
+
+    state.filters.game_version =
+        crate::tui::widgets::content::discovery::GameVersionFilter::Current;
+    terminal
+        .draw(|frame| render_discovery_popup(frame, Rect::new(0, 1, 100, 29), &mut state, &picker))
+        .unwrap();
+    assert!(format!("{}", terminal.backend()).contains("● Current"));
+    state.filters.game_version = crate::tui::widgets::content::discovery::GameVersionFilter::Any;
+    terminal
+        .draw(|frame| render_discovery_popup(frame, Rect::new(0, 1, 100, 29), &mut state, &picker))
+        .unwrap();
+    assert!(format!("{}", terminal.backend()).contains("● Any"));
+}
+
+#[test]
+fn modpack_filter_panel_uses_popup_surface() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut state = DiscoveryState::new_modpacks();
+    state.sort_panel_open = true;
+    state.sort_panel_focused = true;
+    state.filter_version_picker_open = true;
+    *state.filter_game_versions.lock().unwrap() =
+        crate::tui::widgets::popups::LoadState::Loaded(vec![
+            crate::instance::loader::GameVersion {
+                id: "1.21.1".to_owned(),
+                stable: true,
+            },
+        ]);
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    terminal
+        .draw(|frame| {
+            render_discovery_popup(frame, Rect::new(0, 1, 100, 29), &mut state, &picker);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let theme = THEME.as_ref();
+    assert_eq!(buffer.cell((80, 2)).unwrap().bg, theme.surface());
+    assert_eq!(buffer.cell((80, 3)).unwrap().bg, theme.stripe());
+    assert_eq!(buffer.cell((80, 15)).unwrap().bg, theme.surface());
+
+    state.filter_version_picker_open = false;
+    terminal
+        .draw(|frame| {
+            render_discovery_popup(frame, Rect::new(0, 1, 100, 29), &mut state, &picker);
+        })
+        .unwrap();
+    assert_eq!(
+        terminal.backend().buffer().cell((80, 2)).unwrap().bg,
+        theme.stripe()
+    );
+    assert_eq!(
+        terminal.backend().buffer().cell((80, 15)).unwrap().bg,
+        theme.surface()
+    );
+
+    state.sort_panel_page = crate::tui::widgets::content::discovery::DiscoveryPanelPage::Sort;
+    terminal
+        .draw(|frame| {
+            render_discovery_popup(frame, Rect::new(0, 1, 100, 29), &mut state, &picker);
+        })
+        .unwrap();
+    assert_eq!(
+        terminal.backend().buffer().cell((80, 15)).unwrap().bg,
+        theme.surface()
+    );
 }
 
 #[test]

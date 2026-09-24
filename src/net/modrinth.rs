@@ -6,7 +6,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, serde::Serialize)]
 pub struct ProjectInfo {
     pub id: String,
     pub slug: String,
@@ -25,6 +25,18 @@ pub struct ProjectInfo {
     pub project_type: String,
     #[serde(default)]
     pub loaders: Vec<String>,
+    #[serde(default)]
+    pub downloads: u64,
+    #[serde(default, alias = "follows")]
+    pub followers: u64,
+    #[serde(default, alias = "published")]
+    pub date_created: String,
+    #[serde(default, alias = "updated")]
+    pub date_modified: String,
+    #[serde(default)]
+    pub client_side: String,
+    #[serde(default)]
+    pub server_side: String,
 }
 
 impl ProjectInfo {
@@ -129,8 +141,17 @@ pub struct DiscoveryProject {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveryResults {
     pub projects: Vec<DiscoveryProject>,
+    pub metadata: HashMap<String, DiscoveryMetadata>,
     pub received: usize,
     pub total_hits: usize,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DiscoveryMetadata {
+    pub categories: Vec<String>,
+    pub versions: Vec<String>,
+    pub client_side: String,
+    pub server_side: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +171,14 @@ struct DiscoverySearchHit {
     downloads: i64,
     #[serde(default)]
     icon_url: Option<String>,
+    #[serde(default)]
+    categories: Vec<String>,
+    #[serde(default)]
+    versions: Vec<String>,
+    #[serde(default)]
+    client_side: String,
+    #[serde(default)]
+    server_side: String,
 }
 
 impl From<DiscoverySearchHit> for DiscoveryProject {
@@ -171,13 +200,13 @@ pub async fn search_discovery(
     client: &crate::net::HttpClient,
     kind: ContentKind,
     query: &str,
-    game_version: &str,
+    game_versions: &[String],
     loader: ModLoader,
     sort: crate::instance::content::provider::DiscoverySort,
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, crate::net::NetError> {
-    let facets = discovery_facets(kind, game_version, loader);
+    let facets = discovery_facets(kind, game_versions, loader);
     let query = query.trim();
     let index = discovery_index(sort, query);
     let url = format!(
@@ -186,45 +215,63 @@ pub async fn search_discovery(
         url_encode(&facets),
     );
     let results: DiscoverySearchResponse = client.get_json(&url).await?;
-    let received = results.hits.len();
-
-    Ok(DiscoveryResults {
-        received,
-        total_hits: results.total_hits.max(0) as usize,
-        projects: results
-            .hits
-            .into_iter()
-            .map(DiscoveryProject::from)
-            .collect(),
-    })
+    Ok(discovery_results(results))
 }
 
 pub async fn search_modpacks(
     client: &crate::net::HttpClient,
     query: &str,
+    game_versions: &[String],
     sort: crate::instance::content::provider::DiscoverySort,
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, crate::net::NetError> {
     let query = query.trim();
     let index = discovery_index(sort, query);
-    let facets = r#"[["project_type:modpack"]]"#;
+    let mut facets = vec![vec!["project_type:modpack".to_owned()]];
+    if !game_versions.is_empty() {
+        facets.push(
+            game_versions
+                .iter()
+                .map(|version| format!("versions:{version}"))
+                .collect(),
+        );
+    }
+    let facets = serde_json::to_string(&facets).unwrap_or_default();
     let url = format!(
         "{API_BASE}/search?query={}&facets={}&index={index}&offset={offset}&limit={limit}",
         url_encode(query),
-        url_encode(facets),
+        url_encode(&facets),
     );
     let results: DiscoverySearchResponse = client.get_json(&url).await?;
+    Ok(discovery_results(results))
+}
+
+fn discovery_results(results: DiscoverySearchResponse) -> DiscoveryResults {
     let received = results.hits.len();
-    Ok(DiscoveryResults {
+    let mut metadata = HashMap::new();
+    let projects = results
+        .hits
+        .into_iter()
+        .map(|hit| {
+            metadata.insert(
+                hit.project_id.clone(),
+                DiscoveryMetadata {
+                    categories: hit.categories.clone(),
+                    versions: hit.versions.clone(),
+                    client_side: hit.client_side.clone(),
+                    server_side: hit.server_side.clone(),
+                },
+            );
+            DiscoveryProject::from(hit)
+        })
+        .collect();
+    DiscoveryResults {
+        projects,
+        metadata,
         received,
         total_hits: results.total_hits.max(0) as usize,
-        projects: results
-            .hits
-            .into_iter()
-            .map(DiscoveryProject::from)
-            .collect(),
-    })
+    }
 }
 
 fn discovery_index(
@@ -235,15 +282,21 @@ fn discovery_index(
     match sort {
         DiscoverySort::Relevance if !query.is_empty() => "relevance",
         DiscoverySort::Relevance | DiscoverySort::Downloads => "downloads",
+        DiscoverySort::Popular => "follows",
         DiscoverySort::Updated => "updated",
         DiscoverySort::Newest => "newest",
     }
 }
 
-fn discovery_facets(kind: ContentKind, game_version: &str, loader: ModLoader) -> String {
+fn discovery_facets(kind: ContentKind, game_versions: &[String], loader: ModLoader) -> String {
     let mut facets = vec![vec![project_type_facet(kind)]];
-    if !game_version.is_empty() {
-        facets.push(vec![format!("versions:{game_version}")]);
+    if !game_versions.is_empty() {
+        facets.push(
+            game_versions
+                .iter()
+                .map(|version| format!("versions:{version}"))
+                .collect(),
+        );
     }
     if kind == ContentKind::Mod
         && let Some(loader) = loader_facet(loader)
@@ -357,13 +410,13 @@ fn content_versions_url(
     game_version: &str,
     loader: ModLoader,
 ) -> String {
-    let mut params = vec![
-        "include_changelog=false".to_owned(),
-        format!(
+    let mut params = vec!["include_changelog=false".to_owned()];
+    if !game_version.is_empty() {
+        params.push(format!(
             "game_versions={}",
             url_encode(&serde_json::to_string(&[game_version]).unwrap_or_default())
-        ),
-    ];
+        ));
+    }
     if kind == ContentKind::Mod
         && let Some(loader) = loader_facet(loader)
     {

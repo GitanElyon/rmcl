@@ -17,10 +17,10 @@ use ratatui::{
 };
 
 use super::{
-    ContentListState, WatcherEventHandling, available_description_width, description_text_width,
-    diff_directory, diff_event_paths, ellipsize, load_provider_metadata, read_dir_stems,
-    right_aligned_footer_spans, square_icon_columns, title_suffix_spans, version_change_spans,
-    watcher_event_handling, world_descriptions, world_game_mode_color,
+    ContentListState, PendingContentImage, WatcherEventHandling, available_description_width,
+    description_text_width, diff_directory, diff_event_paths, ellipsize, load_provider_metadata,
+    read_dir_stems, right_aligned_footer_spans, square_icon_columns, title_suffix_spans,
+    version_change_spans, watcher_event_handling, world_descriptions, world_game_mode_color,
 };
 
 fn entry(name: &str) -> ContentEntry {
@@ -79,6 +79,41 @@ fn installed_file_size_sort_changes_direction() {
     state.entries[1].path = large;
     assert_eq!(state.filtered_indices(), [0, 1]);
     state.local_sort_descending = true;
+    assert_eq!(state.filtered_indices(), [1, 0]);
+    std::fs::write(&state.entries[0].path, b"much longer now").unwrap();
+    assert_eq!(state.filtered_indices(), [1, 0]);
+    state.set_entries(state.entries.clone());
+    assert_eq!(state.filtered_indices(), [0, 1]);
+    state.search.query = "large".to_owned();
+    assert_eq!(state.filtered_indices(), [1]);
+    state.search.query.clear();
+    assert_eq!(state.filtered_indices(), [0, 1]);
+}
+
+#[test]
+fn file_sort_cache_refreshes_when_watcher_replaces_a_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let small = temp.path().join("small.jar");
+    let large = temp.path().join("large.jar");
+    std::fs::write(&small, b"a").unwrap();
+    std::fs::write(&large, b"longer").unwrap();
+    let mut state = ContentListState {
+        entries: vec![entry("Small"), entry("Large")],
+        local_sort_index: 6,
+        ..Default::default()
+    };
+    state.entries[0].path = small.clone();
+    state.entries[1].path = large;
+    assert_eq!(state.filtered_indices(), [0, 1]);
+    std::fs::write(&small, b"much longer now").unwrap();
+    let mut replacement = entry("Small");
+    replacement.path = small;
+    *state.watcher_diff.lock().unwrap() = Some(super::WatcherDiff {
+        toggled: Vec::new(),
+        removed: vec!["small".to_owned()],
+        added: vec![replacement],
+    });
+    state.drain_watcher();
     assert_eq!(state.filtered_indices(), [1, 0]);
 }
 
@@ -460,7 +495,12 @@ fn content_stream_inserts_entries_and_icons_incrementally() {
     assert!(!state.loading);
 
     assert!(stream.send(entry("Alpha")));
-    assert!(stream.send_icon("alpha".to_owned(), PathBuf::from("alpha"), vec![1, 2, 3],));
+    assert!(stream.send_icon(
+        "alpha".to_owned(),
+        PathBuf::from("alpha"),
+        vec![1, 2, 3],
+        None
+    ));
     state.drain_pending();
 
     assert_eq!(
@@ -531,6 +571,145 @@ fn source_refresh_reconciles_without_rebuilding_unchanged_entries() {
     );
     assert_eq!(state.list_state.selected, Some(0));
     assert!(!state.loading);
+}
+
+#[test]
+fn discovery_preview_moves_rows_before_the_final_order_arrives() {
+    let mut state = ContentListState::default();
+    let initial = state.start_source_stream("remote");
+    initial.upsert(entry("Alpha"));
+    initial.upsert(entry("Beta"));
+    state.drain_pending();
+    let refresh = state.refresh_source_stream("remote");
+    refresh.preview(entry("Beta"));
+    refresh.preview(entry("Gamma"));
+    state.drain_pending();
+    let names = |state: &ContentListState| {
+        state
+            .entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&state), ["Beta", "Gamma", "Alpha"]);
+    refresh.upsert(entry("Delta"));
+    refresh.order(vec![
+        "beta".to_owned(),
+        "delta".to_owned(),
+        "gamma".to_owned(),
+    ]);
+    state.drain_pending();
+    assert_eq!(names(&state), ["Beta", "Delta", "Gamma"]);
+    refresh.append_preview();
+    refresh.preview(entry("Epsilon"));
+    state.drain_pending();
+    assert_eq!(names(&state), ["Beta", "Delta", "Gamma", "Epsilon"]);
+}
+
+#[test]
+fn discovery_stream_shows_each_row_after_its_icon_is_ready() {
+    let mut state = ContentListState::default();
+    let stream = state.start_source_stream("discovery");
+    state.show_source_rows_progressively();
+    let mut alpha = entry("Alpha");
+    alpha.provider_icon = true;
+    stream.upsert(alpha);
+    stream.upsert(entry("Beta"));
+    state.drain_pending();
+    assert_eq!(
+        state
+            .filtered_indices()
+            .iter()
+            .map(|&i| state.entries[i].name.as_str())
+            .collect::<Vec<_>>(),
+        ["Beta"]
+    );
+
+    state
+        .pending_images
+        .lock()
+        .unwrap()
+        .push(PendingContentImage {
+            file_stem: "alpha".to_owned(),
+            path: state.entries[0].path.clone(),
+            icon_lines: crate::instance::content::fallback_icon(),
+            image: None,
+        });
+    state.drain_image_loads(&ratatui_image::picker::Picker::halfblocks());
+    assert_eq!(state.filtered_indices().len(), 2);
+}
+
+#[test]
+fn stale_provider_icon_cannot_replace_a_new_provider_row() {
+    let mut state = ContentListState::default();
+    let stream = state.start_source_stream("discovery");
+    let mut project = entry("Alpha");
+    project.provider_project = Some(crate::instance::ProviderProject {
+        provider: "modrinth".to_owned(),
+        project_id: "123".to_owned(),
+        version_id: String::new(),
+    });
+    project.provider_icon = true;
+    stream.upsert(project);
+    stream.send_icon(
+        "alpha".to_owned(),
+        PathBuf::from("alpha"),
+        vec![1],
+        Some(("curseforge".to_owned(), "456".to_owned())),
+    );
+    stream.send_icon_unavailable(
+        "alpha".to_owned(),
+        PathBuf::from("alpha"),
+        Some(("curseforge".to_owned(), "456".to_owned())),
+    );
+    state.drain_pending();
+    assert!(state.entries[0].icon_bytes.is_none());
+    assert!(state.entries[0].provider_icon);
+    assert!(state.has_pending_icons());
+    stream.send_icon(
+        "alpha".to_owned(),
+        PathBuf::from("alpha"),
+        vec![2],
+        Some(("modrinth".to_owned(), "123".to_owned())),
+    );
+    state.drain_pending();
+    assert_eq!(state.entries[0].icon_bytes.as_deref(), Some([2].as_slice()));
+}
+
+#[test]
+fn source_refresh_reuses_a_decoded_icon_only_for_the_same_provider() {
+    let mut state = ContentListState::default();
+    let stream = state.start_source_stream("discovery");
+    let mut project = entry("Alpha");
+    project.icon_bytes = Some(vec![1]);
+    project.provider_icon = true;
+    project.provider_project = Some(crate::instance::ProviderProject {
+        provider: "modrinth".to_owned(),
+        project_id: "123".to_owned(),
+        version_id: String::new(),
+    });
+    stream.upsert(project.clone());
+    state.drain_pending();
+    let mut rendered_icon = crate::instance::content::fallback_icon();
+    rendered_icon[0][0].symbol = 'X';
+    state.entries[0].icon_lines = Some(rendered_icon);
+    state.pending_entry_images.remove("alpha");
+    state.requested_images.insert("alpha".to_owned());
+
+    let refresh = state.refresh_source_stream("discovery");
+    refresh.upsert(project.clone());
+    state.drain_pending();
+    assert_eq!(
+        state.entries[0].icon_lines.as_ref().unwrap()[0][0].symbol,
+        'X'
+    );
+    assert!(!state.has_pending_icons());
+
+    project.provider_project.as_mut().unwrap().provider = "curseforge".to_owned();
+    refresh.upsert(project);
+    state.drain_pending();
+    assert!(state.has_pending_icons());
+    assert!(!state.requested_images.contains("alpha"));
 }
 
 #[test]

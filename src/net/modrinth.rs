@@ -194,13 +194,13 @@ pub async fn search_discovery(
     client: &crate::net::HttpClient,
     kind: ContentKind,
     query: &str,
-    game_versions: &[String],
+    filters: &crate::instance::content::provider::DiscoverySearchFilters,
     loader: ModLoader,
     sort: crate::instance::content::provider::DiscoverySort,
     offset: usize,
     limit: usize,
 ) -> Result<DiscoveryResults, crate::net::NetError> {
-    let facets = discovery_facets(kind, game_versions, loader);
+    let facets = discovery_facets(kind, filters, loader);
     let query = query.trim();
     let index = discovery_index(sort, query);
     let url = format!(
@@ -215,7 +215,7 @@ pub async fn search_discovery(
 pub async fn search_modpacks(
     client: &crate::net::HttpClient,
     query: &str,
-    game_versions: &[String],
+    filters: &crate::instance::content::provider::DiscoverySearchFilters,
     sort: crate::instance::content::provider::DiscoverySort,
     offset: usize,
     limit: usize,
@@ -223,14 +223,16 @@ pub async fn search_modpacks(
     let query = query.trim();
     let index = discovery_index(sort, query);
     let mut facets = vec![vec!["project_type:modpack".to_owned()]];
-    if !game_versions.is_empty() {
+    if !filters.game_versions.is_empty() {
         facets.push(
-            game_versions
+            filters
+                .game_versions
                 .iter()
                 .map(|version| format!("versions:{version}"))
                 .collect(),
         );
     }
+    add_filter_facets(&mut facets, filters);
     let facets = serde_json::to_string(&facets).unwrap_or_default();
     let url = format!(
         "{API_BASE}/search?query={}&facets={}&index={index}&offset={offset}&limit={limit}",
@@ -278,15 +280,20 @@ fn discovery_index(
         DiscoverySort::Relevance | DiscoverySort::Downloads => "downloads",
         DiscoverySort::Popular => "follows",
         DiscoverySort::Updated => "updated",
-        DiscoverySort::Newest => "newest",
+        DiscoverySort::Newest | DiscoverySort::Released => "newest",
     }
 }
 
-fn discovery_facets(kind: ContentKind, game_versions: &[String], loader: ModLoader) -> String {
+fn discovery_facets(
+    kind: ContentKind,
+    filters: &crate::instance::content::provider::DiscoverySearchFilters,
+    loader: ModLoader,
+) -> String {
     let mut facets = vec![vec![project_type_facet(kind)]];
-    if !game_versions.is_empty() {
+    if !filters.game_versions.is_empty() {
         facets.push(
-            game_versions
+            filters
+                .game_versions
                 .iter()
                 .map(|version| format!("versions:{version}"))
                 .collect(),
@@ -297,7 +304,35 @@ fn discovery_facets(kind: ContentKind, game_versions: &[String], loader: ModLoad
     {
         facets.push(vec![format!("categories:{loader}")]);
     }
+    add_filter_facets(&mut facets, filters);
     serde_json::to_string(&facets).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn add_filter_facets(
+    facets: &mut Vec<Vec<String>>,
+    filters: &crate::instance::content::provider::DiscoverySearchFilters,
+) {
+    if !filters.included_categories.is_empty() {
+        facets.push(
+            filters
+                .included_categories
+                .iter()
+                .map(|category| format!("categories:{category}"))
+                .collect(),
+        );
+    }
+    facets.extend(
+        filters
+            .excluded_categories
+            .iter()
+            .map(|category| vec![format!("categories!={category}")]),
+    );
+    facets.extend(
+        filters
+            .excluded_versions
+            .iter()
+            .map(|version| vec![format!("versions!={version}")]),
+    );
 }
 
 fn project_type_facet(kind: ContentKind) -> String {

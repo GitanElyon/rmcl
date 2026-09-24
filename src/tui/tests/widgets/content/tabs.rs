@@ -163,6 +163,30 @@ fn installed_sort_panel_only_shows_file_fields() {
 }
 
 #[test]
+fn curseforge_panel_uses_curseforge_categories_and_sorts() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut state = DiscoveryState::new(crate::instance::ContentKind::Mod);
+    state.set_local_mode(false);
+    state.category_provider = "curseforge".to_owned();
+    state.sort = crate::instance::content::provider::DiscoverySort::Popular;
+    state.sort_panel_page = crate::tui::widgets::content::discovery::DiscoveryPanelPage::Filters;
+    let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+    terminal
+        .draw(|frame| render_sort_panel(frame, Rect::new(0, 1, 60, 29), &mut state))
+        .unwrap();
+    let rendered = format!("{}", terminal.backend());
+    assert!(rendered.contains("Adventure and RPG"));
+    assert!(!rendered.contains("Environment"));
+    state.sort_panel_page = crate::tui::widgets::content::discovery::DiscoveryPanelPage::Sort;
+    terminal
+        .draw(|frame| render_sort_panel(frame, Rect::new(0, 1, 60, 29), &mut state))
+        .unwrap();
+    let rendered = format!("{}", terminal.backend());
+    assert!(rendered.contains("Recently released"));
+    assert!(!rendered.contains("Best match"));
+}
+
+#[test]
 fn discovery_filter_panel_renders_compatibility_and_categories() {
     use crate::instance::ContentKind;
     use ratatui::{Terminal, backend::TestBackend};

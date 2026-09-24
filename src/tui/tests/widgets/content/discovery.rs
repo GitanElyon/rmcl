@@ -31,6 +31,54 @@ fn discovery_requests_four_viewport_pages() {
     assert_eq!(state.begin_modpack_search().limit, PAGE_SIZE);
 }
 
+#[test]
+fn discovery_reveals_rows_before_the_whole_page_is_drained() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    let request = state.begin_search(&instance("one", "1.21.1"));
+    for index in 0..10 {
+        assert!(request.stream.upsert(project_entry(
+            DiscoveryProject {
+                id: index.to_string(),
+                slug: index.to_string(),
+                title: index.to_string(),
+                description: String::new(),
+                downloads: 0,
+                icon_url: None,
+                icon_bytes: None,
+            },
+            None,
+        )));
+    }
+    state.list.drain_pending();
+    assert_eq!(state.list.entries.len(), 4);
+    assert_eq!(state.list.filtered_indices().len(), 4);
+    drain_discovery_rows(&mut state);
+    assert_eq!(state.list.entries.len(), 10);
+}
+
+#[tokio::test]
+async fn discovery_icon_cache_reuses_only_the_matching_provider_project() {
+    let mut modrinth = project_entry(project("iris"), None);
+    modrinth.icon_bytes = Some(vec![1]);
+    let mut curseforge = modrinth.clone();
+    curseforge.provider_project.as_mut().unwrap().provider = "curseforge".to_owned();
+    curseforge.icon_bytes = Some(vec![2]);
+    let mut icons = cached_icons([&modrinth, &curseforge].into_iter());
+    let meta = tempfile::tempdir().unwrap();
+    assert_eq!(
+        cached_icon_bytes(&mut icons, meta.path(), "modrinth", "iris").await,
+        Some(vec![1])
+    );
+    assert_eq!(
+        cached_icon_bytes(&mut icons, meta.path(), "curseforge", "iris").await,
+        Some(vec![2])
+    );
+    assert_eq!(
+        cached_icon_bytes(&mut icons, meta.path(), "curseforge", "other").await,
+        None
+    );
+}
+
 fn instance(name: &str, version: &str) -> InstanceConfig {
     InstanceConfig {
         name: name.to_string(),
@@ -55,6 +103,10 @@ fn instance(name: &str, version: &str) -> InstanceConfig {
         config_sync_profile: None,
         modpack_source: None,
     }
+}
+
+fn drain_discovery_rows(state: &mut DiscoveryState) {
+    while state.list.drain_pending() {}
 }
 
 fn version(id: &str) -> VersionInfo {
@@ -178,6 +230,123 @@ fn filters_match_environment_and_include_exclude_categories() {
 }
 
 #[test]
+fn preferred_provider_categories_only_map_shared_meanings() {
+    let map =
+        |slug, from, to, kind, modpacks| category_for_provider(slug, from, to, kind, modpacks);
+    assert_eq!(
+        map("library", "modrinth", "curseforge", ContentKind::Mod, false),
+        Some("library-api")
+    );
+    assert_eq!(
+        map(
+            "library-api",
+            "curseforge",
+            "modrinth",
+            ContentKind::Mod,
+            false
+        ),
+        Some("library")
+    );
+    assert_eq!(
+        map(
+            "optimization",
+            "modrinth",
+            "curseforge",
+            ContentKind::Mod,
+            false
+        ),
+        Some("performance")
+    );
+    assert_eq!(
+        map(
+            "magic",
+            "curseforge",
+            "modrinth",
+            ContentKind::DataPack,
+            false
+        ),
+        Some("magic")
+    );
+    assert_eq!(
+        map(
+            "tech",
+            "curseforge",
+            "modrinth",
+            ContentKind::ResourcePack,
+            true
+        ),
+        Some("technology")
+    );
+    assert_eq!(
+        map("create", "curseforge", "modrinth", ContentKind::Mod, false),
+        None
+    );
+    assert_eq!(
+        map(
+            "blocks",
+            "modrinth",
+            "curseforge",
+            ContentKind::ResourcePack,
+            false
+        ),
+        None
+    );
+    let filters = DiscoveryFilters {
+        categories: std::collections::BTreeMap::from([(
+            map("library", "modrinth", "curseforge", ContentKind::Mod, false)
+                .unwrap()
+                .to_owned(),
+            CategoryFilter::Include,
+        )]),
+        ..Default::default()
+    };
+    let metadata = crate::net::modrinth::DiscoveryMetadata {
+        categories: vec!["library-api".to_owned()],
+        ..Default::default()
+    };
+    assert!(filters.matches(Some(&metadata)));
+}
+
+#[test]
+fn curseforge_discovery_uses_its_categories_and_supported_sorts() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.category_provider = "curseforge".to_owned();
+    assert!(
+        state
+            .categories()
+            .iter()
+            .any(|(slug, label)| *slug == "library-api" && *label == "API and Library")
+    );
+    assert!(
+        !state
+            .categories()
+            .iter()
+            .any(|(slug, _)| *slug == "library")
+    );
+    assert_eq!(state.category_start(), 1);
+    assert!(!state.has_environment_filter());
+    assert_eq!(
+        state.sorts(),
+        &[
+            crate::instance::content::provider::DiscoverySort::Popular,
+            crate::instance::content::provider::DiscoverySort::Released,
+            crate::instance::content::provider::DiscoverySort::Downloads,
+            crate::instance::content::provider::DiscoverySort::Updated
+        ]
+    );
+    state.filter_panel_selected = 1 + state
+        .categories()
+        .iter()
+        .position(|(slug, _)| *slug == "library-api")
+        .unwrap();
+    state.apply_selected_filter();
+    assert_eq!(
+        state.filters.categories.get("library-api"),
+        Some(&CategoryFilter::Include)
+    );
+}
+
+#[test]
 fn any_version_filter_requests_all_project_versions() {
     let mut state = DiscoveryState::new(ContentKind::Mod);
     state.filters.game_version = GameVersionFilter::Any;
@@ -264,6 +433,30 @@ fn filter_version_picker_cycles_include_and_exclude_inline() {
     );
     assert!(state.filter_version_picker_open);
     assert!(state.search_due());
+}
+
+#[test]
+fn curseforge_version_picker_only_offers_supported_includes() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.category_provider = "curseforge".to_owned();
+    *state.filter_game_versions.lock().unwrap() =
+        crate::tui::widgets::popups::LoadState::Loaded(vec![
+            crate::instance::loader::GameVersion {
+                id: "1.21.1".to_owned(),
+                stable: true,
+            },
+        ]);
+    state.filter_version_picker_index = 2;
+    state.toggle_filter_game_version();
+    assert_eq!(
+        state.filters.game_version,
+        GameVersionFilter::Specific(std::collections::BTreeMap::from([(
+            "1.21.1".to_owned(),
+            CategoryFilter::Include
+        )]))
+    );
+    state.toggle_filter_game_version();
+    assert_eq!(state.filters.game_version, GameVersionFilter::Current);
 }
 
 #[test]
@@ -1368,7 +1561,7 @@ fn next_page_prefetches_before_selection_reaches_the_end() {
             None
         )));
     }
-    state.list.drain_pending();
+    drain_discovery_rows(&mut state);
     DiscoveryState::push_result(
         &first.pending,
         first.generation,
@@ -1405,7 +1598,7 @@ fn large_page_fills_a_tall_viewport_without_another_request() {
             None
         )));
     }
-    state.list.drain_pending();
+    drain_discovery_rows(&mut state);
     DiscoveryState::push_result(
         &first.pending,
         first.generation,
@@ -1438,7 +1631,7 @@ fn typing_keeps_loaded_results_until_remote_search_is_due() {
             None
         )));
     }
-    state.list.drain_pending();
+    drain_discovery_rows(&mut state);
 
     handle_key(
         &KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
@@ -1477,17 +1670,69 @@ fn search_refresh_keeps_rows_until_the_diff_arrives() {
             None
         )));
     }
-    state.list.drain_pending();
+    drain_discovery_rows(&mut state);
     state.search.query = "sodium".to_owned();
     state.search_changed();
 
     let refresh = state.begin_search(&instance);
 
     assert!(refresh.reconcile);
-    assert!(refresh.loaded_icon_stems.contains("sodium"));
-    assert!(!refresh.loaded_icon_stems.contains("lithium"));
     assert_eq!(state.list.entries.len(), 2);
     assert!(!state.list.loading);
+}
+
+#[test]
+fn discovery_restores_cached_sort_and_continues_pagination() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    let instance = instance("one", "1.21.1");
+    let first = state.begin_search(&instance);
+    assert!(first.stream.upsert(project_entry(
+        DiscoveryProject {
+            id: "cached".to_owned(),
+            slug: "cached".to_owned(),
+            title: "Cached".to_owned(),
+            description: String::new(),
+            downloads: 0,
+            icon_url: None,
+            icon_bytes: None,
+        },
+        None,
+    )));
+    drain_discovery_rows(&mut state);
+    DiscoveryState::push_result(
+        &first.pending,
+        first.generation,
+        0,
+        Ok(DiscoveryPageResult {
+            received: 1,
+            total_hits: 20,
+        }),
+    );
+    state.drain_pending();
+    state.sort = crate::instance::content::provider::DiscoverySort::Popular;
+    let other = state.begin_search(&instance);
+    assert!(!other.cached);
+    state.sort = crate::instance::content::provider::DiscoverySort::Relevance;
+    let restored = state.begin_search(&instance);
+    assert!(restored.cached);
+    assert!(!state.list.loading);
+    assert_eq!(state.list.entries[0].name, "Cached");
+    assert_eq!(state.next_offset, 1);
+    assert_eq!(state.total_hits, 20);
+    DiscoveryState::push_result(
+        &other.pending,
+        other.generation,
+        0,
+        Ok(DiscoveryPageResult {
+            received: 3,
+            total_hits: 99,
+        }),
+    );
+    state.drain_pending();
+    assert_eq!(state.total_hits, 20);
+    let next = state.begin_next_page().unwrap();
+    assert_eq!(next.offset, 1);
+    assert!(!next.cached);
 }
 
 #[test]
@@ -1509,7 +1754,7 @@ fn pagination_continues_across_multiple_pages() {
             None
         )));
     }
-    state.list.drain_pending();
+    drain_discovery_rows(&mut state);
     DiscoveryState::push_result(
         &first.pending,
         first.generation,
@@ -1537,7 +1782,7 @@ fn pagination_continues_across_multiple_pages() {
             None
         )));
     }
-    state.list.drain_pending();
+    drain_discovery_rows(&mut state);
     DiscoveryState::push_result(
         &second.pending,
         second.generation,
@@ -1572,7 +1817,7 @@ fn permanent_pagination_failure_stops_without_discarding_loaded_entries() {
             None
         )));
     }
-    state.list.drain_pending();
+    drain_discovery_rows(&mut state);
     DiscoveryState::push_result(
         &first.pending,
         first.generation,

@@ -852,6 +852,7 @@ pub(crate) fn render_discovery_popup(
     state: &mut DiscoveryState,
     picker: &ratatui_image::picker::Picker,
 ) {
+    state.sync_discovery_provider();
     state.set_viewport_rows(area.height);
     render_discovery_body(frame, area, state, true, "Searching modpacks...", picker);
 }
@@ -950,7 +951,11 @@ fn render_sort_panel(frame: &mut Frame, area: Rect, state: &mut DiscoveryState) 
     }
     let selected_row = state.sort_panel_selected + 1;
     let offset = selected_row.saturating_sub(usize::from(inner.height).saturating_sub(1));
-    let row_count = if state.local_mode { 4 } else { 6 };
+    let row_count = if state.local_mode {
+        4
+    } else {
+        state.sorts().len() + 1
+    };
     for row in offset..row_count.min(offset + usize::from(inner.height)) {
         let rect = Rect {
             x: inner.x,
@@ -973,13 +978,13 @@ fn render_sort_panel(frame: &mut Frame, area: Rect, state: &mut DiscoveryState) 
         let label = if state.local_mode {
             ["Name", "File size", "Date modified"][index]
         } else {
-            crate::instance::content::provider::DiscoverySort::ALL[index].label()
+            state.sorts()[index].label()
         };
         let selected = state.sort_panel_focused && index == state.sort_panel_selected;
         let active = if state.local_mode {
             index + 5 == state.local_sort_index
         } else {
-            crate::instance::content::provider::DiscoverySort::ALL[index] == state.sort
+            state.sorts()[index] == state.sort
         };
         let spans = vec![
             Span::styled(
@@ -1072,7 +1077,7 @@ fn render_discovery_panel_title(frame: &mut Frame, area: Rect, state: &Discovery
 }
 
 fn render_filter_panel(frame: &mut Frame, area: Rect, state: &DiscoveryState) {
-    use super::discovery::{CategoryFilter, discovery_categories};
+    use super::discovery::CategoryFilter;
 
     let theme = THEME.as_ref();
     let background = if state.modpacks {
@@ -1089,10 +1094,10 @@ fn render_filter_panel(frame: &mut Frame, area: Rect, state: &DiscoveryState) {
     };
     frame.render_widget(heading("Compatibility"), Rect { height: 1, ..area });
 
-    let values = [
-        ("MC version", state.filters.game_version.label()),
-        ("Environment", state.filters.environment.label().to_owned()),
-    ];
+    let mut values = vec![("MC version", state.filters.game_version.label())];
+    if state.has_environment_filter() {
+        values.push(("Environment", state.filters.environment.label().to_owned()));
+    }
     for (index, (label, value)) in values.into_iter().enumerate() {
         let selected = state.sort_panel_focused && state.filter_panel_selected == index;
         let y = area.y.saturating_add(1 + index as u16);
@@ -1132,7 +1137,7 @@ fn render_filter_panel(frame: &mut Frame, area: Rect, state: &DiscoveryState) {
         );
     }
 
-    let category_heading_y = area.y.saturating_add(4);
+    let category_heading_y = area.y.saturating_add(2 + state.category_start() as u16);
     if category_heading_y >= area.bottom() {
         return;
     }
@@ -1144,12 +1149,14 @@ fn render_filter_panel(frame: &mut Frame, area: Rect, state: &DiscoveryState) {
             ..area
         },
     );
-    let categories = discovery_categories(state.kind, state.modpacks);
+    let categories = state.categories();
     let available = area.bottom().saturating_sub(category_heading_y + 1) as usize;
-    let selected_category = state.filter_panel_selected.saturating_sub(2);
+    let selected_category = state
+        .filter_panel_selected
+        .saturating_sub(state.category_start());
     let offset = selected_category.saturating_sub(available.saturating_sub(1));
     for (visible, (slug, label)) in categories.iter().skip(offset).take(available).enumerate() {
-        let index = offset + visible + 2;
+        let index = offset + visible + state.category_start();
         let selected = state.sort_panel_focused && state.filter_panel_selected == index;
         let mode = state.filters.categories.get(*slug);
         let mut spans = vec![Span::styled(

@@ -91,7 +91,7 @@ impl ContentProvider for FakeProvider {
         _kind: ContentKind,
         _query: &str,
         _instance: &InstanceConfig,
-        _game_versions: &[String],
+        _filters: &crate::instance::content::provider::DiscoverySearchFilters,
         _sort: DiscoverySort,
         _offset: usize,
         _limit: usize,
@@ -102,7 +102,7 @@ impl ContentProvider for FakeProvider {
     async fn search_modpacks(
         &self,
         _query: &str,
-        _game_versions: &[String],
+        _filters: &crate::instance::content::provider::DiscoverySearchFilters,
         _sort: DiscoverySort,
         _offset: usize,
         _limit: usize,

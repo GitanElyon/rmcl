@@ -17,6 +17,15 @@ pub enum DiscoverySort {
     Popular,
     Updated,
     Newest,
+    Released,
+}
+
+#[derive(Debug, Default)]
+pub struct DiscoverySearchFilters {
+    pub game_versions: Vec<String>,
+    pub excluded_versions: Vec<String>,
+    pub included_categories: Vec<String>,
+    pub excluded_categories: Vec<String>,
 }
 
 impl DiscoverySort {
@@ -35,6 +44,7 @@ impl DiscoverySort {
             Self::Popular => "Popular",
             Self::Updated => "Recently updated",
             Self::Newest => "Newest",
+            Self::Released => "Recently released",
         }
     }
 }
@@ -62,7 +72,7 @@ pub trait ContentProvider: Send + Sync {
         kind: ContentKind,
         query: &str,
         instance: &InstanceConfig,
-        game_versions: &[String],
+        filters: &DiscoverySearchFilters,
         sort: DiscoverySort,
         offset: usize,
         limit: usize,
@@ -71,7 +81,7 @@ pub trait ContentProvider: Send + Sync {
     async fn search_modpacks(
         &self,
         query: &str,
-        game_versions: &[String],
+        filters: &DiscoverySearchFilters,
         sort: DiscoverySort,
         offset: usize,
         limit: usize,
@@ -129,7 +139,7 @@ impl ContentProvider for ModrinthProvider {
         kind: ContentKind,
         query: &str,
         instance: &InstanceConfig,
-        game_versions: &[String],
+        filters: &DiscoverySearchFilters,
         sort: DiscoverySort,
         offset: usize,
         limit: usize,
@@ -138,7 +148,7 @@ impl ContentProvider for ModrinthProvider {
             &self.client,
             kind,
             query,
-            game_versions,
+            filters,
             instance.loader,
             sort,
             offset,
@@ -150,20 +160,13 @@ impl ContentProvider for ModrinthProvider {
     async fn search_modpacks(
         &self,
         query: &str,
-        game_versions: &[String],
+        filters: &DiscoverySearchFilters,
         sort: DiscoverySort,
         offset: usize,
         limit: usize,
     ) -> Result<DiscoveryResults, crate::net::NetError> {
-        crate::net::modrinth::search_modpacks(
-            &self.client,
-            query,
-            game_versions,
-            sort,
-            offset,
-            limit,
-        )
-        .await
+        crate::net::modrinth::search_modpacks(&self.client, query, filters, sort, offset, limit)
+            .await
     }
 
     async fn resolve_files(
@@ -283,7 +286,7 @@ impl ContentProvider for CurseForgeProvider {
         kind: ContentKind,
         query: &str,
         instance: &InstanceConfig,
-        game_versions: &[String],
+        filters: &DiscoverySearchFilters,
         sort: DiscoverySort,
         offset: usize,
         limit: usize,
@@ -293,11 +296,9 @@ impl ContentProvider for CurseForgeProvider {
             &self.api_key,
             kind,
             query,
-            game_versions
-                .first()
-                .map(String::as_str)
-                .unwrap_or_default(),
+            &filters.game_versions,
             instance.loader,
+            &filters.included_categories,
             sort,
             offset,
             limit,
@@ -308,7 +309,7 @@ impl ContentProvider for CurseForgeProvider {
     async fn search_modpacks(
         &self,
         query: &str,
-        game_versions: &[String],
+        filters: &DiscoverySearchFilters,
         sort: DiscoverySort,
         offset: usize,
         limit: usize,
@@ -317,10 +318,8 @@ impl ContentProvider for CurseForgeProvider {
             &self.client,
             &self.api_key,
             query,
-            game_versions
-                .first()
-                .map(String::as_str)
-                .unwrap_or_default(),
+            &filters.game_versions,
+            &filters.included_categories,
             sort,
             offset,
             limit,

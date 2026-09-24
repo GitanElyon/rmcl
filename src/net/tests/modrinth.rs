@@ -87,7 +87,11 @@ fn project_metadata_caches_environment_fields() {
 
 #[test]
 fn discovery_mod_facets_include_instance_compatibility() {
-    let facets = discovery_facets(ContentKind::Mod, &["1.21.1".to_owned()], ModLoader::Fabric);
+    let filters = crate::instance::content::provider::DiscoverySearchFilters {
+        game_versions: vec!["1.21.1".to_owned()],
+        ..Default::default()
+    };
+    let facets = discovery_facets(ContentKind::Mod, &filters, ModLoader::Fabric);
     assert_eq!(
         serde_json::from_str::<Vec<Vec<String>>>(&facets).unwrap(),
         vec![
@@ -100,11 +104,11 @@ fn discovery_mod_facets_include_instance_compatibility() {
 
 #[test]
 fn discovery_facets_match_any_selected_minecraft_version() {
-    let facets = discovery_facets(
-        ContentKind::Mod,
-        &["1.21.1".to_owned(), "1.20.1".to_owned()],
-        ModLoader::Fabric,
-    );
+    let filters = crate::instance::content::provider::DiscoverySearchFilters {
+        game_versions: vec!["1.21.1".to_owned(), "1.20.1".to_owned()],
+        ..Default::default()
+    };
+    let facets = discovery_facets(ContentKind::Mod, &filters, ModLoader::Fabric);
     assert_eq!(
         serde_json::from_str::<Vec<Vec<String>>>(&facets).unwrap(),
         vec![
@@ -116,12 +120,36 @@ fn discovery_facets_match_any_selected_minecraft_version() {
 }
 
 #[test]
-fn discovery_resource_pack_facets_do_not_require_loader() {
-    let facets = discovery_facets(
-        ContentKind::ResourcePack,
-        &["1.20.1".to_owned()],
-        ModLoader::Forge,
+fn discovery_facets_filter_included_and_excluded_categories_and_versions() {
+    let filters = crate::instance::content::provider::DiscoverySearchFilters {
+        game_versions: vec!["1.21.1".to_owned()],
+        excluded_versions: vec!["1.20.1".to_owned(), "1.19.4".to_owned()],
+        included_categories: vec!["magic".to_owned(), "technology".to_owned()],
+        excluded_categories: vec!["cursed".to_owned(), "library".to_owned()],
+    };
+    let facets = discovery_facets(ContentKind::Mod, &filters, ModLoader::Fabric);
+    assert_eq!(
+        serde_json::from_str::<Vec<Vec<String>>>(&facets).unwrap(),
+        vec![
+            vec!["project_type:mod"],
+            vec!["versions:1.21.1"],
+            vec!["categories:fabric"],
+            vec!["categories:magic", "categories:technology"],
+            vec!["categories!=cursed"],
+            vec!["categories!=library"],
+            vec!["versions!=1.20.1"],
+            vec!["versions!=1.19.4"],
+        ]
     );
+}
+
+#[test]
+fn discovery_resource_pack_facets_do_not_require_loader() {
+    let filters = crate::instance::content::provider::DiscoverySearchFilters {
+        game_versions: vec!["1.20.1".to_owned()],
+        ..Default::default()
+    };
+    let facets = discovery_facets(ContentKind::ResourcePack, &filters, ModLoader::Forge);
     assert_eq!(
         serde_json::from_str::<Vec<Vec<String>>>(&facets).unwrap(),
         vec![vec!["project_type:resourcepack"], vec!["versions:1.20.1"]]
@@ -130,11 +158,11 @@ fn discovery_resource_pack_facets_do_not_require_loader() {
 
 #[test]
 fn discovery_datapack_facets_use_the_datapack_project_type() {
-    let facets = discovery_facets(
-        ContentKind::DataPack,
-        &["1.21.1".to_owned()],
-        ModLoader::Fabric,
-    );
+    let filters = crate::instance::content::provider::DiscoverySearchFilters {
+        game_versions: vec!["1.21.1".to_owned()],
+        ..Default::default()
+    };
+    let facets = discovery_facets(ContentKind::DataPack, &filters, ModLoader::Fabric);
     assert_eq!(
         serde_json::from_str::<Vec<Vec<String>>>(&facets).unwrap(),
         vec![vec!["all_project_types:datapack"], vec!["versions:1.21.1"]]

@@ -2024,6 +2024,11 @@ impl App {
         let kind = state.kind;
         let query = state.search.query.clone();
         let request = state.begin_search(&instance);
+        if request.cached
+            && let Some(manifest) = &manifest
+        {
+            state.refresh_installed_manifest(manifest, &minecraft_dir);
+        }
         Self::spawn_discovery_request(
             instance,
             kind,

@@ -93,7 +93,7 @@ pub enum CategoryFilter {
     Exclude,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DiscoveryFilters {
     pub game_version: GameVersionFilter,
     pub environment: EnvironmentFilter,
@@ -208,10 +208,64 @@ pub struct DiscoveryRequest {
     pub pending: PendingDiscovery,
     pub stream: ContentStream,
     pub reconcile: bool,
-    pub loaded_icon_stems: std::collections::HashSet<String>,
+    pub cached_icons: std::collections::HashMap<(String, String), Vec<u8>>,
     pub known_projects: std::collections::HashMap<String, (String, String)>,
     pub sort: crate::instance::content::provider::DiscoverySort,
     pub filters: DiscoveryFilters,
+    pub cached: bool,
+}
+
+fn cached_icons<'a>(
+    entries: impl Iterator<Item = &'a ContentEntry>,
+) -> std::collections::HashMap<(String, String), Vec<u8>> {
+    let mut icons = std::collections::HashMap::new();
+    for entry in entries {
+        if let (Some(project), Some(bytes)) = (&entry.provider_project, &entry.icon_bytes) {
+            icons
+                .entry((project.provider.clone(), project.project_id.clone()))
+                .or_insert_with(|| bytes.clone());
+        }
+    }
+    icons
+}
+
+async fn cached_icon_bytes(
+    icons: &mut std::collections::HashMap<(String, String), Vec<u8>>,
+    meta_dir: &std::path::Path,
+    provider: &str,
+    project_id: &str,
+) -> Option<Vec<u8>> {
+    let key = (provider.to_owned(), project_id.to_owned());
+    if let Some(bytes) = icons.get(&key) {
+        return Some(bytes.clone());
+    }
+    let path = crate::storage::MetadataPaths::new(meta_dir)
+        .provider_icons(provider)
+        .join(format!("{project_id}.img"));
+    let bytes = tokio::fs::read(path).await.ok()?;
+    image::guess_format(&bytes).ok()?;
+    icons.insert(key, bytes.clone());
+    Some(bytes)
+}
+
+#[derive(PartialEq, Eq)]
+struct DiscoverySearchKey {
+    context: String,
+    query: String,
+    sort: crate::instance::content::provider::DiscoverySort,
+    filters: DiscoveryFilters,
+    modrinth: bool,
+    curseforge: bool,
+    preferred: String,
+}
+
+struct CachedDiscoverySearch {
+    entries: Vec<ContentEntry>,
+    sources: std::collections::HashMap<String, Vec<crate::instance::ProviderProject>>,
+    selected: Option<usize>,
+    total_hits: usize,
+    next_offset: usize,
+    exhausted: bool,
 }
 
 pub(crate) struct ContentDiscoveryTarget {
@@ -238,7 +292,7 @@ async fn search_provider(
     limit: usize,
 ) -> Option<Result<DiscoveryResults, crate::net::NetError>> {
     let provider = provider.filter(|_| enabled)?;
-    let (game_versions, excluded_game_versions) = match (&filters.game_version, target) {
+    let (game_versions, excluded_versions) = match (&filters.game_version, target) {
         (GameVersionFilter::Current, DiscoveryTarget::Content(content)) => {
             (vec![content.instance.game_version.clone()], Vec::new())
         }
@@ -256,10 +310,51 @@ async fn search_provider(
         ),
         (GameVersionFilter::Current | GameVersionFilter::Any, _) => (Vec::new(), Vec::new()),
     };
+    let preferred = crate::config::SETTINGS
+        .read()
+        .content
+        .preferred_provider()
+        .to_owned();
+    let kind = match target {
+        DiscoveryTarget::Content(content) => content.kind,
+        DiscoveryTarget::Modpacks => ContentKind::ResourcePack,
+    };
+    let modpacks = matches!(target, DiscoveryTarget::Modpacks);
+    let mapped_categories = filters
+        .categories
+        .iter()
+        .filter_map(|(category, mode)| {
+            category_for_provider(category, &preferred, provider.id(), kind, modpacks)
+                .map(|mapped| (mapped.to_owned(), *mode))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if filters
+        .categories
+        .values()
+        .any(|mode| *mode == CategoryFilter::Include)
+        && !mapped_categories
+            .values()
+            .any(|mode| *mode == CategoryFilter::Include)
+    {
+        return None;
+    }
+    let search_filters = crate::instance::content::provider::DiscoverySearchFilters {
+        game_versions,
+        excluded_versions,
+        included_categories: mapped_categories
+            .iter()
+            .filter(|(_, mode)| **mode == CategoryFilter::Include)
+            .map(|(category, _)| category.clone())
+            .collect(),
+        excluded_categories: mapped_categories
+            .iter()
+            .filter(|(_, mode)| **mode == CategoryFilter::Exclude)
+            .map(|(category, _)| category.clone())
+            .collect(),
+    };
     if provider.id() == "curseforge"
         && (filters.environment != EnvironmentFilter::Any
-            || game_versions.len() > 1
-            || !excluded_game_versions.is_empty())
+            || !search_filters.excluded_versions.is_empty())
     {
         return None;
     }
@@ -270,7 +365,7 @@ async fn search_provider(
                     content.kind,
                     query,
                     &content.instance,
-                    &game_versions,
+                    &search_filters,
                     sort,
                     offset,
                     limit,
@@ -279,14 +374,16 @@ async fn search_provider(
         }
         DiscoveryTarget::Modpacks => {
             provider
-                .search_modpacks(query, &game_versions, sort, offset, limit)
+                .search_modpacks(query, &search_filters, sort, offset, limit)
                 .await
         }
     };
     Some(result.map(|mut results| {
+        let mut mapped_filters = filters.clone();
+        mapped_filters.categories = mapped_categories;
         results
             .projects
-            .retain(|project| filters.matches(results.metadata.get(&project.id)));
+            .retain(|project| mapped_filters.matches(results.metadata.get(&project.id)));
         results
     }))
 }
@@ -304,43 +401,102 @@ pub(crate) fn spawn_provider_search(
         pending,
         stream,
         reconcile,
-        loaded_icon_stems,
+        mut cached_icons,
         known_projects,
         sort,
         filters,
+        cached,
     } = request;
+    if cached {
+        return;
+    }
     tokio::spawn(async move {
         let client = crate::net::HttpClient::new();
         let registry =
             crate::instance::content::provider::ProviderRegistry::configured(client.clone());
-        let (modrinth_result, curseforge_result) = tokio::join!(
-            search_provider(
-                registry.get("modrinth"),
-                crate::config::SETTINGS
-                    .read()
-                    .content
-                    .discovery_provider_enabled("modrinth"),
-                &target,
-                &query,
-                sort,
-                &filters,
-                offset,
-                limit,
-            ),
-            search_provider(
-                registry.get("curseforge"),
-                crate::config::SETTINGS
-                    .read()
-                    .content
-                    .discovery_provider_enabled("curseforge"),
-                &target,
-                &query,
-                sort,
-                &filters,
-                offset,
-                limit,
-            )
+        let modrinth_search = search_provider(
+            registry.get("modrinth"),
+            crate::config::SETTINGS
+                .read()
+                .content
+                .discovery_provider_enabled("modrinth"),
+            &target,
+            &query,
+            sort,
+            &filters,
+            offset,
+            limit,
         );
+        let curseforge_search = search_provider(
+            registry.get("curseforge"),
+            crate::config::SETTINGS
+                .read()
+                .content
+                .discovery_provider_enabled("curseforge"),
+            &target,
+            &query,
+            sort,
+            &filters,
+            offset,
+            limit,
+        );
+        tokio::pin!(modrinth_search, curseforge_search);
+        let (first_provider, first_result) = tokio::select! {
+            result = &mut modrinth_search => ("modrinth", result),
+            result = &mut curseforge_search => ("curseforge", result),
+        };
+        let preferred = crate::config::SETTINGS
+            .read()
+            .content
+            .preferred_provider()
+            .to_owned();
+        if (first_provider == preferred || offset == 0)
+            && let Some(Ok(results)) = &first_result
+        {
+            if offset > 0 {
+                stream.append_preview();
+            }
+            let preview = merge_provider_results(
+                vec![(first_provider, results.clone())],
+                &preferred,
+                known_projects.clone(),
+            );
+            for merged_project in preview.projects {
+                let MergedDiscoveryProject {
+                    stem,
+                    provider,
+                    mut project,
+                } = merged_project;
+                project.icon_bytes =
+                    cached_icon_bytes(&mut cached_icons, &meta_dir, &provider, &project.id).await;
+                let installed_path = match &target {
+                    DiscoveryTarget::Content(content) => {
+                        content.manifest.as_ref().and_then(|manifest| {
+                            manifest.resolved_project_path(
+                                &provider,
+                                &project.id,
+                                &content.minecraft_dir,
+                            )
+                        })
+                    }
+                    DiscoveryTarget::Modpacks => None,
+                };
+                if !stream.preview(provider_project_entry(
+                    project,
+                    &provider,
+                    stem,
+                    installed_path,
+                )) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+        let (modrinth_result, curseforge_result) = if first_provider == "modrinth" {
+            (first_result, curseforge_search.await)
+        } else {
+            (modrinth_search.await, first_result)
+        };
         let failure = match (&modrinth_result, &curseforge_result) {
             (Some(Err(error)), Some(Err(_))) | (Some(Err(error)), None) => {
                 Some((error.to_string(), error.is_retryable()))
@@ -366,13 +522,13 @@ pub(crate) fn spawn_provider_search(
                 known_projects,
             );
             refresh_source_installed_versions(&mut merged.sources, &target);
-            let mut returned = std::collections::HashSet::new();
+            let mut returned = Vec::new();
             let icon_slots = Arc::new(tokio::sync::Semaphore::new(8));
             for merged_project in merged.projects {
                 let stem = merged_project.stem;
                 let provider = merged_project.provider;
                 let mut project = merged_project.project;
-                returned.insert(stem.clone());
+                returned.push(stem.clone());
                 let project_id = project.id.clone();
                 let installed_path = match &target {
                     DiscoveryTarget::Content(content) => merged
@@ -393,13 +549,11 @@ pub(crate) fn spawn_provider_search(
                 let cached_icon = crate::storage::MetadataPaths::new(&meta_dir)
                     .provider_icons(&provider)
                     .join(format!("{project_id}.img"));
-                if !loaded_icon_stems.contains(&stem)
-                    && let Ok(bytes) = tokio::fs::read(&cached_icon).await
-                    && !bytes.is_empty()
-                {
-                    project.icon_bytes = Some(bytes);
-                }
-                let icon_url = (!loaded_icon_stems.contains(&stem) && project.icon_bytes.is_none())
+                project.icon_bytes =
+                    cached_icon_bytes(&mut cached_icons, &meta_dir, &provider, &project_id).await;
+                let icon_url = project
+                    .icon_bytes
+                    .is_none()
                     .then(|| project.icon_url.clone())
                     .flatten();
                 let entry = provider_project_entry(project, &provider, stem, installed_path);
@@ -419,22 +573,39 @@ pub(crate) fn spawn_provider_search(
                             .get_bytes_limited(&url, crate::net::MAX_PROVIDER_ASSET_BYTES)
                             .await
                         {
-                            Ok(bytes) if !bytes.is_empty() => {
+                            Ok(bytes) if image::guess_format(&bytes).is_ok() => {
                                 if let Some(parent) = cached_icon.parent() {
                                     let _ = tokio::fs::create_dir_all(parent).await;
                                 }
                                 let _ = tokio::fs::write(cached_icon, &bytes).await;
-                                stream.send_icon(file_stem, path, bytes);
+                                stream.send_icon(
+                                    file_stem,
+                                    path,
+                                    bytes,
+                                    Some((provider.clone(), project_id.clone())),
+                                );
                             }
-                            _ => {
-                                stream.send_icon_unavailable(file_stem, path);
+                            result => {
+                                match result {
+                                    Err(error) => {
+                                        tracing::debug!(provider = %provider, project_id = %project_id, "Discovery icon unavailable: {error}")
+                                    }
+                                    Ok(_) => {
+                                        tracing::debug!(provider = %provider, project_id = %project_id, "Discovery icon response was not a supported image")
+                                    }
+                                }
+                                stream.send_icon_unavailable(
+                                    file_stem,
+                                    path,
+                                    Some((provider, project_id)),
+                                );
                             }
                         }
                     });
                 }
             }
-            if reconcile {
-                stream.retain(returned);
+            if reconcile || (offset == 0 && first_provider != preferred) {
+                stream.order(returned);
             }
             let received = merged.received;
             let total_hits = merged.total_hits;
@@ -735,6 +906,7 @@ pub struct DiscoveryState {
     pub sort_panel_page: DiscoveryPanelPage,
     pub sort_panel_selected: usize,
     pub local_mode: bool,
+    pub(crate) category_provider: String,
     pub local_sort_index: usize,
     pub local_sort_descending: bool,
     pub filter_panel_selected: usize,
@@ -771,6 +943,9 @@ pub struct DiscoveryState {
     search_changed_at: Option<std::time::Instant>,
     retry_page_at: Option<std::time::Instant>,
     page_retry_attempt: u32,
+    active_search_key: Option<DiscoverySearchKey>,
+    // ponytail: keep four searches in memory; persist them only if cold-start discovery is too slow.
+    cached_searches: Vec<(DiscoverySearchKey, CachedDiscoverySearch)>,
 }
 
 pub fn discovery_categories(
@@ -845,6 +1020,213 @@ pub fn discovery_categories(
     }
 }
 
+// Category slugs and names from CurseForge's Minecraft /v1/categories endpoint (gameId 432).
+fn curseforge_categories(
+    kind: ContentKind,
+    modpacks: bool,
+) -> &'static [(&'static str, &'static str)] {
+    if modpacks {
+        return &[
+            ("adventure-and-rpg", "Adventure and RPG"),
+            ("combat-pvp", "Combat / PvP"),
+            ("expert", "Expert"),
+            ("exploration", "Exploration"),
+            ("extra-large", "Extra Large"),
+            ("ftb-official-pack", "FTB Official Pack"),
+            ("hardcore", "Hardcore"),
+            ("horror", "Horror"),
+            ("magic", "Magic"),
+            ("map-based", "Map Based"),
+            ("mini-game", "Mini Game"),
+            ("multiplayer", "Multiplayer"),
+            ("quests", "Quests"),
+            ("rlcraft", "RLCraft"),
+            ("sci-fi", "Sci-Fi"),
+            ("skyblock", "Skyblock"),
+            ("small-light", "Small / Light"),
+            ("tech", "Tech"),
+            ("vanilla", "Vanilla+"),
+        ];
+    }
+    match kind {
+        ContentKind::Mod => &[
+            ("addons-buildcraft", "Buildcraft"),
+            ("addons-forestry", "Forestry"),
+            ("addons-industrialcraft", "Industrial Craft"),
+            ("addons-thermalexpansion", "Thermal Expansion"),
+            ("addons-thaumcraft", "Thaumcraft"),
+            ("addons-tinkers-construct", "Tinker's Construct"),
+            ("adventure-rpg", "Adventure and RPG"),
+            ("applied-energistics-2", "Applied Energistics 2"),
+            ("armor-weapons-tools", "Armor, Tools, and Weapons"),
+            ("blood-magic", "Blood Magic"),
+            ("bug-fixes", "Bug Fixes"),
+            ("cosmetic", "Cosmetic"),
+            ("crafttweaker", "CraftTweaker"),
+            ("create", "Create"),
+            ("creativemode", "CreativeMode"),
+            ("education", "Education"),
+            ("farmers-delight", "Farmer's Delight"),
+            ("galacticraft", "Galacticraft"),
+            ("horror", "Horror"),
+            ("integrated-dynamics", "Integrated Dynamics"),
+            ("kubejs", "KubeJS"),
+            ("library-api", "API and Library"),
+            ("magic", "Magic"),
+            ("map-information", "Map and Information"),
+            ("mc-addons", "Addons"),
+            ("mc-creator", "MCreator"),
+            ("mc-food", "Food"),
+            ("mc-miscellaneous", "Miscellaneous"),
+            ("modjam-2025", "ModJam 2025"),
+            ("performance", "Performance"),
+            ("redstone", "Redstone"),
+            ("refined-storage", "Refined Storage"),
+            ("server-utility", "Server Utility"),
+            ("skyblock", "Skyblock"),
+            ("storage", "Storage"),
+            ("technology", "Technology"),
+            ("technology-automation", "Automation"),
+            ("technology-energy", "Energy"),
+            ("technology-farming", "Farming"),
+            ("technology-genetics", "Genetics"),
+            (
+                "technology-item-fluid-energy-transport",
+                "Energy, Fluid, and Item Transport",
+            ),
+            ("technology-player-transport", "Player Transport"),
+            ("technology-processing", "Processing"),
+            ("twitch-integration", "Twitch Integration"),
+            ("twilight-forest", "Twilight Forest"),
+            ("utility-qol", "Utility & QoL"),
+            ("world-biomes", "Biomes"),
+            ("world-dimensions", "Dimensions"),
+            ("world-gen", "World Gen"),
+            ("world-mobs", "Mobs"),
+            ("world-ores-resources", "Ores and Resources"),
+            ("world-structures", "Structures"),
+        ],
+        ContentKind::ResourcePack => &[
+            ("animated", "Animated"),
+            ("data-packs", "Data Packs"),
+            ("five-twelve-x-and-beyond", "512x and Higher"),
+            ("font-packs", "Font Packs"),
+            ("medieval", "Medieval"),
+            ("miscellaneous", "Miscellaneous"),
+            ("mod-support", "Mod Support"),
+            ("modern", "Modern"),
+            ("modjam-2025", "ModJam 2025"),
+            ("one-twenty-eight-x", "128x"),
+            ("photo-realistic", "Photo Realistic"),
+            ("sixteen-x", "16x"),
+            ("sixty-four-x", "64x"),
+            ("steampunk", "Steampunk"),
+            ("thirty-two-x", "32x"),
+            ("traditional", "Traditional"),
+            ("two-fifty-six-x", "256x"),
+        ],
+        ContentKind::Shader => &[
+            ("fantasy", "Fantasy"),
+            ("realistic", "Realistic"),
+            ("vanilla", "Vanilla"),
+        ],
+        ContentKind::DataPack => &[
+            ("adventure", "Adventure"),
+            ("fantasy", "Fantasy"),
+            ("library", "Library"),
+            ("magic", "Magic"),
+            ("miscellaneous", "Miscellaneous"),
+            ("mod-support", "Mod Support"),
+            ("modjam-2025", "ModJam 2025"),
+            ("tech", "Tech"),
+            ("utility", "Utility"),
+        ],
+    }
+}
+
+fn category_for_provider(
+    slug: &str,
+    from: &str,
+    to: &str,
+    kind: ContentKind,
+    modpacks: bool,
+) -> Option<&'static str> {
+    let from_categories = if from == "curseforge" {
+        curseforge_categories(kind, modpacks)
+    } else {
+        discovery_categories(kind, modpacks)
+    };
+    let to_categories = if to == "curseforge" {
+        curseforge_categories(kind, modpacks)
+    } else {
+        discovery_categories(kind, modpacks)
+    };
+    if from == to {
+        return to_categories
+            .iter()
+            .find(|(key, _)| *key == slug)
+            .map(|(key, _)| *key);
+    }
+    let aliases: &[(&str, &str)] = if modpacks {
+        &[
+            ("adventure", "adventure-and-rpg"),
+            ("lightweight", "small-light"),
+            ("technology", "tech"),
+        ]
+    } else {
+        match kind {
+            ContentKind::Mod => &[
+                ("adventure", "adventure-rpg"),
+                ("equipment", "armor-weapons-tools"),
+                ("food", "mc-food"),
+                ("library", "library-api"),
+                ("mobs", "world-mobs"),
+                ("optimization", "performance"),
+                ("utility", "utility-qol"),
+                ("worldgen", "world-gen"),
+            ],
+            ContentKind::ResourcePack => {
+                &[("fonts", "font-packs"), ("realistic", "photo-realistic")]
+            }
+            ContentKind::Shader => &[("vanilla-like", "vanilla")],
+            ContentKind::DataPack => &[("technology", "tech")],
+        }
+    };
+    let mapped = aliases
+        .iter()
+        .find_map(|(modrinth, curseforge)| {
+            if from == "curseforge" && slug == *curseforge {
+                Some(*modrinth)
+            } else if from == "modrinth" && slug == *modrinth {
+                Some(*curseforge)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(slug);
+    if !from_categories.iter().any(|(key, _)| *key == slug) {
+        return None;
+    }
+    to_categories
+        .iter()
+        .find(|(key, _)| *key == mapped)
+        .map(|(key, _)| *key)
+}
+
+fn discovery_sorts(provider: &str) -> &'static [crate::instance::content::provider::DiscoverySort] {
+    use crate::instance::content::provider::DiscoverySort;
+    if provider == "curseforge" {
+        &[
+            DiscoverySort::Popular,
+            DiscoverySort::Released,
+            DiscoverySort::Downloads,
+            DiscoverySort::Updated,
+        ]
+    } else {
+        &DiscoverySort::ALL
+    }
+}
+
 impl DiscoveryState {
     pub fn new(kind: ContentKind) -> Self {
         Self {
@@ -852,12 +1234,21 @@ impl DiscoveryState {
             modpacks: false,
             list: ContentListState::default(),
             search: crate::tui::widgets::search::SearchState::default(),
-            sort: crate::instance::content::provider::DiscoverySort::default(),
+            sort: if crate::config::SETTINGS.read().content.preferred_provider() == "curseforge" {
+                crate::instance::content::provider::DiscoverySort::Popular
+            } else {
+                Default::default()
+            },
             sort_panel_open: false,
             sort_panel_focused: false,
             sort_panel_page: DiscoveryPanelPage::default(),
             sort_panel_selected: 0,
             local_mode: false,
+            category_provider: crate::config::SETTINGS
+                .read()
+                .content
+                .preferred_provider()
+                .to_owned(),
             local_sort_index: 5,
             local_sort_descending: false,
             filter_panel_selected: 0,
@@ -894,6 +1285,8 @@ impl DiscoveryState {
             search_changed_at: None,
             retry_page_at: None,
             page_retry_attempt: 0,
+            active_search_key: None,
+            cached_searches: Vec::new(),
         }
     }
 
@@ -924,15 +1317,75 @@ impl DiscoveryState {
             + self.filters.categories.len()
     }
 
+    pub(crate) fn categories(&self) -> &'static [(&'static str, &'static str)] {
+        if !self.local_mode && self.category_provider == "curseforge" {
+            curseforge_categories(self.kind, self.modpacks)
+        } else {
+            discovery_categories(self.kind, self.modpacks)
+        }
+    }
+
+    pub(crate) fn sorts(&self) -> &'static [crate::instance::content::provider::DiscoverySort] {
+        discovery_sorts(&self.category_provider)
+    }
+
+    pub(crate) fn has_environment_filter(&self) -> bool {
+        self.local_mode || self.category_provider != "curseforge"
+    }
+
+    pub(crate) fn category_start(&self) -> usize {
+        if self.has_environment_filter() { 2 } else { 1 }
+    }
+
+    pub(crate) fn sync_discovery_provider(&mut self) {
+        if self.local_mode {
+            return;
+        }
+        let preferred = crate::config::SETTINGS
+            .read()
+            .content
+            .preferred_provider()
+            .to_owned();
+        if self.category_provider == preferred {
+            return;
+        }
+        self.category_provider = preferred;
+        self.filters.categories.clear();
+        self.filters.environment = EnvironmentFilter::Any;
+        if self.category_provider == "curseforge"
+            && let GameVersionFilter::Specific(versions) = &mut self.filters.game_version
+        {
+            versions.retain(|_, mode| *mode == CategoryFilter::Include);
+            if versions.is_empty() {
+                self.filters.game_version = if self.modpacks {
+                    GameVersionFilter::Any
+                } else {
+                    GameVersionFilter::Current
+                };
+            }
+        }
+        self.filter_panel_selected = 0;
+        if !self.sorts().contains(&self.sort) {
+            self.sort = self.sorts()[0];
+        }
+        self.sort_panel_selected = self
+            .sorts()
+            .iter()
+            .position(|sort| *sort == self.sort)
+            .unwrap_or(0);
+        self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+    }
+
     pub(crate) fn set_local_mode(&mut self, installed: bool) {
         if self.local_mode == installed {
+            self.sync_discovery_provider();
             return;
         }
         self.local_mode = installed;
         self.sort_panel_selected = if installed {
             self.local_sort_index - 5
         } else {
-            crate::instance::content::provider::DiscoverySort::ALL
+            self.sorts()
                 .iter()
                 .position(|sort| *sort == self.sort)
                 .unwrap_or(0)
@@ -945,6 +1398,7 @@ impl DiscoveryState {
             self.installed_filters = Some(std::mem::replace(&mut self.filters, discovery));
         }
         self.filter_version_picker_initialized = false;
+        self.sync_discovery_provider();
     }
 
     fn reset_filters(&mut self) {
@@ -974,7 +1428,7 @@ impl DiscoveryState {
             self.local_sort_descending = false;
             return;
         }
-        let default = crate::instance::content::provider::DiscoverySort::default();
+        let default = self.sorts()[0];
         if self.sort != default {
             self.sort = default;
             self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
@@ -987,6 +1441,8 @@ impl DiscoveryState {
             return;
         }
         self.context = None;
+        self.active_search_key = None;
+        self.cached_searches.clear();
         drop(self.begin_search(instance));
         self.stream = None;
         self.page_loading = false;
@@ -1010,16 +1466,72 @@ impl DiscoveryState {
     }
 
     pub fn begin_modpack_search(&mut self) -> DiscoveryRequest {
+        self.sync_discovery_provider();
         self.begin_search_context("modpacks".to_owned())
     }
 
     fn begin_search_context(&mut self, context: String) -> DiscoveryRequest {
+        self.sync_discovery_provider();
+        let settings = crate::config::SETTINGS.read();
+        let key = DiscoverySearchKey {
+            context: context.clone(),
+            query: self.search.query.clone(),
+            sort: self.sort,
+            filters: self.filters.clone(),
+            modrinth: settings.content.discovery_provider_enabled("modrinth"),
+            curseforge: settings.content.discovery_provider_enabled("curseforge"),
+            preferred: settings.content.preferred_provider().to_owned(),
+        };
+        drop(settings);
+        let changed = self.active_search_key.as_ref() != Some(&key);
+        if changed
+            && self.active_search_key.is_some()
+            && self.error.is_none()
+            && !self.list.has_pending_icons()
+            && (self.next_offset > 0 || self.exhausted)
+        {
+            self.cached_searches.push((
+                self.active_search_key.take().unwrap(),
+                CachedDiscoverySearch {
+                    entries: self.list.entries.clone(),
+                    sources: self.sources.clone(),
+                    selected: self.list.list_state.selected,
+                    total_hits: self.total_hits,
+                    next_offset: self.next_offset,
+                    exhausted: self.exhausted,
+                },
+            ));
+            if self.cached_searches.len() > 4 {
+                self.cached_searches.remove(0);
+            }
+        }
+        let cached = changed
+            .then(|| {
+                self.cached_searches
+                    .iter()
+                    .position(|(candidate, _)| *candidate == key)
+            })
+            .flatten()
+            .map(|index| self.cached_searches.remove(index).1);
+        let cached_icons = cached_icons(
+            self.list
+                .entries
+                .iter()
+                .chain(
+                    self.cached_searches
+                        .iter()
+                        .flat_map(|(_, search)| search.entries.iter()),
+                )
+                .chain(cached.iter().flat_map(|search| search.entries.iter())),
+        );
+        self.active_search_key = Some(key);
         self.generation = self.generation.wrapping_add(1);
         self.project_page = None;
         self.version_popup = None;
         self.sources.clear();
-        let reconcile =
-            self.context.as_deref() == Some(context.as_str()) && !self.list.entries.is_empty();
+        let reconcile = cached.is_none()
+            && self.context.as_deref() == Some(context.as_str())
+            && !self.list.entries.is_empty();
         self.context = Some(context.clone());
         self.total_hits = 0;
         self.error = None;
@@ -1029,21 +1541,22 @@ impl DiscoveryState {
         self.search_changed_at = None;
         self.retry_page_at = None;
         self.page_retry_attempt = 0;
-        let loaded_icon_stems = if reconcile {
-            self.list
-                .entries
-                .iter()
-                .filter(|entry| entry.icon_bytes.is_some())
-                .map(|entry| entry.file_stem.clone())
-                .collect()
-        } else {
-            std::collections::HashSet::new()
-        };
-        let stream = if reconcile {
+        let stream = if let Some(cached) = cached {
+            self.list.set_entries(cached.entries);
+            self.list.list_state.selected = cached.selected;
+            self.list.loading = false;
+            self.sources = cached.sources;
+            self.total_hits = cached.total_hits;
+            self.next_offset = cached.next_offset;
+            self.exhausted = cached.exhausted;
+            self.page_loading = false;
+            self.list.refresh_source_stream(context)
+        } else if reconcile {
             self.list.refresh_source_stream(context)
         } else {
             self.list.start_source_stream(context)
         };
+        self.list.show_source_rows_progressively();
         self.list.search.query.clone_from(&self.search.query);
         self.list.set_search_filtering(false);
         self.stream = Some(stream.clone());
@@ -1054,10 +1567,11 @@ impl DiscoveryState {
             pending: self.pending.clone(),
             stream,
             reconcile,
-            loaded_icon_stems,
+            cached_icons,
             known_projects: std::collections::HashMap::new(),
             sort: self.sort,
             filters: self.filters.clone(),
+            cached: !self.page_loading,
         }
     }
 
@@ -1067,13 +1581,6 @@ impl DiscoveryState {
         }
         self.page_loading = true;
         self.retry_page_at = None;
-        let loaded_icon_stems = self
-            .list
-            .entries
-            .iter()
-            .filter(|entry| entry.icon_bytes.is_some())
-            .map(|entry| entry.file_stem.clone())
-            .collect();
         let known_projects = self
             .list
             .entries
@@ -1087,6 +1594,13 @@ impl DiscoveryState {
                 ))
             })
             .collect();
+        let cached_icons = cached_icons(
+            self.list.entries.iter().chain(
+                self.cached_searches
+                    .iter()
+                    .flat_map(|(_, search)| search.entries.iter()),
+            ),
+        );
         Some(DiscoveryRequest {
             generation: self.generation,
             offset: self.next_offset,
@@ -1094,10 +1608,11 @@ impl DiscoveryState {
             pending: self.pending.clone(),
             stream: self.stream.clone()?,
             reconcile: false,
-            loaded_icon_stems,
+            cached_icons,
             known_projects,
             sort: self.sort,
             filters: self.filters.clone(),
+            cached: false,
         })
     }
 
@@ -1636,7 +2151,7 @@ impl DiscoveryState {
             }
             return;
         }
-        let sort = crate::instance::content::provider::DiscoverySort::ALL[self.sort_panel_selected];
+        let sort = self.sorts()[self.sort_panel_selected];
         if self.sort != sort {
             self.sort = sort;
             self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
@@ -1649,10 +2164,11 @@ impl DiscoveryState {
                 self.open_filter_version_picker();
                 return;
             }
-            1 => self.filters.environment = self.filters.environment.next(),
+            1 if self.has_environment_filter() => {
+                self.filters.environment = self.filters.environment.next()
+            }
             index => {
-                let Some((slug, _)) = discovery_categories(self.kind, self.modpacks).get(index - 2)
-                else {
+                let Some((slug, _)) = self.categories().get(index - self.category_start()) else {
                     return;
                 };
                 match self.filters.categories.get(*slug) {
@@ -1678,7 +2194,7 @@ impl DiscoveryState {
     fn cycle_selected_filter(&mut self, forward: bool) {
         match self.filter_panel_selected {
             0 => return,
-            1 => {
+            1 if self.has_environment_filter() => {
                 self.filters.environment = if forward {
                     self.filters.environment.next()
                 } else {
@@ -1784,6 +2300,11 @@ impl DiscoveryState {
                 match selected.get(&version) {
                     None => {
                         selected.insert(version, CategoryFilter::Include);
+                    }
+                    Some(CategoryFilter::Include)
+                        if !self.local_mode && self.category_provider == "curseforge" =>
+                    {
+                        selected.remove(&version);
                     }
                     Some(CategoryFilter::Include) => {
                         selected.insert(version, CategoryFilter::Exclude);
@@ -2286,7 +2807,7 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut DiscoveryState) -> bool {
                 _ => {}
             }
             if state.sort_panel_page == DiscoveryPanelPage::Filters {
-                let count = discovery_categories(state.kind, state.modpacks).len() + 2;
+                let count = state.categories().len() + state.category_start();
                 match key_event.code {
                     KeyCode::Char('f') | KeyCode::Esc => {
                         state.sort_panel_open = false;
@@ -2317,7 +2838,7 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut DiscoveryState) -> bool {
                         (state.sort_panel_selected + 1).min(if state.local_mode {
                             2
                         } else {
-                            crate::instance::content::provider::DiscoverySort::ALL.len() - 1
+                            state.sorts().len() - 1
                         });
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
@@ -2347,7 +2868,8 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut DiscoveryState) -> bool {
         state.sort_panel_selected = if state.local_mode {
             state.local_sort_index - 5
         } else {
-            crate::instance::content::provider::DiscoverySort::ALL
+            state
+                .sorts()
                 .iter()
                 .position(|sort| *sort == state.sort)
                 .unwrap_or(0)

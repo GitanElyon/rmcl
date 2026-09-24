@@ -7,6 +7,7 @@
 // also handles minecraft's formatting codes for colored mod names/descriptions
 // because apparently mojang thought terminal UIs would need that. thanks guys
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, mpsc};
@@ -53,13 +54,20 @@ impl ContentStream {
         }
     }
 
-    pub fn send_icon(&self, file_stem: String, path: std::path::PathBuf, bytes: Vec<u8>) -> bool {
+    pub fn send_icon(
+        &self,
+        file_stem: String,
+        path: std::path::PathBuf,
+        bytes: Vec<u8>,
+        source: Option<(String, String)>,
+    ) -> bool {
         if self
             .sender
             .send(ContentStreamUpdate::Icon {
                 file_stem,
                 path,
                 bytes,
+                source,
             })
             .is_ok()
         {
@@ -70,10 +78,19 @@ impl ContentStream {
         }
     }
 
-    pub fn send_icon_unavailable(&self, file_stem: String, path: std::path::PathBuf) -> bool {
+    pub fn send_icon_unavailable(
+        &self,
+        file_stem: String,
+        path: std::path::PathBuf,
+        source: Option<(String, String)>,
+    ) -> bool {
         if self
             .sender
-            .send(ContentStreamUpdate::IconUnavailable { file_stem, path })
+            .send(ContentStreamUpdate::IconUnavailable {
+                file_stem,
+                path,
+                source,
+            })
             .is_ok()
         {
             crate::feedback::request_redraw();
@@ -84,7 +101,41 @@ impl ContentStream {
     }
 
     pub fn upsert(&self, entry: ContentEntry) -> bool {
-        if self.sender.send(ContentStreamUpdate::Upsert(entry)).is_ok() {
+        if self
+            .sender
+            .send(ContentStreamUpdate::Upsert(entry, false))
+            .is_ok()
+        {
+            crate::feedback::request_redraw();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn preview(&self, entry: ContentEntry) -> bool {
+        if self
+            .sender
+            .send(ContentStreamUpdate::Upsert(entry, true))
+            .is_ok()
+        {
+            crate::feedback::request_redraw();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn append_preview(&self) -> bool {
+        self.sender.send(ContentStreamUpdate::AppendPreview).is_ok()
+    }
+
+    pub fn order(&self, file_stems: Vec<String>) -> bool {
+        if self
+            .sender
+            .send(ContentStreamUpdate::Order(file_stems))
+            .is_ok()
+        {
             crate::feedback::request_redraw();
             true
         } else {
@@ -108,22 +159,59 @@ impl ContentStream {
 
 enum ContentStreamUpdate {
     Entry(ContentEntry),
-    Upsert(ContentEntry),
+    Upsert(ContentEntry, bool),
+    AppendPreview,
     Retain(HashSet<String>),
+    Order(Vec<String>),
     Icon {
         file_stem: String,
         path: std::path::PathBuf,
         bytes: Vec<u8>,
+        source: Option<(String, String)>,
     },
     IconUnavailable {
         file_stem: String,
         path: std::path::PathBuf,
+        source: Option<(String, String)>,
     },
 }
 
 struct CachedList {
     entries: Vec<ContentEntry>,
     selected: Option<usize>,
+    sort_metadata: HashMap<std::path::PathBuf, FileSortMetadata>,
+}
+
+struct FileSortMetadata {
+    name: String,
+    size: Option<u64>,
+    modified: Option<u128>,
+}
+
+struct CachedSelection {
+    indices: Vec<usize>,
+    filters: crate::tui::widgets::content::discovery::DiscoveryFilters,
+    game_version: String,
+    sort_index: usize,
+    descending: bool,
+    query: String,
+    filter_search: bool,
+    entry_count: usize,
+    pending_count: usize,
+}
+
+impl FileSortMetadata {
+    fn from_entry(entry: &ContentEntry) -> Self {
+        let metadata = std::fs::metadata(&entry.path).ok();
+        Self {
+            name: entry.name.to_lowercase(),
+            size: metadata.as_ref().map(std::fs::Metadata::len),
+            modified: metadata
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|elapsed| elapsed.as_nanos()),
+        }
+    }
 }
 
 struct PendingContentImage {
@@ -201,9 +289,13 @@ pub struct ContentListState {
     pub search: crate::tui::widgets::search::SearchState,
     filter_search: bool,
     cache: HashMap<String, CachedList>,
+    sort_metadata: RefCell<HashMap<std::path::PathBuf, FileSortMetadata>>,
+    filtered_cache: RefCell<Option<CachedSelection>>,
     // streaming: individual entries arrive here during initial load
     stream_rx: Option<mpsc::Receiver<ContentStreamUpdate>>,
     stream_order: ContentStreamOrder,
+    progressive_source_stream: bool,
+    preview_count: usize,
     // file watcher: notify callback spawns background work,
     // precomputed diff lands here for the UI to pick up
     watcher_diff: Arc<Mutex<Option<WatcherDiff>>>,
@@ -253,8 +345,12 @@ impl Default for ContentListState {
             search: crate::tui::widgets::search::SearchState::default(),
             filter_search: true,
             cache: HashMap::new(),
+            sort_metadata: RefCell::new(HashMap::new()),
+            filtered_cache: RefCell::new(None),
             stream_rx: None,
             stream_order: ContentStreamOrder::default(),
+            progressive_source_stream: false,
+            preview_count: 0,
             watcher_diff: Arc::new(Mutex::new(None)),
             _watcher: None,
             watched_dir: None,
@@ -267,8 +363,18 @@ impl Default for ContentListState {
 }
 
 impl ContentListState {
+    pub(crate) fn has_pending_icons(&self) -> bool {
+        !self.pending_entry_images.is_empty()
+    }
+
+    fn invalidate_filtered(&mut self) {
+        self.filtered_cache.get_mut().take();
+    }
+
     pub(crate) fn set_entries(&mut self, entries: Vec<ContentEntry>) {
         self.entries = entries;
+        self.invalidate_filtered();
+        self.sort_metadata.get_mut().clear();
         self.list_state = TuiListState::default();
         self.list_state.selected = (!self.entries.is_empty()).then_some(0);
         self.image_protocols.clear();
@@ -344,6 +450,7 @@ impl ContentListState {
             }
         }
         if changed {
+            self.invalidate_filtered();
             for stem in invalidated_icons {
                 self.image_protocols.remove(&stem);
                 self.requested_images.remove(&stem);
@@ -429,6 +536,7 @@ impl ContentListState {
             }
         }
         if changed {
+            self.invalidate_filtered();
             self.images_dirty = true;
             crate::feedback::request_redraw();
         }
@@ -563,8 +671,13 @@ impl ContentListState {
         let (sender, receiver) = mpsc::channel();
         self.stream_rx = Some(receiver);
         self.stream_order = ContentStreamOrder::Source;
+        self.preview_count = 0;
         self.loaded_for = Some(source.into());
         ContentStream { sender }
+    }
+
+    pub(crate) fn show_source_rows_progressively(&mut self) {
+        self.progressive_source_stream = true;
     }
 
     fn start_stream_with_order(
@@ -579,6 +692,8 @@ impl ContentListState {
         self.pending_removals.clear();
         self.requested_provider_icons.clear();
         self.entries.clear();
+        self.invalidate_filtered();
+        self.sort_metadata.get_mut().clear();
         self.display_metadata.clear();
         self.list_state = TuiListState::default();
         self.loading = true;
@@ -587,6 +702,8 @@ impl ContentListState {
         let (sender, receiver) = mpsc::channel();
         self.stream_rx = Some(receiver);
         self.stream_order = order;
+        self.progressive_source_stream = false;
+        self.preview_count = 0;
         ContentStream { sender }
     }
 
@@ -688,6 +805,7 @@ impl ContentListState {
                 .find(|entry| entry.file_stem == result.file_stem && entry.path == result.path)
             {
                 self.pending_entry_images.remove(&result.file_stem);
+                self.filtered_cache.get_mut().take();
                 entry.icon_lines = Some(result.icon_lines);
                 if let Some(image) = result.image {
                     self.image_protocols
@@ -709,9 +827,17 @@ impl ContentListState {
         let mut finished = false;
         let mut restore_selected = None;
         loop {
+            if self.progressive_source_stream && received_count >= 4 {
+                crate::feedback::request_redraw();
+                break;
+            }
             match rx.try_recv() {
+                Ok(ContentStreamUpdate::AppendPreview) => {
+                    self.preview_count = self.entries.len();
+                }
                 Ok(ContentStreamUpdate::Entry(entry)) => {
                     received = true;
+                    self.sort_metadata.get_mut().remove(&entry.path);
                     self.images_dirty = true;
                     received_count += 1;
                     if entry.icon_bytes.is_some() || entry.provider_icon {
@@ -732,23 +858,37 @@ impl ContentListState {
                         ContentStreamOrder::Source => self.entries.push(entry),
                     }
                 }
-                Ok(ContentStreamUpdate::Upsert(mut entry)) => {
+                Ok(ContentStreamUpdate::Upsert(mut entry, preview)) => {
                     received = true;
                     self.images_dirty = true;
                     received_count += 1;
+                    if preview && restore_selected.is_none() {
+                        restore_selected = Some(self.selected_file_stem());
+                    }
                     let stem = entry.file_stem.clone();
-                    if let Some(existing) = self
+                    self.sort_metadata.get_mut().remove(&entry.path);
+                    let icon_ready = if let Some(index) = self
                         .entries
-                        .iter_mut()
-                        .find(|existing| existing.file_stem == stem)
+                        .iter()
+                        .position(|existing| existing.file_stem == stem)
                     {
+                        let existing = &mut self.entries[index];
+                        self.sort_metadata.get_mut().remove(&existing.path);
                         let same_source = existing.path == entry.path
                             && existing.provider_project == entry.provider_project;
+                        let same_icon = same_source
+                            && entry.icon_bytes.as_ref() == existing.icon_bytes.as_ref();
+                        let icon_ready = same_source
+                            && existing.icon_bytes.is_some()
+                            && (entry.icon_bytes.is_none() || same_icon)
+                            && !self.pending_entry_images.contains(&stem);
                         if entry.icon_bytes.is_none() && same_source {
                             entry.icon_bytes = existing.icon_bytes.take();
                             entry.icon_lines = existing.icon_lines.take();
                             entry.provider_icon = existing.provider_icon;
-                        } else if entry.icon_bytes != existing.icon_bytes {
+                        } else if same_icon {
+                            entry.icon_lines = existing.icon_lines.take();
+                        } else {
                             self.image_protocols.remove(&entry.file_stem);
                             self.requested_images.remove(&entry.file_stem);
                         }
@@ -760,13 +900,28 @@ impl ContentListState {
                             entry.provider_description = true;
                         }
                         *existing = entry;
+                        if preview {
+                            let entry = self.entries.remove(index);
+                            self.entries
+                                .insert(self.preview_count.min(self.entries.len()), entry);
+                            self.preview_count += 1;
+                        }
+                        icon_ready
                     } else {
-                        self.entries.push(entry);
-                    }
+                        if preview {
+                            self.entries
+                                .insert(self.preview_count.min(self.entries.len()), entry);
+                            self.preview_count += 1;
+                        } else {
+                            self.entries.push(entry);
+                        }
+                        false
+                    };
                     if let Some(entry) = self.entries.iter().find(|entry| entry.file_stem == stem) {
                         self.display_metadata
                             .insert(entry.file_stem.clone(), display_metadata(entry));
                         if (entry.icon_bytes.is_some() || entry.provider_icon)
+                            && !icon_ready
                             && !self.image_protocols.contains_key(&entry.file_stem)
                         {
                             self.pending_entry_images.insert(stem);
@@ -777,9 +932,14 @@ impl ContentListState {
                 }
                 Ok(ContentStreamUpdate::Retain(file_stems)) => {
                     received = true;
-                    let selected_stem = self.selected_file_stem();
+                    let selected_stem = restore_selected
+                        .take()
+                        .unwrap_or_else(|| self.selected_file_stem());
                     self.entries
                         .retain(|entry| file_stems.contains(&entry.file_stem));
+                    self.sort_metadata
+                        .get_mut()
+                        .retain(|path, _| self.entries.iter().any(|entry| entry.path == *path));
                     self.display_metadata
                         .retain(|stem, _| file_stems.contains(stem));
                     self.image_protocols
@@ -791,17 +951,52 @@ impl ContentListState {
                     restore_selected = Some(selected_stem);
                     self.images_dirty = true;
                 }
+                Ok(ContentStreamUpdate::Order(file_stems)) => {
+                    received = true;
+                    let selected_stem = restore_selected
+                        .take()
+                        .unwrap_or_else(|| self.selected_file_stem());
+                    let positions = file_stems
+                        .iter()
+                        .enumerate()
+                        .map(|(index, stem)| (stem.as_str(), index))
+                        .collect::<HashMap<_, _>>();
+                    self.entries
+                        .retain(|entry| positions.contains_key(entry.file_stem.as_str()));
+                    self.entries
+                        .sort_by_key(|entry| positions[entry.file_stem.as_str()]);
+                    self.sort_metadata
+                        .get_mut()
+                        .retain(|path, _| self.entries.iter().any(|entry| entry.path == *path));
+                    self.display_metadata
+                        .retain(|stem, _| positions.contains_key(stem.as_str()));
+                    self.image_protocols
+                        .retain(|stem, _| positions.contains_key(stem.as_str()));
+                    self.requested_images
+                        .retain(|stem| positions.contains_key(stem.as_str()));
+                    self.pending_entry_images
+                        .retain(|stem| positions.contains_key(stem.as_str()));
+                    self.preview_count = 0;
+                    restore_selected = Some(selected_stem);
+                    self.images_dirty = true;
+                }
                 Ok(ContentStreamUpdate::Icon {
                     file_stem,
                     path,
                     bytes,
+                    source,
                 }) => {
                     received = true;
-                    if let Some(entry) = self
-                        .entries
-                        .iter_mut()
-                        .find(|entry| entry.file_stem == file_stem && entry.path == path)
-                    {
+                    if let Some(entry) = self.entries.iter_mut().find(|entry| {
+                        entry.file_stem == file_stem
+                            && entry.path == path
+                            && source.as_ref().is_none_or(|(provider, project_id)| {
+                                entry.provider_project.as_ref().is_some_and(|project| {
+                                    project.provider == *provider
+                                        && project.project_id == *project_id
+                                })
+                            })
+                    }) {
                         entry.icon_bytes = Some(bytes);
                         entry.provider_icon = true;
                         self.pending_entry_images.insert(file_stem.clone());
@@ -809,13 +1004,22 @@ impl ContentListState {
                         self.images_dirty = true;
                     }
                 }
-                Ok(ContentStreamUpdate::IconUnavailable { file_stem, path }) => {
+                Ok(ContentStreamUpdate::IconUnavailable {
+                    file_stem,
+                    path,
+                    source,
+                }) => {
                     received = true;
-                    if let Some(entry) = self
-                        .entries
-                        .iter_mut()
-                        .find(|entry| entry.file_stem == file_stem && entry.path == path)
-                    {
+                    if let Some(entry) = self.entries.iter_mut().find(|entry| {
+                        entry.file_stem == file_stem
+                            && entry.path == path
+                            && source.as_ref().is_none_or(|(provider, project_id)| {
+                                entry.provider_project.as_ref().is_some_and(|project| {
+                                    project.provider == *provider
+                                        && project.project_id == *project_id
+                                })
+                            })
+                    }) {
                         entry.provider_icon = false;
                         self.pending_entry_images.remove(&file_stem);
                         self.images_dirty = true;
@@ -835,6 +1039,7 @@ impl ContentListState {
         }
 
         if received || finished {
+            self.invalidate_filtered();
             self.loading = false;
             if received_count > 0 {
                 tracing::trace!(
@@ -878,6 +1083,7 @@ impl ContentListState {
                 ..ContentWatcherUpdate::default()
             };
         };
+        self.invalidate_filtered();
         let mut update = ContentWatcherUpdate {
             requires_reconcile: expired_removals || !diff.added.is_empty(),
             ..ContentWatcherUpdate::default()
@@ -900,6 +1106,8 @@ impl ContentListState {
                 } else {
                     entry.path.clone()
                 };
+                self.sort_metadata.get_mut().remove(&old_path);
+                self.sort_metadata.get_mut().remove(path);
                 update.toggles.push(ContentToggle {
                     old_path,
                     new_path: path.clone(),
@@ -923,12 +1131,16 @@ impl ContentListState {
 
         // insert new entries in sorted position
         for mut entry in diff.added {
+            self.sort_metadata.get_mut().remove(&entry.path);
             let replacement = self.entries.iter().position(|existing| {
                 self.pending_removals.contains_key(&existing.file_stem)
                     && existing.name.eq_ignore_ascii_case(&entry.name)
             });
             if let Some(index) = replacement {
                 let old_stem = self.entries[index].file_stem.clone();
+                self.sort_metadata
+                    .get_mut()
+                    .remove(&self.entries[index].path);
                 self.pending_removals.remove(&old_stem);
                 preserve_visual_metadata(&mut entry, &mut self.entries[index]);
                 self.display_metadata.remove(&old_stem);
@@ -996,6 +1208,9 @@ impl ContentListState {
                 continue;
             }
             let before = self.entries.len();
+            if let Some(entry) = self.entries.iter().find(|entry| entry.file_stem == stem) {
+                self.sort_metadata.get_mut().remove(&entry.path);
+            }
             self.entries.retain(|entry| entry.file_stem != stem);
             removed |= self.entries.len() != before;
             self.display_metadata.remove(&stem);
@@ -1004,6 +1219,7 @@ impl ContentListState {
             self.pending_entry_images.remove(&stem);
         }
         if removed {
+            self.invalidate_filtered();
             self.images_dirty = true;
             self.update_scrollbar();
         }
@@ -1145,6 +1361,19 @@ impl ContentListState {
     }
 
     pub fn filtered_indices(&self) -> Vec<usize> {
+        if self.local_sort_index != 0
+            && let Some(cached) = self.filtered_cache.borrow().as_ref()
+            && cached.filters == self.local_filters
+            && cached.game_version == self.local_game_version
+            && cached.sort_index == self.local_sort_index
+            && cached.descending == self.local_sort_descending
+            && cached.query == self.search.query
+            && cached.filter_search == self.filter_search
+            && cached.entry_count == self.entries.len()
+            && cached.pending_count == self.pending_entry_images.len()
+        {
+            return cached.indices.clone();
+        }
         let mut indices: Vec<_> = self
             .entries
             .iter()
@@ -1159,20 +1388,46 @@ impl ContentListState {
             .map(|(i, _)| i)
             .collect();
         if self.local_sort_index != 0 {
+            let mut metadata = self.sort_metadata.borrow_mut();
+            for &index in &indices {
+                let entry = &self.entries[index];
+                metadata
+                    .entry(entry.path.clone())
+                    .or_insert_with(|| FileSortMetadata::from_entry(entry));
+            }
             indices.sort_by(|&a, &b| {
-                let left = &self.entries[a];
-                let right = &self.entries[b];
-                let order = match (
-                    self.installed_sort_key(left),
-                    self.installed_sort_key(right),
-                ) {
+                let left = &metadata[&self.entries[a].path];
+                let right = &metadata[&self.entries[b].path];
+                let (left_key, right_key) = match self.local_sort_index {
+                    6 => (left.size.map(u128::from), right.size.map(u128::from)),
+                    7 => (left.modified, right.modified),
+                    _ => {
+                        return if self.local_sort_descending {
+                            right.name.cmp(&left.name)
+                        } else {
+                            left.name.cmp(&right.name)
+                        };
+                    }
+                };
+                let order = match (left_key, right_key) {
                     (Some(left), Some(right)) if self.local_sort_descending => right.cmp(&left),
                     (Some(left), Some(right)) => left.cmp(&right),
                     (Some(_), None) => std::cmp::Ordering::Less,
                     (None, Some(_)) => std::cmp::Ordering::Greater,
                     (None, None) => std::cmp::Ordering::Equal,
                 };
-                order.then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+                order.then_with(|| left.name.cmp(&right.name))
+            });
+            *self.filtered_cache.borrow_mut() = Some(CachedSelection {
+                indices: indices.clone(),
+                filters: self.local_filters.clone(),
+                game_version: self.local_game_version.clone(),
+                sort_index: self.local_sort_index,
+                descending: self.local_sort_descending,
+                query: self.search.query.clone(),
+                filter_search: self.filter_search,
+                entry_count: self.entries.len(),
+                pending_count: self.pending_entry_images.len(),
             });
         }
         indices
@@ -1194,6 +1449,14 @@ impl ContentListState {
         game_version: &str,
         panel_open: bool,
     ) {
+        if self.local_filters == *filters
+            && self.local_sort_index == sort_index
+            && self.local_sort_descending == descending
+            && self.local_game_version == game_version
+            && self.local_panel_open == panel_open
+        {
+            return;
+        }
         let selected = self.selected_file_stem();
         let previously_needed_metadata = self.needs_local_metadata();
         self.local_filters = filters.clone();
@@ -1275,22 +1538,6 @@ impl ContentListState {
             }
         }
         true
-    }
-
-    fn installed_sort_key(&self, entry: &ContentEntry) -> Option<String> {
-        match self.local_sort_index {
-            5 => Some(entry.name.to_lowercase()),
-            // ponytail: file metadata is read during a local sort; cache it if large installed lists make this slow.
-            6 => std::fs::metadata(&entry.path)
-                .ok()
-                .map(|metadata| format!("{:020}", metadata.len())),
-            7 => std::fs::metadata(&entry.path)
-                .ok()
-                .and_then(|metadata| metadata.modified().ok())
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|elapsed| format!("{:020}", elapsed.as_secs())),
-            _ => None,
-        }
     }
 
     pub fn set_search_filtering(&mut self, enabled: bool) {
@@ -1389,6 +1636,8 @@ impl ContentListState {
             .is_some_and(|source| source == instance_name || source.starts_with(&world_prefix))
         {
             self.loaded_for = None;
+            self.sort_metadata.get_mut().clear();
+            self.invalidate_filtered();
         }
     }
 
@@ -1424,13 +1673,18 @@ impl ContentListState {
                 CachedList {
                     entries: std::mem::take(&mut self.entries),
                     selected: self.list_state.selected,
+                    sort_metadata: std::mem::take(self.sort_metadata.get_mut()),
                 },
             );
         }
 
         // try cache first
+        // ponytail: cached file stats are refreshed by watcher updates; revalidate on restore if
+        // files modified while another instance was active become a real problem.
         if let Some(cached) = self.cache.remove(instance_name) {
             self.entries = cached.entries;
+            self.invalidate_filtered();
+            *self.sort_metadata.get_mut() = cached.sort_metadata;
             self.pending_entry_images.extend(
                 self.entries
                     .iter()
@@ -1574,7 +1828,10 @@ impl ContentListState {
         };
         match crate::instance::content::entry::toggle_entry_path(entry) {
             Ok(Some(new_path)) => {
+                self.invalidate_filtered();
                 let entry = &mut self.entries[index];
+                self.sort_metadata.get_mut().remove(&entry.path);
+                self.sort_metadata.get_mut().remove(&new_path);
                 entry.enabled = !entry.enabled;
                 entry.path = new_path;
             }
@@ -1591,6 +1848,8 @@ impl ContentListState {
     }
 
     pub fn remove_path(&mut self, path: &Path) {
+        self.invalidate_filtered();
+        self.sort_metadata.get_mut().remove(path);
         let file_stem = self
             .entries
             .iter()

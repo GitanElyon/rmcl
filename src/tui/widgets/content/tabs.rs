@@ -1388,17 +1388,19 @@ pub(crate) fn render_version_popup(
         if popup.confirming && state.kind == crate::instance::ContentKind::Mod && !state.modpacks {
             instance_game_version
                 .filter(|instance_version| {
-                    popup.selected_version().is_some_and(|version| {
-                        !version.game_versions.is_empty()
-                            && !version
-                                .game_versions
-                                .iter()
-                                .any(|game| game == instance_version)
-                    })
+                    popup
+                        .selected_minecraft_version
+                        .as_deref()
+                        .is_some_and(|selected| selected != *instance_version)
+                        || popup.selected_version().is_some_and(|version| {
+                            !version.game_versions.is_empty()
+                                && !version
+                                    .game_versions
+                                    .iter()
+                                    .any(|game| game == instance_version)
+                        })
                 })
-                .map(|version| {
-                    format!("Warning: This mod may be incompatible with Minecraft {version}.")
-                })
+                .map(|version| format!("Mod version may be incompatible with {version}"))
         } else {
             None
         };
@@ -1596,11 +1598,10 @@ pub(crate) fn render_version_popup(
                     let summary_height = rows.len() as u16;
                     Paragraph::new(warning)
                         .style(Style::default().fg(THEME.as_ref().warning()))
-                        .wrap(Wrap { trim: false })
                         .render(
                             Rect {
                                 y: area.y.saturating_add(summary_height),
-                                height: area.height.saturating_sub(summary_height),
+                                height: area.height.saturating_sub(summary_height).min(1),
                                 ..area
                             },
                             buffer,
@@ -1694,10 +1695,10 @@ fn version_popup_height(
         return VERSION_POPUP_HEIGHT;
     }
     let Some(plan) = plan else {
-        return 6 + u16::from(has_world) + 2 * u16::from(has_warning);
+        return 6 + u16::from(has_world) + u16::from(has_warning);
     };
     6 + u16::from(has_world)
-        + 2 * u16::from(has_warning)
+        + u16::from(has_warning)
         + u16::from(plan.dependency_installs().next().is_some())
         + u16::from(plan.dependency_replacements().next().is_some())
         + u16::from(plan.optional_dependencies > 0)

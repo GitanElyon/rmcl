@@ -60,11 +60,11 @@ fn discovery_confirmation_popup_fits_its_summary() {
         VERSION_POPUP_HEIGHT
     );
     assert_eq!(version_popup_height(true, None, false, false), 6);
-    assert_eq!(version_popup_height(true, None, false, true), 8);
+    assert_eq!(version_popup_height(true, None, false, true), 7);
 }
 
 #[test]
-fn install_summary_warns_only_when_selected_mod_does_not_support_instance_version() {
+fn install_summary_warns_when_chosen_minecraft_or_mod_version_differs() {
     use crate::instance::ContentKind;
     use crate::net::modrinth::{DiscoveryProject, VersionInfo, VersionType};
     use ratatui::{Terminal, backend::TestBackend};
@@ -95,13 +95,14 @@ fn install_summary_warns_only_when_selected_mod_does_not_support_instance_versio
         project_id: "project".to_owned(),
         name: "1.0".to_owned(),
         version_number: "1.0".to_owned(),
-        game_versions: vec!["26.1".to_owned()],
+        game_versions: vec!["26.1".to_owned(), "26.3".to_owned()],
         loaders: vec!["forge".to_owned()],
         version_type: VersionType::Release,
         dependencies: Vec::new(),
         date_published: String::new(),
         files: Vec::new(),
     }];
+    popup.selected_minecraft_version = Some("26.1".to_owned());
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     let picker = ratatui_image::picker::Picker::halfblocks();
     terminal
@@ -110,18 +111,32 @@ fn install_summary_warns_only_when_selected_mod_does_not_support_instance_versio
         })
         .unwrap();
     let rendered = format!("{}", terminal.backend());
-    assert!(rendered.contains("Warning: This mod may be incompatible"));
-    assert!(rendered.contains("Minecraft 26.3"));
+    assert!(rendered.contains("Mod version may be incompatible with 26.3"));
+    assert!(!rendered.contains("Warning:"));
 
-    state.version_popup.as_mut().unwrap().versions[0]
-        .game_versions
-        .push("26.3".to_owned());
+    state
+        .version_popup
+        .as_mut()
+        .unwrap()
+        .selected_minecraft_version = Some("26.3".to_owned());
     terminal
         .draw(|frame| {
             render_version_popup(frame, frame.area(), &mut state, &picker, Some("26.3"));
         })
         .unwrap();
     assert!(!format!("{}", terminal.backend()).contains("may be incompatible"));
+
+    let popup = state.version_popup.as_mut().unwrap();
+    popup.selected_minecraft_version = None;
+    popup.versions[0].game_versions = vec!["26.1".to_owned()];
+    terminal
+        .draw(|frame| {
+            render_version_popup(frame, frame.area(), &mut state, &picker, Some("26.3"));
+        })
+        .unwrap();
+    assert!(
+        format!("{}", terminal.backend()).contains("Mod version may be incompatible with 26.3")
+    );
 }
 
 #[test]

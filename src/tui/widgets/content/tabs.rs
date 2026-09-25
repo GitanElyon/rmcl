@@ -678,6 +678,7 @@ pub fn render(
                             content_area,
                             datapacks_discovery_state,
                             picker,
+                            Some(&instance.game_version),
                         );
                     }
                     return;
@@ -776,7 +777,13 @@ fn render_downloadable(
             picker,
         );
         if discovery_state.version_popup.is_some() {
-            render_version_popup(frame, area, discovery_state, picker);
+            render_version_popup(
+                frame,
+                area,
+                discovery_state,
+                picker,
+                Some(&instance.game_version),
+            );
         }
     }
 }
@@ -843,7 +850,15 @@ fn render_discovery(
         );
         return;
     }
-    render_discovery_body(frame, area, state, is_focused, loading_text, picker);
+    render_discovery_body(
+        frame,
+        area,
+        state,
+        is_focused,
+        loading_text,
+        picker,
+        Some(&instance.game_version),
+    );
 }
 
 pub(crate) fn render_discovery_popup(
@@ -854,7 +869,15 @@ pub(crate) fn render_discovery_popup(
 ) {
     state.sync_discovery_provider();
     state.set_viewport_rows(area.height);
-    render_discovery_body(frame, area, state, true, "Searching modpacks...", picker);
+    render_discovery_body(
+        frame,
+        area,
+        state,
+        true,
+        "Searching modpacks...",
+        picker,
+        None,
+    );
 }
 
 fn render_discovery_body(
@@ -864,6 +887,7 @@ fn render_discovery_body(
     is_focused: bool,
     loading_text: &str,
     picker: &ratatui_image::picker::Picker,
+    instance_game_version: Option<&str>,
 ) {
     let show_sort_panel =
         state.sort_panel_open && state.project_page.is_none() && state.version_popup.is_none();
@@ -917,7 +941,7 @@ fn render_discovery_body(
         render_sort_panel(frame, areas[1], state);
     }
     if state.version_popup.is_some() {
-        render_version_popup(frame, area, state, picker);
+        render_version_popup(frame, area, state, picker, instance_game_version);
     }
 }
 
@@ -1351,6 +1375,7 @@ pub(crate) fn render_version_popup(
     area: Rect,
     state: &mut DiscoveryState,
     picker: &ratatui_image::picker::Picker,
+    instance_game_version: Option<&str>,
 ) {
     let Some(popup) = state.version_popup.as_mut() else {
         return;
@@ -1359,6 +1384,24 @@ pub(crate) fn render_version_popup(
         render_world_picker(frame, area, popup, picker);
         return;
     }
+    let compatibility_warning =
+        if popup.confirming && state.kind == crate::instance::ContentKind::Mod && !state.modpacks {
+            instance_game_version
+                .filter(|instance_version| {
+                    popup.selected_version().is_some_and(|version| {
+                        !version.game_versions.is_empty()
+                            && !version
+                                .game_versions
+                                .iter()
+                                .any(|game| game == instance_version)
+                    })
+                })
+                .map(|version| {
+                    format!("Warning: This mod may be incompatible with Minecraft {version}.")
+                })
+        } else {
+            None
+        };
     let popup_area = area.centered(
         Constraint::Percentage(50),
         Constraint::Length(
@@ -1366,6 +1409,7 @@ pub(crate) fn render_version_popup(
                 popup.confirming,
                 popup.dependency_plan.as_ref(),
                 popup.target_world.is_some(),
+                compatibility_warning.is_some(),
             )
             .min(area.height.saturating_sub(2)),
         ),
@@ -1548,6 +1592,20 @@ pub(crate) fn render_version_popup(
                     rows.push(("Optional not installed", optional_text.as_str()));
                 }
                 crate::tui::widgets::popups::base::render_summary(&rows, area, buffer);
+                if let Some(warning) = compatibility_warning.as_deref() {
+                    let summary_height = rows.len() as u16;
+                    Paragraph::new(warning)
+                        .style(Style::default().fg(THEME.as_ref().warning()))
+                        .wrap(Wrap { trim: false })
+                        .render(
+                            Rect {
+                                y: area.y.saturating_add(summary_height),
+                                height: area.height.saturating_sub(summary_height),
+                                ..area
+                            },
+                            buffer,
+                        );
+                }
             } else if items.is_empty() {
                 Paragraph::new(if selecting_minecraft_version {
                     "No compatible Minecraft versions found."
@@ -1630,14 +1688,16 @@ fn version_popup_height(
     confirming: bool,
     plan: Option<&crate::instance::content::dependencies::DependencyPlan>,
     has_world: bool,
+    has_warning: bool,
 ) -> u16 {
     if !confirming {
         return VERSION_POPUP_HEIGHT;
     }
     let Some(plan) = plan else {
-        return 6 + u16::from(has_world);
+        return 6 + u16::from(has_world) + 2 * u16::from(has_warning);
     };
     6 + u16::from(has_world)
+        + 2 * u16::from(has_warning)
         + u16::from(plan.dependency_installs().next().is_some())
         + u16::from(plan.dependency_replacements().next().is_some())
         + u16::from(plan.optional_dependencies > 0)

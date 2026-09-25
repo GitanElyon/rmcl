@@ -56,10 +56,72 @@ fn discovery_version_rows_only_show_the_version_number() {
 #[test]
 fn discovery_confirmation_popup_fits_its_summary() {
     assert_eq!(
-        version_popup_height(false, None, false),
+        version_popup_height(false, None, false, false),
         VERSION_POPUP_HEIGHT
     );
-    assert_eq!(version_popup_height(true, None, false), 6);
+    assert_eq!(version_popup_height(true, None, false, false), 6);
+    assert_eq!(version_popup_height(true, None, false, true), 8);
+}
+
+#[test]
+fn install_summary_warns_only_when_selected_mod_does_not_support_instance_version() {
+    use crate::instance::ContentKind;
+    use crate::net::modrinth::{DiscoveryProject, VersionInfo, VersionType};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state
+        .list
+        .entries
+        .push(crate::tui::widgets::content::discovery::project_entry(
+            DiscoveryProject {
+                id: "project".to_owned(),
+                slug: "project".to_owned(),
+                title: "Project".to_owned(),
+                description: String::new(),
+                downloads: 0,
+                icon_url: None,
+                icon_bytes: None,
+            },
+            None,
+        ));
+    state.list.list_state.selected = Some(0);
+    state.begin_versions();
+    let popup = state.version_popup.as_mut().unwrap();
+    popup.loading = false;
+    popup.confirming = true;
+    popup.versions = vec![VersionInfo {
+        id: "version".to_owned(),
+        project_id: "project".to_owned(),
+        name: "1.0".to_owned(),
+        version_number: "1.0".to_owned(),
+        game_versions: vec!["26.1".to_owned()],
+        loaders: vec!["forge".to_owned()],
+        version_type: VersionType::Release,
+        dependencies: Vec::new(),
+        date_published: String::new(),
+        files: Vec::new(),
+    }];
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    terminal
+        .draw(|frame| {
+            render_version_popup(frame, frame.area(), &mut state, &picker, Some("26.3"));
+        })
+        .unwrap();
+    let rendered = format!("{}", terminal.backend());
+    assert!(rendered.contains("Warning: This mod may be incompatible"));
+    assert!(rendered.contains("Minecraft 26.3"));
+
+    state.version_popup.as_mut().unwrap().versions[0]
+        .game_versions
+        .push("26.3".to_owned());
+    terminal
+        .draw(|frame| {
+            render_version_popup(frame, frame.area(), &mut state, &picker, Some("26.3"));
+        })
+        .unwrap();
+    assert!(!format!("{}", terminal.backend()).contains("may be incompatible"));
 }
 
 #[test]

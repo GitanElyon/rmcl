@@ -209,6 +209,9 @@ impl App {
                 main_chunks[1],
                 state,
                 &self.picker,
+                self.instances_state
+                    .selected_instance()
+                    .map(|instance| instance.game_version.as_str()),
             );
         }
 

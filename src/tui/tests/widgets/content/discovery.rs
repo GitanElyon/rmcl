@@ -1138,11 +1138,34 @@ fn project_page_loads_for_the_selected_discovery_entry() {
 }
 
 #[test]
+fn project_pages_with_matching_ids_are_cached_by_provider() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    let mut entry = project_entry(project("shared"), None);
+    state.project_pages.insert(
+        ("modrinth".to_owned(), "shared".to_owned()),
+        crate::net::modrinth::ProjectInfo {
+            id: "shared".to_owned(),
+            title: "Modrinth project".to_owned(),
+            ..Default::default()
+        },
+    );
+    entry.provider_project.as_mut().unwrap().provider = "curseforge".to_owned();
+    state.list.entries.push(entry);
+    state.list.list_state.selected = Some(0);
+
+    let request = state.begin_project_page().unwrap();
+    assert_eq!(request.provider, "curseforge");
+    assert!(request.cached_project.is_none());
+    assert!(state.project_page.as_ref().unwrap().document.is_none());
+}
+
+#[test]
 fn project_page_navigation_is_bounded_and_can_go_back() {
     let mut state = DiscoveryState::new(ContentKind::Mod);
     state.project_page = Some(ProjectPageState {
         request_id: 1,
         project_id: "project".to_owned(),
+        provider: "modrinth".to_owned(),
         title: "Project".to_owned(),
         document: Some(crate::tui::widgets::markdown::Document::new(
             "Project", "Body",
@@ -1186,6 +1209,7 @@ fn version_popup_owns_navigation_over_a_project_page() {
     state.project_page = Some(ProjectPageState {
         request_id: 1,
         project_id: "project".to_owned(),
+        provider: "modrinth".to_owned(),
         title: "Project".to_owned(),
         document: None,
         error: None,

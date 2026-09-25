@@ -5,7 +5,6 @@
 // supports toggling items on/off by renaming files with .disabled suffix,
 // search filtering, per-instance caching, and directory change detection.
 // also handles minecraft's formatting codes for colored mod names/descriptions
-// because apparently mojang thought terminal UIs would need that. thanks guys
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -1243,7 +1242,6 @@ impl ContentListState {
             self.entries.insert(pos, entry);
         }
 
-        // clamp selected
         if let Some(sel) = self.list_state.selected {
             if self.entries.is_empty() {
                 self.list_state.selected = None;

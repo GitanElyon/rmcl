@@ -842,6 +842,7 @@ pub struct ProjectPageRequest {
 pub struct ProjectPageState {
     request_id: u64,
     project_id: String,
+    provider: String,
     pub title: String,
     pub document: Option<crate::tui::widgets::markdown::Document>,
     pub error: Option<String>,
@@ -945,8 +946,8 @@ pub struct DiscoveryState {
     generation: u64,
     pending: PendingDiscovery,
     pending_actions: PendingActions,
-    project_pages: std::collections::HashMap<String, crate::net::modrinth::ProjectInfo>,
-    project_images: std::collections::HashMap<(String, String), image::DynamicImage>,
+    project_pages: std::collections::HashMap<(String, String), crate::net::modrinth::ProjectInfo>,
+    project_images: std::collections::HashMap<(String, String, String), image::DynamicImage>,
     sources: std::collections::HashMap<String, Vec<crate::instance::ProviderProject>>,
     pub project_page: Option<ProjectPageState>,
     pub version_popup: Option<VersionPopupState>,
@@ -1744,13 +1745,19 @@ impl DiscoveryState {
         let project_title = entry.name.clone();
         self.next_action_request_id = self.next_action_request_id.wrapping_add(1);
         let request_id = self.next_action_request_id;
-        let cached = self.project_pages.get(&project_id);
+        let provider = source.provider.clone();
+        let cached = self
+            .project_pages
+            .get(&(provider.clone(), project_id.clone()));
         let mut document = cached.map(|project| {
             crate::tui::widgets::markdown::Document::new(&project.title, &project.body)
         });
         if let Some(document) = document.as_mut() {
             for url in document.image_urls() {
-                if let Some(image) = self.project_images.get(&(project_id.clone(), url.clone())) {
+                if let Some(image) =
+                    self.project_images
+                        .get(&(provider.clone(), project_id.clone(), url.clone()))
+                {
                     document.set_image(&url, Ok(image.clone()));
                 }
             }
@@ -1761,14 +1768,17 @@ impl DiscoveryState {
             .unwrap_or_default()
             .into_iter()
             .filter(|url| {
-                !self
-                    .project_images
-                    .contains_key(&(project_id.clone(), url.clone()))
+                !self.project_images.contains_key(&(
+                    provider.clone(),
+                    project_id.clone(),
+                    url.clone(),
+                ))
             })
             .collect::<Vec<_>>();
         self.project_page = Some(ProjectPageState {
             request_id,
             project_id: project_id.clone(),
+            provider: provider.clone(),
             title: cached
                 .map(|project| project.title.clone())
                 .unwrap_or_else(|| project_title.clone()),
@@ -1784,7 +1794,7 @@ impl DiscoveryState {
             request_id,
             project_id,
             project_title,
-            provider: source.provider.clone(),
+            provider,
             cached_project: cached.cloned(),
             image_urls,
             pending: self.pending_actions.clone(),
@@ -2467,9 +2477,11 @@ impl DiscoveryState {
                             ));
                             if let Some(document) = page.document.as_mut() {
                                 for url in document.image_urls() {
-                                    if let Some(image) =
-                                        self.project_images.get(&(project_id.clone(), url.clone()))
-                                    {
+                                    if let Some(image) = self.project_images.get(&(
+                                        page.provider.clone(),
+                                        project_id.clone(),
+                                        url.clone(),
+                                    )) {
                                         document.set_image(&url, Ok(image.clone()));
                                     }
                                 }
@@ -2477,7 +2489,8 @@ impl DiscoveryState {
                             page.error = None;
                             page.scroll = 0;
                             page.max_scroll = 0;
-                            self.project_pages.insert(project.id.clone(), project);
+                            self.project_pages
+                                .insert((page.provider.clone(), project_id), project);
                         }
                         Err(error) => page.error = Some(error),
                     }
@@ -2488,15 +2501,17 @@ impl DiscoveryState {
                     url,
                     result,
                 } => {
-                    if let Ok(image) = &result {
-                        self.project_images
-                            .insert((project_id.clone(), url.clone()), image.clone());
-                    }
                     let Some(page) = self.project_page.as_mut().filter(|page| {
                         page.request_id == request_id && page.project_id == project_id
                     }) else {
                         continue;
                     };
+                    if let Ok(image) = &result {
+                        self.project_images.insert(
+                            (page.provider.clone(), project_id.clone(), url.clone()),
+                            image.clone(),
+                        );
+                    }
                     if let Some(document) = page.document.as_mut() {
                         document.set_image(&url, result);
                     }

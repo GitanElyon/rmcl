@@ -17,10 +17,11 @@ use ratatui::{
 };
 
 use super::{
-    ContentListState, PendingContentImage, WatcherEventHandling, available_description_width,
-    description_text_width, diff_directory, diff_event_paths, ellipsize, load_provider_metadata,
-    read_dir_stems, right_aligned_footer_spans, square_icon_columns, title_suffix_spans,
-    version_change_spans, watcher_event_handling, world_descriptions, world_game_mode_color,
+    ContentListState, ContentStreamOrder, PendingContentImage, WatcherEventHandling,
+    available_description_width, description_text_width, diff_directory, diff_event_paths,
+    ellipsize, load_provider_metadata, read_dir_stems, right_aligned_footer_spans,
+    square_icon_columns, title_suffix_spans, version_change_spans, watcher_event_handling,
+    world_descriptions, world_game_mode_color,
 };
 
 fn entry(name: &str) -> ContentEntry {
@@ -644,7 +645,10 @@ fn discovery_stream_shows_each_row_after_its_icon_is_ready() {
 
 #[test]
 fn stale_decoded_icon_does_not_replace_a_new_source_or_new_bytes() {
-    let mut state = ContentListState::default();
+    let mut state = ContentListState {
+        stream_order: ContentStreamOrder::Source,
+        ..Default::default()
+    };
     let mut project = entry("Alpha");
     project.provider_project = Some(crate::instance::ProviderProject {
         provider: "modrinth".to_owned(),
@@ -860,7 +864,7 @@ fn streamed_entries_without_icons_are_visible_immediately() {
 }
 
 #[tokio::test]
-async fn installed_predecoded_icons_are_visible_on_scan_and_cache_restore() {
+async fn installed_icon_decode_survives_manifest_binding_and_cache_restore() {
     let mut state = ContentListState::default();
     state.set_installed_options(
         &crate::tui::widgets::content::discovery::DiscoveryFilters::default(),
@@ -880,7 +884,22 @@ async fn installed_predecoded_icons_are_visible_on_scan_and_cache_restore() {
         crate::instance::content::make_icon_pixels(mod_entry.icon_bytes.as_ref().unwrap(), 6, 3);
     stream.send(mod_entry);
     state.drain_pending();
-    assert_eq!(state.filtered_indices(), [0]);
+    assert!(state.filtered_indices().is_empty());
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    state.request_image_loads(&picker);
+    state.entries[0].provider_project = Some(crate::instance::ProviderProject {
+        provider: "modrinth".to_owned(),
+        project_id: "fabric-api".to_owned(),
+        version_id: "version".to_owned(),
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while state.filtered_indices().is_empty() {
+            state.drain_image_loads(&picker);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("installed icon decoded after manifest binding");
 
     let directory = tempfile::tempdir().unwrap();
     state.start_load(
@@ -895,8 +914,16 @@ async fn installed_predecoded_icons_are_visible_on_scan_and_cache_restore() {
         crate::instance::content::mods::scan_one_mod,
         "jar",
     );
-    assert_eq!(state.filtered_indices(), [0]);
-    assert!(!state.has_pending_icons());
+    assert!(state.filtered_indices().is_empty());
+    state.request_image_loads(&picker);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while state.filtered_indices().is_empty() {
+            state.drain_image_loads(&picker);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cached installed icon decoded");
 }
 
 #[test]

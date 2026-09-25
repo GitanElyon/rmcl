@@ -1456,7 +1456,9 @@ impl DiscoveryState {
         } else {
             self.list.start_source_stream(context)
         };
-        if !reconcile {
+        if reconcile {
+            self.list.stage_source_rows_until_order();
+        } else {
             self.list.show_source_rows_progressively();
         }
         self.list.search.query.clone_from(&self.search.query);

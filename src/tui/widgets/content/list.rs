@@ -297,6 +297,7 @@ pub struct ContentListState {
     stream_rx: Option<mpsc::Receiver<ContentStreamUpdate>>,
     stream_order: ContentStreamOrder,
     progressive_source_stream: bool,
+    staged_source_updates: Option<Vec<ContentStreamUpdate>>,
     preview_count: usize,
     // file watcher: notify callback spawns background work,
     // precomputed diff lands here for the UI to pick up
@@ -352,6 +353,7 @@ impl Default for ContentListState {
             stream_rx: None,
             stream_order: ContentStreamOrder::default(),
             progressive_source_stream: false,
+            staged_source_updates: None,
             preview_count: 0,
             watcher_diff: Arc::new(Mutex::new(None)),
             _watcher: None,
@@ -693,6 +695,7 @@ impl ContentListState {
         self.stream_rx = Some(receiver);
         self.stream_order = ContentStreamOrder::Source;
         self.progressive_source_stream = false;
+        self.staged_source_updates = None;
         self.preview_count = 0;
         self.loaded_for = Some(source.into());
         ContentStream { sender }
@@ -700,6 +703,7 @@ impl ContentListState {
 
     pub(crate) fn cancel_source_stream(&mut self) {
         self.stream_rx = None;
+        self.staged_source_updates = None;
         if !self.entries.is_empty() {
             self.loading = false;
         }
@@ -707,6 +711,10 @@ impl ContentListState {
 
     pub(crate) fn show_source_rows_progressively(&mut self) {
         self.progressive_source_stream = true;
+    }
+
+    pub(crate) fn stage_source_rows_until_order(&mut self) {
+        self.staged_source_updates = Some(Vec::new());
     }
 
     fn start_stream_with_order(
@@ -732,6 +740,7 @@ impl ContentListState {
         self.stream_rx = Some(receiver);
         self.stream_order = order;
         self.progressive_source_stream = false;
+        self.staged_source_updates = None;
         self.preview_count = 0;
         ContentStream { sender }
     }
@@ -858,15 +867,38 @@ impl ContentListState {
             return false;
         };
 
+        let mut staged = std::collections::VecDeque::new();
+        if let Some(updates) = &mut self.staged_source_updates {
+            loop {
+                match rx.try_recv() {
+                    Ok(update) => {
+                        let ordered = matches!(update, ContentStreamUpdate::Order(_));
+                        updates.push(update);
+                        if ordered {
+                            staged = std::mem::take(updates).into();
+                            self.staged_source_updates = None;
+                            break;
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => return false,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.staged_source_updates = None;
+                        self.stream_rx = None;
+                        return false;
+                    }
+                }
+            }
+        }
+
         let mut received = false;
         let mut received_count = 0usize;
         let mut finished = false;
         loop {
-            if self.progressive_source_stream && received_count >= 4 {
+            if self.progressive_source_stream && staged.is_empty() && received_count >= 4 {
                 crate::feedback::request_redraw();
                 break;
             }
-            match rx.try_recv() {
+            match staged.pop_front().map(Ok).unwrap_or_else(|| rx.try_recv()) {
                 Ok(ContentStreamUpdate::AppendPreview) => {
                     self.preview_count = self.entries.len();
                 }

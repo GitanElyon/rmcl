@@ -1733,6 +1733,9 @@ fn filtered_refresh_applies_a_provider_page_in_one_frame() {
             stem
         })
         .collect();
+    state.list.drain_pending();
+    assert_eq!(state.list.entries.len(), 1);
+    assert_eq!(state.list.entries[0].name, "old");
     refresh.stream.order(stems);
     state.list.drain_pending();
 
@@ -1782,6 +1785,11 @@ fn rapidly_cycling_a_category_discards_superseded_rows_and_results() {
     assert_eq!(state.total_hits, 0);
 
     let include = state.begin_search(&instance);
+    include
+        .stream
+        .upsert(project_entry(project("wrong-filter"), None));
+    state.list.drain_pending();
+    assert_eq!(state.list.entries[0].name, "original");
     state.apply_selected_filter(); // exclude before include returns
     assert!(
         !include
@@ -1791,6 +1799,14 @@ fn rapidly_cycling_a_category_discards_superseded_rows_and_results() {
     state.list.drain_pending();
     assert_eq!(state.list.entries.len(), 1);
     assert!(state.search_due());
+
+    let exclude = state.begin_search(&instance);
+    exclude
+        .stream
+        .upsert(project_entry(project("excluded"), None));
+    exclude.stream.order(vec!["excluded".to_owned()]);
+    state.list.drain_pending();
+    assert_eq!(state.list.entries[0].name, "excluded");
 }
 
 #[test]

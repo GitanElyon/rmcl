@@ -1713,6 +1713,40 @@ fn search_refresh_keeps_rows_until_the_diff_arrives() {
 }
 
 #[test]
+fn filtered_refresh_applies_a_provider_page_in_one_frame() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    let instance = instance("one", "1.21.1");
+    let initial = state.begin_search(&instance);
+    initial.stream.upsert(project_entry(project("old"), None));
+    drain_discovery_rows(&mut state);
+
+    state.filter_panel_selected = state.category_start();
+    state.apply_selected_filter();
+    assert!(!state.filters.categories.is_empty());
+    let refresh = state.begin_search(&instance);
+    assert!(refresh.reconcile);
+    let stems = (0..8)
+        .map(|index| {
+            let project = project(&format!("new-{index}"));
+            let stem = project.id.clone();
+            refresh.stream.upsert(project_entry(project, None));
+            stem
+        })
+        .collect();
+    refresh.stream.order(stems);
+    state.list.drain_pending();
+
+    assert_eq!(state.list.entries.len(), 8);
+    assert!(
+        state
+            .list
+            .entries
+            .iter()
+            .all(|entry| entry.name.starts_with("new-"))
+    );
+}
+
+#[test]
 fn rapidly_cycling_a_category_discards_superseded_rows_and_results() {
     let mut state = DiscoveryState::new(ContentKind::Mod);
     let instance = instance("one", "1.21.1");

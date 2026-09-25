@@ -692,6 +692,7 @@ impl ContentListState {
         let (sender, receiver) = mpsc::channel();
         self.stream_rx = Some(receiver);
         self.stream_order = ContentStreamOrder::Source;
+        self.progressive_source_stream = false;
         self.preview_count = 0;
         self.loaded_for = Some(source.into());
         ContentStream { sender }
@@ -1001,6 +1002,7 @@ impl ContentListState {
                     self.pending_entry_images
                         .retain(|stem| positions.contains_key(stem.as_str()));
                     self.preview_count = 0;
+                    self.progressive_source_stream = true;
                     self.images_dirty = true;
                 }
                 Ok(ContentStreamUpdate::Icon {

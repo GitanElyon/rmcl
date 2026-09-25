@@ -697,6 +697,13 @@ impl ContentListState {
         ContentStream { sender }
     }
 
+    pub(crate) fn cancel_source_stream(&mut self) {
+        self.stream_rx = None;
+        if !self.entries.is_empty() {
+            self.loading = false;
+        }
+    }
+
     pub(crate) fn show_source_rows_progressively(&mut self) {
         self.progressive_source_stream = true;
     }

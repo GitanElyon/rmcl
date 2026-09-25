@@ -1270,7 +1270,7 @@ impl DiscoveryState {
             .iter()
             .position(|sort| *sort == self.sort)
             .unwrap_or(0);
-        self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+        self.queue_search(false);
     }
 
     pub(crate) fn set_local_mode(&mut self, installed: bool) {
@@ -1303,7 +1303,7 @@ impl DiscoveryState {
         {
             self.filters.environment = EnvironmentFilter::Any;
             self.filters.categories.clear();
-            self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+            self.queue_search(false);
         }
     }
 
@@ -1315,7 +1315,7 @@ impl DiscoveryState {
         };
         if self.filters.game_version != default {
             self.filters.game_version = default;
-            self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+            self.queue_search(false);
         }
     }
 
@@ -1329,7 +1329,7 @@ impl DiscoveryState {
         if self.sort != default || self.sort_reversed {
             self.sort = default;
             self.sort_reversed = false;
-            self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+            self.queue_search(false);
         }
     }
 
@@ -2065,7 +2065,7 @@ impl DiscoveryState {
             self.sort = sort;
             self.sort_reversed = false;
         }
-        self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+        self.queue_search(false);
     }
 
     fn apply_selected_filter(&mut self) {
@@ -2099,7 +2099,7 @@ impl DiscoveryState {
                 }
             }
         }
-        self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+        self.queue_search(false);
     }
 
     fn cycle_selected_filter(&mut self, forward: bool) {
@@ -2114,7 +2114,7 @@ impl DiscoveryState {
             }
             _ => return,
         }
-        self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+        self.queue_search(false);
     }
 
     fn open_filter_version_picker(&mut self) {
@@ -2235,13 +2235,24 @@ impl DiscoveryState {
                 };
             }
         }
-        self.search_changed_at = Some(std::time::Instant::now() - SEARCH_DEBOUNCE);
+        self.queue_search(false);
     }
 
     fn search_changed(&mut self) {
         self.list.search.query.clone_from(&self.search.query);
         self.list.set_search_filtering(false);
-        self.search_changed_at = Some(std::time::Instant::now());
+        self.queue_search(true);
+    }
+
+    fn queue_search(&mut self, debounce: bool) {
+        if self.local_mode {
+            return;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.list.cancel_source_stream();
+        self.stream = None;
+        let now = std::time::Instant::now();
+        self.search_changed_at = Some(if debounce { now } else { now - SEARCH_DEBOUNCE });
     }
 
     pub fn push_result(

@@ -550,6 +550,7 @@ fn installed_and_discovery_filters_stay_separate() {
     assert_eq!(state.filters.game_version, GameVersionFilter::Any);
     state.reset_game_versions();
     assert_eq!(state.filters.game_version, GameVersionFilter::Current);
+    assert!(!state.search_due());
 }
 
 #[test]
@@ -1709,6 +1710,53 @@ fn search_refresh_keeps_rows_until_the_diff_arrives() {
     assert!(refresh.reconcile);
     assert_eq!(state.list.entries.len(), 2);
     assert!(!state.list.loading);
+}
+
+#[test]
+fn rapidly_cycling_a_category_discards_superseded_rows_and_results() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    let instance = instance("one", "1.21.1");
+    let first = state.begin_search(&instance);
+    assert!(
+        first
+            .stream
+            .upsert(project_entry(project("original"), None))
+    );
+    drain_discovery_rows(&mut state);
+    state.filter_panel_selected = state.category_start()
+        + state
+            .categories()
+            .iter()
+            .position(|(slug, _)| *slug == "management")
+            .unwrap();
+
+    state.apply_selected_filter(); // include
+    assert!(!first.stream.upsert(project_entry(project("late"), None)));
+    DiscoveryState::push_result(
+        &first.pending,
+        first.generation,
+        0,
+        Ok(DiscoveryPageResult {
+            received: 10,
+            total_hits: 100,
+        }),
+    );
+    state.drain_pending();
+    state.list.drain_pending();
+    assert_eq!(state.list.entries.len(), 1);
+    assert_eq!(state.list.entries[0].name, "original");
+    assert_eq!(state.total_hits, 0);
+
+    let include = state.begin_search(&instance);
+    state.apply_selected_filter(); // exclude before include returns
+    assert!(
+        !include
+            .stream
+            .upsert(project_entry(project("wrong-filter"), None))
+    );
+    state.list.drain_pending();
+    assert_eq!(state.list.entries.len(), 1);
+    assert!(state.search_due());
 }
 
 #[test]

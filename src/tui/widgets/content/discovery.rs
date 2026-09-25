@@ -264,7 +264,6 @@ struct DiscoverySearchKey {
 struct CachedDiscoverySearch {
     entries: Vec<ContentEntry>,
     sources: std::collections::HashMap<String, Vec<crate::instance::ProviderProject>>,
-    selected: Option<usize>,
     total_hits: usize,
     next_offset: usize,
     exhausted: bool,
@@ -1394,7 +1393,6 @@ impl DiscoveryState {
                 CachedDiscoverySearch {
                     entries: self.list.entries.clone(),
                     sources: self.sources.clone(),
-                    selected: self.list.list_state.selected,
                     total_hits: self.total_hits,
                     next_offset: self.next_offset,
                     exhausted: self.exhausted,
@@ -1441,8 +1439,10 @@ impl DiscoveryState {
         self.retry_page_at = None;
         self.page_retry_attempt = 0;
         let stream = if let Some(cached) = cached {
+            let selected = self.list.list_state.selected;
             self.list.set_entries(cached.entries);
-            self.list.list_state.selected = cached.selected;
+            self.list.list_state.selected = selected;
+            self.list.clamp_selected_index();
             self.list.loading = false;
             self.sources = cached.sources;
             self.total_hits = cached.total_hits;

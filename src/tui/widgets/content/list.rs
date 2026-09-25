@@ -834,7 +834,6 @@ impl ContentListState {
         let mut received = false;
         let mut received_count = 0usize;
         let mut finished = false;
-        let mut restore_selected = None;
         loop {
             if self.progressive_source_stream && received_count >= 4 {
                 crate::feedback::request_redraw();
@@ -871,9 +870,6 @@ impl ContentListState {
                     received = true;
                     self.images_dirty = true;
                     received_count += 1;
-                    if preview && restore_selected.is_none() {
-                        restore_selected = Some(self.selected_file_stem());
-                    }
                     let stem = entry.file_stem.clone();
                     self.sort_metadata.get_mut().remove(&entry.path);
                     let icon_ready = if let Some(index) = self
@@ -941,9 +937,6 @@ impl ContentListState {
                 }
                 Ok(ContentStreamUpdate::Retain(file_stems)) => {
                     received = true;
-                    let selected_stem = restore_selected
-                        .take()
-                        .unwrap_or_else(|| self.selected_file_stem());
                     self.entries
                         .retain(|entry| file_stems.contains(&entry.file_stem));
                     self.sort_metadata
@@ -957,14 +950,10 @@ impl ContentListState {
                         .retain(|stem| file_stems.contains(stem));
                     self.pending_entry_images
                         .retain(|stem| file_stems.contains(stem));
-                    restore_selected = Some(selected_stem);
                     self.images_dirty = true;
                 }
                 Ok(ContentStreamUpdate::Order(file_stems)) => {
                     received = true;
-                    let selected_stem = restore_selected
-                        .take()
-                        .unwrap_or_else(|| self.selected_file_stem());
                     let positions = file_stems
                         .iter()
                         .enumerate()
@@ -986,7 +975,6 @@ impl ContentListState {
                     self.pending_entry_images
                         .retain(|stem| positions.contains_key(stem.as_str()));
                     self.preview_count = 0;
-                    restore_selected = Some(selected_stem);
                     self.images_dirty = true;
                 }
                 Ok(ContentStreamUpdate::Icon {
@@ -1043,10 +1031,6 @@ impl ContentListState {
             }
         }
 
-        if let Some(selected_stem) = restore_selected {
-            self.restore_selected_file_stem(selected_stem.as_deref());
-        }
-
         if received || finished {
             self.invalidate_filtered();
             self.loading = false;
@@ -1064,9 +1048,7 @@ impl ContentListState {
                     self.entries.len()
                 );
             }
-            if self.list_state.selected.is_none() && !self.entries.is_empty() {
-                self.list_state.selected = Some(0);
-            }
+            self.clamp_selected_index();
             self.update_scrollbar();
         }
         received || finished
@@ -1466,7 +1448,6 @@ impl ContentListState {
         {
             return;
         }
-        let selected = self.selected_file_stem();
         let previously_needed_metadata = self.needs_local_metadata();
         self.local_filters = filters.clone();
         self.local_sort_index = sort_index;
@@ -1478,7 +1459,8 @@ impl ContentListState {
             self.requested_provider_icons.clear();
         }
         self.local_panel_open = panel_open;
-        self.restore_selected_file_stem(selected.as_deref());
+        self.clamp_selected_index();
+        self.update_scrollbar();
     }
 
     fn matches_installed_filters(&self, entry: &ContentEntry) -> bool {
@@ -1550,20 +1532,9 @@ impl ContentListState {
     }
 
     pub fn set_search_filtering(&mut self, enabled: bool) {
-        let selected_stem = self.selected_file_stem();
         self.filter_search = enabled;
-        self.restore_selected_file_stem(selected_stem.as_deref());
-    }
-
-    fn selected_file_stem(&self) -> Option<String> {
-        let filtered = self.filtered_indices();
-        let entry_index = self
-            .list_state
-            .selected
-            .and_then(|index| filtered.get(index))?;
-        self.entries
-            .get(*entry_index)
-            .map(|entry| entry.file_stem.clone())
+        self.clamp_selected_index();
+        self.update_scrollbar();
     }
 
     pub fn selected_entry(&self) -> Option<&ContentEntry> {
@@ -1580,18 +1551,10 @@ impl ContentListState {
             .is_some_and(|entry| entry.provider_project.is_some())
     }
 
-    fn restore_selected_file_stem(&mut self, file_stem: Option<&str>) {
-        let filtered = self.filtered_indices();
-        self.list_state.selected = file_stem
-            .and_then(|stem| {
-                filtered.iter().position(|index| {
-                    self.entries
-                        .get(*index)
-                        .is_some_and(|entry| entry.file_stem == stem)
-                })
-            })
-            .or_else(|| (!filtered.is_empty()).then_some(0));
-        self.update_scrollbar();
+    pub(crate) fn clamp_selected_index(&mut self) {
+        let count = self.filtered_indices().len();
+        self.list_state.selected =
+            (count > 0).then(|| self.list_state.selected.unwrap_or(0).min(count - 1));
     }
 
     pub fn pending_delete(&self) -> Option<PendingContentDelete> {

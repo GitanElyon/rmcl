@@ -1728,13 +1728,14 @@ fn discovery_restores_cached_sort_and_continues_pagination() {
         },
         None,
     )));
+    assert!(first.stream.upsert(project_entry(project("second"), None)));
     drain_discovery_rows(&mut state);
     DiscoveryState::push_result(
         &first.pending,
         first.generation,
         0,
         Ok(DiscoveryPageResult {
-            received: 1,
+            received: 2,
             total_hits: 20,
         }),
     );
@@ -1742,12 +1743,14 @@ fn discovery_restores_cached_sort_and_continues_pagination() {
     state.sort = crate::instance::content::provider::DiscoverySort::Popular;
     let other = state.begin_search(&instance);
     assert!(!other.cached);
+    state.list.list_state.selected = Some(1);
     state.sort = crate::instance::content::provider::DiscoverySort::Relevance;
     let restored = state.begin_search(&instance);
     assert!(restored.cached);
     assert!(!state.list.loading);
     assert_eq!(state.list.entries[0].name, "Cached");
-    assert_eq!(state.next_offset, 1);
+    assert_eq!(state.list.list_state.selected, Some(1));
+    assert_eq!(state.next_offset, 2);
     assert_eq!(state.total_hits, 20);
     DiscoveryState::push_result(
         &other.pending,
@@ -1761,7 +1764,7 @@ fn discovery_restores_cached_sort_and_continues_pagination() {
     state.drain_pending();
     assert_eq!(state.total_hits, 20);
     let next = state.begin_next_page().unwrap();
-    assert_eq!(next.offset, 1);
+    assert_eq!(next.offset, 2);
     assert!(!next.cached);
 }
 

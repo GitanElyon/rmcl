@@ -92,6 +92,39 @@ fn installed_file_size_sort_changes_direction() {
 }
 
 #[test]
+fn sort_and_filter_keep_the_selected_row_number() {
+    use crate::tui::widgets::content::discovery::{DiscoveryFilters, GameVersionFilter};
+
+    let mut state = ContentListState {
+        entries: vec![
+            entry("Alpha"),
+            entry("Beta"),
+            entry("Gamma"),
+            entry("Delta"),
+        ],
+        ..Default::default()
+    };
+    state.list_state.selected = Some(2);
+    let filters = DiscoveryFilters {
+        game_version: GameVersionFilter::Any,
+        ..Default::default()
+    };
+    state.set_installed_options(&filters, 5, true, "1.21.1", false);
+    assert_eq!(state.list_state.selected, Some(2));
+    assert_eq!(state.selected_entry().unwrap().name, "Beta");
+    state.list_state.selected = Some(0);
+    state.set_installed_options(&filters, 5, false, "1.21.1", false);
+    assert_eq!(state.list_state.selected, Some(0));
+    assert_eq!(state.selected_entry().unwrap().name, "Alpha");
+
+    state.list_state.selected = Some(2);
+    state.search.query = "Beta".to_owned();
+    state.set_search_filtering(true);
+    assert_eq!(state.list_state.selected, Some(0));
+    assert_eq!(state.selected_entry().unwrap().name, "Beta");
+}
+
+#[test]
 fn file_sort_cache_refreshes_when_watcher_replaces_a_file() {
     let temp = tempfile::tempdir().unwrap();
     let small = temp.path().join("small.jar");
@@ -581,6 +614,7 @@ fn discovery_preview_moves_rows_before_the_final_order_arrives() {
     initial.upsert(entry("Alpha"));
     initial.upsert(entry("Beta"));
     state.drain_pending();
+    state.list_state.selected = Some(0);
     let refresh = state.refresh_source_stream("remote");
     refresh.preview(entry("Beta"));
     refresh.preview(entry("Gamma"));
@@ -593,6 +627,8 @@ fn discovery_preview_moves_rows_before_the_final_order_arrives() {
             .collect::<Vec<_>>()
     };
     assert_eq!(names(&state), ["Beta", "Gamma", "Alpha"]);
+    assert_eq!(state.list_state.selected, Some(0));
+    assert_eq!(state.selected_entry().unwrap().name, "Beta");
     refresh.upsert(entry("Delta"));
     refresh.order(vec![
         "beta".to_owned(),
@@ -601,6 +637,7 @@ fn discovery_preview_moves_rows_before_the_final_order_arrives() {
     ]);
     state.drain_pending();
     assert_eq!(names(&state), ["Beta", "Delta", "Gamma"]);
+    assert_eq!(state.list_state.selected, Some(0));
     refresh.append_preview();
     refresh.preview(entry("Epsilon"));
     state.drain_pending();

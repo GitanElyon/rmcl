@@ -133,7 +133,8 @@ fn install_summary_checks_selected_mod_release_not_picker_version() {
         })
         .unwrap();
     assert!(
-        format!("{}", terminal.backend()).contains("Mod version may be incompatible with 26.3")
+        format!("{}", terminal.backend())
+            .contains("This mod version may be incompatible with 26.3")
     );
     assert!(!format!("{}", terminal.backend()).contains("Warning:"));
 }

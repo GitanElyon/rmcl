@@ -125,6 +125,32 @@ fn sort_and_filter_keep_the_selected_row_number() {
 }
 
 #[test]
+fn cached_rows_keep_matching_rendered_icons_only() {
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    let mut state = ContentListState::default();
+    let mut project = entry("Alpha");
+    project.icon_bytes = Some(vec![1]);
+    project.provider_project = Some(crate::instance::ProviderProject {
+        provider: "modrinth".to_owned(),
+        project_id: "alpha".to_owned(),
+        version_id: String::new(),
+    });
+    state.entries.push(project.clone());
+    state.image_protocols.insert(
+        project.file_stem.clone(),
+        picker.new_resize_protocol(image::DynamicImage::new_rgba8(1, 1)),
+    );
+    state.set_entries(vec![project.clone()]);
+    assert!(state.image_protocols.contains_key("alpha"));
+    assert!(state.requested_images.contains("alpha"));
+
+    project.provider_project.as_mut().unwrap().provider = "curseforge".to_owned();
+    state.set_entries(vec![project]);
+    assert!(state.image_protocols.is_empty());
+    assert!(state.requested_images.is_empty());
+}
+
+#[test]
 fn file_sort_cache_refreshes_when_watcher_replaces_a_file() {
     let temp = tempfile::tempdir().unwrap();
     let small = temp.path().join("small.jar");

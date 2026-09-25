@@ -374,13 +374,32 @@ impl ContentListState {
     }
 
     pub(crate) fn set_entries(&mut self, entries: Vec<ContentEntry>) {
-        self.entries = entries;
+        let previous = std::mem::replace(&mut self.entries, entries);
+        let old = previous
+            .iter()
+            .map(|entry| (entry.file_stem.as_str(), entry))
+            .collect::<HashMap<_, _>>();
+        let current = self
+            .entries
+            .iter()
+            .map(|entry| (entry.file_stem.as_str(), entry))
+            .collect::<HashMap<_, _>>();
+        self.image_protocols.retain(|stem, _| {
+            old.get(stem.as_str())
+                .zip(current.get(stem.as_str()))
+                .is_some_and(|(old, current)| {
+                    old.path == current.path
+                        && old.provider_project == current.provider_project
+                        && old.icon_bytes == current.icon_bytes
+                })
+        });
         self.invalidate_filtered();
         self.sort_metadata.get_mut().clear();
         self.list_state = TuiListState::default();
         self.list_state.selected = (!self.entries.is_empty()).then_some(0);
-        self.image_protocols.clear();
         self.requested_images.clear();
+        self.requested_images
+            .extend(self.image_protocols.keys().cloned());
         self.pending_entry_images.clear();
         self.pending_removals.clear();
         self.images_dirty = true;

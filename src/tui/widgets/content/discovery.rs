@@ -914,6 +914,7 @@ pub struct DiscoveryState {
     pub kind: ContentKind,
     pub modpacks: bool,
     pub list: ContentListState,
+    preparing_list: Option<ContentListState>,
     pub search: crate::tui::widgets::search::SearchState,
     pub sort: crate::instance::content::provider::DiscoverySort,
     pub sort_reversed: bool,
@@ -960,7 +961,6 @@ pub struct DiscoveryState {
     retry_page_at: Option<std::time::Instant>,
     page_retry_attempt: u32,
     active_search_key: Option<DiscoverySearchKey>,
-    // ponytail: keep four searches in memory; persist them only if cold-start discovery is too slow.
     cached_searches: Vec<(DiscoverySearchKey, CachedDiscoverySearch)>,
 }
 
@@ -1132,6 +1132,7 @@ impl DiscoveryState {
             kind,
             modpacks: false,
             list: ContentListState::default(),
+            preparing_list: None,
             search: crate::tui::widgets::search::SearchState::default(),
             sort: Default::default(),
             sort_reversed: false,
@@ -1335,13 +1336,17 @@ impl DiscoveryState {
 
     pub fn set_unavailable(&mut self, instance: &InstanceConfig) {
         let context = discovery_context(instance);
-        if self.context.as_deref() == Some(&context) && self.list.entries.is_empty() {
+        if self.context.as_deref() == Some(&context)
+            && self.list.entries.is_empty()
+            && self.preparing_list.is_none()
+        {
             return;
         }
         self.context = None;
         self.active_search_key = None;
         self.cached_searches.clear();
         drop(self.begin_search(instance));
+        self.preparing_list = None;
         self.stream = None;
         self.page_loading = false;
         self.exhausted = true;
@@ -1385,6 +1390,7 @@ impl DiscoveryState {
         let changed = self.active_search_key.as_ref() != Some(&key);
         if changed
             && self.active_search_key.is_some()
+            && self.preparing_list.is_none()
             && self.error.is_none()
             && !self.list.has_pending_icons()
             && (self.next_offset > 0 || self.exhausted)
@@ -1423,6 +1429,7 @@ impl DiscoveryState {
                 .chain(cached.iter().flat_map(|search| search.entries.iter())),
         );
         self.active_search_key = Some(key);
+        self.preparing_list = None;
         self.generation = self.generation.wrapping_add(1);
         self.project_page = None;
         self.version_popup = None;
@@ -1452,13 +1459,18 @@ impl DiscoveryState {
             self.page_loading = false;
             self.list.refresh_source_stream(context)
         } else if reconcile {
-            self.list.refresh_source_stream(context)
+            self.list.cancel_source_stream();
+            let mut preparing = ContentListState::default();
+            let stream = preparing.start_source_stream(context);
+            preparing.stage_source_rows_until_order();
+            preparing.search.query.clone_from(&self.search.query);
+            preparing.set_search_filtering(false);
+            self.preparing_list = Some(preparing);
+            stream
         } else {
             self.list.start_source_stream(context)
         };
-        if reconcile {
-            self.list.stage_source_rows_until_order();
-        } else {
+        if !reconcile {
             self.list.show_source_rows_progressively();
         }
         self.list.search.query.clone_from(&self.search.query);
@@ -1486,8 +1498,8 @@ impl DiscoveryState {
         }
         self.page_loading = true;
         self.retry_page_at = None;
-        let known_projects = self
-            .list
+        let list = self.preparing_list.as_ref().unwrap_or(&self.list);
+        let known_projects = list
             .entries
             .iter()
             .filter_map(|entry| {
@@ -1500,7 +1512,7 @@ impl DiscoveryState {
             })
             .collect();
         let cached_icons = cached_icons(
-            self.list.entries.iter().chain(
+            list.entries.iter().chain(
                 self.cached_searches
                     .iter()
                     .flat_map(|(_, search)| search.entries.iter()),
@@ -1512,7 +1524,7 @@ impl DiscoveryState {
             limit: self.request_limit(),
             pending: self.pending.clone(),
             stream: self.stream.clone()?,
-            reconcile: false,
+            reconcile: self.preparing_list.is_some(),
             cached_icons,
             known_projects,
             sort: self.sort,
@@ -1807,7 +1819,11 @@ impl DiscoveryState {
             }
         }
         let mut changed = false;
-        for entry in &mut self.list.entries {
+        for entry in self.list.entries.iter_mut().chain(
+            self.preparing_list
+                .iter_mut()
+                .flat_map(|list| &mut list.entries),
+        ) {
             if let Some(source) = entry.provider_project.as_mut() {
                 source.version_id = installed_identity(source)
                     .map(|installed| installed.version_id)
@@ -2069,10 +2085,34 @@ impl DiscoveryState {
         {
             return Some("Loading game versions...");
         }
-        if self.list.has_pending_icons() {
+        if self.list.has_pending_icons() || self.preparing_list.is_some() {
             return Some("Loading Discovery icons...");
         }
         None
+    }
+
+    pub(crate) fn drain_list(&mut self, picker: &ratatui_image::picker::Picker) {
+        if let Some(preparing) = self.preparing_list.as_mut() {
+            self.list.request_image_loads(picker);
+            self.list.drain_image_loads(picker);
+            preparing.drain_pending();
+            preparing.request_image_loads(picker);
+            preparing.drain_image_loads(picker);
+            if !self.page_loading
+                && preparing.source_order_ready()
+                && !preparing.has_pending_icons()
+            {
+                let mut ready = self.preparing_list.take().unwrap();
+                ready.list_state.selected = self.list.list_state.selected;
+                ready.clamp_selected_index();
+                self.list = ready;
+                crate::feedback::request_redraw();
+            }
+        } else {
+            self.list.drain_pending();
+            self.list.request_image_loads(picker);
+            self.list.drain_image_loads(picker);
+        }
     }
 
     fn apply_selected_sort(&mut self) {
@@ -2289,6 +2329,9 @@ impl DiscoveryState {
         self.generation = self.generation.wrapping_add(1);
         self.list.cancel_source_stream();
         self.stream = None;
+        if self.preparing_list.take().is_some() {
+            self.active_search_key = None;
+        }
         let now = std::time::Instant::now();
         self.search_changed_at = Some(if debounce { now } else { now - SEARCH_DEBOUNCE });
     }
@@ -2379,6 +2422,7 @@ impl DiscoveryState {
                             error.message
                         );
                     } else if pending.offset == 0 {
+                        self.preparing_list = None;
                         self.total_hits = 0;
                         self.error = Some(error.message);
                         self.exhausted = true;
@@ -2574,6 +2618,7 @@ impl DiscoveryState {
 
     fn should_load_more(&self) -> bool {
         if self.page_loading
+            || (self.preparing_list.is_some() && self.retry_page_at.is_none())
             || self.exhausted
             || self.error.is_some()
             || self.stream.is_none()
@@ -2963,7 +3008,6 @@ pub(crate) fn project_identity(project: &DiscoveryProject) -> String {
 }
 
 fn project_identity_parts(title: &str, slug: &str) -> String {
-    // ponytail: provider APIs expose no shared project id; title plus slug avoids
     // hiding unrelated projects while still matching normal cross-provider copies.
     let normalize = |value: &str| {
         value

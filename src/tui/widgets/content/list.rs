@@ -298,7 +298,7 @@ pub struct ContentListState {
     stream_order: ContentStreamOrder,
     progressive_source_stream: bool,
     staged_source_updates: Option<Vec<ContentStreamUpdate>>,
-    show_pending_source_rows: bool,
+    source_order_ready: bool,
     preview_count: usize,
     // file watcher: notify callback spawns background work,
     // precomputed diff lands here for the UI to pick up
@@ -355,7 +355,7 @@ impl Default for ContentListState {
             stream_order: ContentStreamOrder::default(),
             progressive_source_stream: false,
             staged_source_updates: None,
-            show_pending_source_rows: false,
+            source_order_ready: false,
             preview_count: 0,
             watcher_diff: Arc::new(Mutex::new(None)),
             _watcher: None,
@@ -698,7 +698,7 @@ impl ContentListState {
         self.stream_order = ContentStreamOrder::Source;
         self.progressive_source_stream = false;
         self.staged_source_updates = None;
-        self.show_pending_source_rows = false;
+        self.source_order_ready = false;
         self.preview_count = 0;
         self.loaded_for = Some(source.into());
         ContentStream { sender }
@@ -718,6 +718,10 @@ impl ContentListState {
 
     pub(crate) fn stage_source_rows_until_order(&mut self) {
         self.staged_source_updates = Some(Vec::new());
+    }
+
+    pub(crate) fn source_order_ready(&self) -> bool {
+        self.source_order_ready
     }
 
     fn start_stream_with_order(
@@ -744,7 +748,7 @@ impl ContentListState {
         self.stream_order = order;
         self.progressive_source_stream = false;
         self.staged_source_updates = None;
-        self.show_pending_source_rows = false;
+        self.source_order_ready = false;
         self.preview_count = 0;
         ContentStream { sender }
     }
@@ -850,7 +854,14 @@ impl ContentListState {
                 entry.file_stem == result.file_stem
                     && entry.path == result.path
                     && (matches!(self.stream_order, ContentStreamOrder::Sorted)
-                        || entry.provider_project == result.source)
+                        || entry
+                            .provider_project
+                            .as_ref()
+                            .map(|project| (&project.provider, &project.project_id))
+                            == result
+                                .source
+                                .as_ref()
+                                .map(|project| (&project.provider, &project.project_id)))
                     && entry.icon_bytes.as_ref() == Some(&result.icon_bytes)
             }) {
                 self.pending_entry_images.remove(&result.file_stem);
@@ -881,7 +892,6 @@ impl ContentListState {
                         if ordered {
                             staged = std::mem::take(updates).into();
                             self.staged_source_updates = None;
-                            self.show_pending_source_rows = true;
                             break;
                         }
                     }
@@ -1018,6 +1028,7 @@ impl ContentListState {
                 }
                 Ok(ContentStreamUpdate::Order(file_stems)) => {
                     received = true;
+                    self.source_order_ready = true;
                     let positions = file_stems
                         .iter()
                         .enumerate()
@@ -1435,8 +1446,7 @@ impl ContentListState {
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
-                (self.show_pending_source_rows
-                    || !self.pending_entry_images.contains(&entry.file_stem))
+                !self.pending_entry_images.contains(&entry.file_stem)
                     && (!self.filter_search
                         || self.search.matches(&entry.name)
                         || self.search.matches(&entry.description))
@@ -1717,7 +1727,6 @@ impl ContentListState {
         }
 
         // try cache first
-        // ponytail: cached file stats are refreshed by watcher updates; revalidate on restore if
         // files modified while another instance was active become a real problem.
         if let Some(cached) = self.cache.remove(instance_name) {
             self.entries = cached.entries;

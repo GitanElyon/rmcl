@@ -110,9 +110,7 @@ pub fn open() {
 pub fn drain(picker: &ratatui_image::picker::Picker) {
     if let Ok(mut state) = DISCOVERY_STATE.lock() {
         state.drain_pending();
-        state.list.drain_pending();
-        state.list.request_image_loads(picker);
-        state.list.drain_image_loads(picker);
+        state.drain_list(picker);
         if state.search_due() {
             drop(state);
             start_discovery_search();

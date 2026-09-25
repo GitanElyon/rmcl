@@ -840,6 +840,46 @@ fn source_refresh_reuses_a_decoded_icon_only_for_the_same_provider() {
 }
 
 #[test]
+fn discovery_icon_decode_survives_installed_version_binding() {
+    let mut state = ContentListState::default();
+    let stream = state.start_source_stream("discovery");
+    let mut project = entry("Alpha");
+    project.icon_bytes = Some(vec![1]);
+    project.provider_project = Some(crate::instance::ProviderProject {
+        provider: "modrinth".to_owned(),
+        project_id: "123".to_owned(),
+        version_id: String::new(),
+    });
+    stream.upsert(project.clone());
+    state.drain_pending();
+    state.entries[0]
+        .provider_project
+        .as_mut()
+        .unwrap()
+        .version_id = "installed".to_owned();
+    let mut icon_lines = crate::instance::content::fallback_icon();
+    icon_lines[0][0].symbol = 'X';
+    state
+        .pending_images
+        .lock()
+        .unwrap()
+        .push(PendingContentImage {
+            file_stem: project.file_stem,
+            path: project.path,
+            source: project.provider_project,
+            icon_bytes: vec![1],
+            icon_lines,
+            image: None,
+        });
+    state.drain_image_loads(&ratatui_image::picker::Picker::halfblocks());
+    assert!(!state.has_pending_icons());
+    assert_eq!(
+        state.entries[0].icon_lines.as_ref().unwrap()[0][0].symbol,
+        'X'
+    );
+}
+
+#[test]
 fn provider_icons_are_requested_only_for_visible_missing_icons() {
     let mut state = ContentListState::default();
     let mut visible = entry("Visible");

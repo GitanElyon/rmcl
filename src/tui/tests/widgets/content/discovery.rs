@@ -1712,13 +1712,22 @@ fn search_refresh_keeps_rows_until_the_diff_arrives() {
     assert!(!state.list.loading);
 }
 
-#[test]
-fn filtered_refresh_applies_a_provider_page_in_one_frame() {
+#[tokio::test]
+async fn filtered_refresh_waits_for_finished_icons_before_switching_rows() {
     let mut state = DiscoveryState::new(ContentKind::Mod);
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(1, 1)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
     let instance = instance("one", "1.21.1");
     let initial = state.begin_search(&instance);
     initial.stream.upsert(project_entry(project("old"), None));
+    initial
+        .stream
+        .upsert(project_entry(project("another"), None));
     drain_discovery_rows(&mut state);
+    state.list.list_state.selected = Some(1);
 
     state.filter_panel_selected = state.category_start();
     state.apply_selected_filter();
@@ -1728,20 +1737,49 @@ fn filtered_refresh_applies_a_provider_page_in_one_frame() {
     let stems = (0..8)
         .map(|index| {
             let mut project = project(&format!("new-{index}"));
-            project.icon_bytes = Some(vec![index as u8]);
+            if index == 7 {
+                project.icon_url = Some("https://example.invalid/icon".to_owned());
+            } else {
+                project.icon_bytes = Some(png.get_ref().clone());
+            }
             let stem = project.id.clone();
             refresh.stream.upsert(project_entry(project, None));
             stem
         })
         .collect();
-    state.list.drain_pending();
-    assert_eq!(state.list.entries.len(), 1);
+    state.drain_list(&picker);
+    assert_eq!(state.list.entries.len(), 2);
     assert_eq!(state.list.entries[0].name, "old");
     refresh.stream.order(stems);
-    state.list.drain_pending();
-
+    DiscoveryState::push_result(
+        &refresh.pending,
+        refresh.generation,
+        0,
+        Ok(DiscoveryPageResult {
+            received: 8,
+            total_hits: 8,
+        }),
+    );
+    state.drain_pending();
+    state.drain_list(&picker);
+    assert_eq!(state.list.entries[0].name, "old");
+    assert!(state.preparing_list.as_ref().unwrap().has_pending_icons());
+    refresh.stream.send_icon_unavailable(
+        "new-7".to_owned(),
+        "new-7".into(),
+        Some(("modrinth".to_owned(), "new-7".to_owned())),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while state.preparing_list.is_some() {
+            state.drain_list(&picker);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(state.list.entries.len(), 8);
-    assert!(state.list.has_pending_icons());
+    assert_eq!(state.list.list_state.selected, Some(1));
+    assert!(!state.list.has_pending_icons());
     assert_eq!(state.list.filtered_indices().len(), 8);
     assert!(
         state
@@ -1790,6 +1828,7 @@ fn discovery_activity_tracks_search_pages_and_icon_loading() {
 #[test]
 fn rapidly_cycling_a_category_discards_superseded_rows_and_results() {
     let mut state = DiscoveryState::new(ContentKind::Mod);
+    let picker = ratatui_image::picker::Picker::halfblocks();
     let instance = instance("one", "1.21.1");
     let first = state.begin_search(&instance);
     assert!(
@@ -1826,7 +1865,7 @@ fn rapidly_cycling_a_category_discards_superseded_rows_and_results() {
     include
         .stream
         .upsert(project_entry(project("wrong-filter"), None));
-    state.list.drain_pending();
+    state.drain_list(&picker);
     assert_eq!(state.list.entries[0].name, "original");
     state.apply_selected_filter(); // exclude before include returns
     assert!(
@@ -1843,7 +1882,17 @@ fn rapidly_cycling_a_category_discards_superseded_rows_and_results() {
         .stream
         .upsert(project_entry(project("excluded"), None));
     exclude.stream.order(vec!["excluded".to_owned()]);
-    state.list.drain_pending();
+    DiscoveryState::push_result(
+        &exclude.pending,
+        exclude.generation,
+        0,
+        Ok(DiscoveryPageResult {
+            received: 1,
+            total_hits: 1,
+        }),
+    );
+    state.drain_pending();
+    state.drain_list(&picker);
     assert_eq!(state.list.entries[0].name, "excluded");
 }
 

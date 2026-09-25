@@ -1388,17 +1388,13 @@ pub(crate) fn render_version_popup(
         if popup.confirming && state.kind == crate::instance::ContentKind::Mod && !state.modpacks {
             instance_game_version
                 .filter(|instance_version| {
-                    popup
-                        .selected_minecraft_version
-                        .as_deref()
-                        .is_some_and(|selected| selected != *instance_version)
-                        || popup.selected_version().is_some_and(|version| {
-                            !version.game_versions.is_empty()
-                                && !version
-                                    .game_versions
-                                    .iter()
-                                    .any(|game| game == instance_version)
-                        })
+                    popup.selected_version().is_some_and(|version| {
+                        !version.game_versions.is_empty()
+                            && !version
+                                .game_versions
+                                .iter()
+                                .any(|game| game == instance_version)
+                    })
                 })
                 .map(|version| format!("Mod version may be incompatible with {version}"))
         } else {

@@ -64,7 +64,7 @@ fn discovery_confirmation_popup_fits_its_summary() {
 }
 
 #[test]
-fn install_summary_warns_when_chosen_minecraft_or_mod_version_differs() {
+fn install_summary_checks_selected_mod_release_not_picker_version() {
     use crate::instance::ContentKind;
     use crate::net::modrinth::{DiscoveryProject, VersionInfo, VersionType};
     use ratatui::{Terminal, backend::TestBackend};
@@ -110,9 +110,7 @@ fn install_summary_warns_when_chosen_minecraft_or_mod_version_differs() {
             render_version_popup(frame, frame.area(), &mut state, &picker, Some("26.3"));
         })
         .unwrap();
-    let rendered = format!("{}", terminal.backend());
-    assert!(rendered.contains("Mod version may be incompatible with 26.3"));
-    assert!(!rendered.contains("Warning:"));
+    assert!(!format!("{}", terminal.backend()).contains("may be incompatible"));
 
     state
         .version_popup
@@ -137,6 +135,7 @@ fn install_summary_warns_when_chosen_minecraft_or_mod_version_differs() {
     assert!(
         format!("{}", terminal.backend()).contains("Mod version may be incompatible with 26.3")
     );
+    assert!(!format!("{}", terminal.backend()).contains("Warning:"));
 }
 
 #[test]

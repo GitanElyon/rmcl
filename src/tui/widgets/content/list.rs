@@ -298,6 +298,7 @@ pub struct ContentListState {
     stream_order: ContentStreamOrder,
     progressive_source_stream: bool,
     staged_source_updates: Option<Vec<ContentStreamUpdate>>,
+    show_pending_source_rows: bool,
     preview_count: usize,
     // file watcher: notify callback spawns background work,
     // precomputed diff lands here for the UI to pick up
@@ -354,6 +355,7 @@ impl Default for ContentListState {
             stream_order: ContentStreamOrder::default(),
             progressive_source_stream: false,
             staged_source_updates: None,
+            show_pending_source_rows: false,
             preview_count: 0,
             watcher_diff: Arc::new(Mutex::new(None)),
             _watcher: None,
@@ -696,6 +698,7 @@ impl ContentListState {
         self.stream_order = ContentStreamOrder::Source;
         self.progressive_source_stream = false;
         self.staged_source_updates = None;
+        self.show_pending_source_rows = false;
         self.preview_count = 0;
         self.loaded_for = Some(source.into());
         ContentStream { sender }
@@ -741,6 +744,7 @@ impl ContentListState {
         self.stream_order = order;
         self.progressive_source_stream = false;
         self.staged_source_updates = None;
+        self.show_pending_source_rows = false;
         self.preview_count = 0;
         ContentStream { sender }
     }
@@ -877,6 +881,7 @@ impl ContentListState {
                         if ordered {
                             staged = std::mem::take(updates).into();
                             self.staged_source_updates = None;
+                            self.show_pending_source_rows = true;
                             break;
                         }
                     }
@@ -1430,7 +1435,8 @@ impl ContentListState {
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
-                !self.pending_entry_images.contains(&entry.file_stem)
+                (self.show_pending_source_rows
+                    || !self.pending_entry_images.contains(&entry.file_stem))
                     && (!self.filter_search
                         || self.search.matches(&entry.name)
                         || self.search.matches(&entry.description))

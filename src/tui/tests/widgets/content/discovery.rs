@@ -1727,7 +1727,8 @@ fn filtered_refresh_applies_a_provider_page_in_one_frame() {
     assert!(refresh.reconcile);
     let stems = (0..8)
         .map(|index| {
-            let project = project(&format!("new-{index}"));
+            let mut project = project(&format!("new-{index}"));
+            project.icon_bytes = Some(vec![index as u8]);
             let stem = project.id.clone();
             refresh.stream.upsert(project_entry(project, None));
             stem
@@ -1740,6 +1741,8 @@ fn filtered_refresh_applies_a_provider_page_in_one_frame() {
     state.list.drain_pending();
 
     assert_eq!(state.list.entries.len(), 8);
+    assert!(state.list.has_pending_icons());
+    assert_eq!(state.list.filtered_indices().len(), 8);
     assert!(
         state
             .list

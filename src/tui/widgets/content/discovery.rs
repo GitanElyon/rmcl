@@ -465,7 +465,7 @@ pub(crate) fn spawn_provider_search(
             .preferred_provider()
             .to_owned();
         if !reconcile
-            && (first_provider == preferred || offset == 0)
+            && first_provider == preferred
             && let Some(Ok(results)) = &first_result
         {
             if offset > 0 {

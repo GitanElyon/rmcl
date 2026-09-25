@@ -1396,7 +1396,7 @@ pub(crate) fn render_version_popup(
                                 .any(|game| game == instance_version)
                     })
                 })
-                .map(|version| format!("Mod version may be incompatible with {version}"))
+                .map(|version| format!("This mod version may be incompatible with {version}"))
         } else {
             None
         };

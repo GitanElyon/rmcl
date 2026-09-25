@@ -165,7 +165,9 @@ impl App {
             self.ensure_provider_conflict_popup();
             self.ensure_active_discovery_loaded();
             let progress_active = progress::is_active();
-            let spinner_active = progress_active || crate::instance::runtime::has_active();
+            let spinner_active = progress_active
+                || crate::instance::runtime::has_active()
+                || self.discovery_activity().is_some();
             if spinner_active {
                 // only advance the spinner every 8 ticks to keep it readable
                 self.throbber_tick = self.throbber_tick.wrapping_add(1);

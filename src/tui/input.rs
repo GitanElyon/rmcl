@@ -1424,6 +1424,19 @@ impl App {
         }
     }
 
+    pub(super) fn discovery_activity(&self) -> Option<&'static str> {
+        if self.instances_state.show_import_popup {
+            return widgets::popups::import_modpack::discovery_activity();
+        }
+        if self.content_mode != widgets::content::ContentMode::Discover
+            || self.instances_state.selected_instance().is_none()
+        {
+            return None;
+        }
+        self.active_discovery_state()
+            .and_then(widgets::content::discovery::DiscoveryState::activity_label)
+    }
+
     fn spawn_bulk_content_updates(&mut self) {
         if self.content_update_popup.is_some() {
             return;

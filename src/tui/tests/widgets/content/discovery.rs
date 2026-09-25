@@ -1753,6 +1753,41 @@ fn filtered_refresh_applies_a_provider_page_in_one_frame() {
 }
 
 #[test]
+fn discovery_activity_tracks_search_pages_and_icon_loading() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    let instance = instance("one", "1.21.1");
+    assert_eq!(state.activity_label(), None);
+    let first = state.begin_search(&instance);
+    assert_eq!(state.activity_label(), Some("Searching Discovery..."));
+    let mut entry = project_entry(project("icon"), None);
+    entry.provider_icon = true;
+    first.stream.upsert(entry);
+    state.list.drain_pending();
+    DiscoveryState::push_result(
+        &first.pending,
+        first.generation,
+        0,
+        Ok(DiscoveryPageResult {
+            received: 1,
+            total_hits: 100,
+        }),
+    );
+    state.drain_pending();
+    assert_eq!(state.activity_label(), Some("Loading Discovery icons..."));
+    first
+        .stream
+        .send_icon_unavailable("icon".to_owned(), "icon".into(), None);
+    state.list.drain_pending();
+    assert_eq!(state.activity_label(), None);
+    let _next = state.begin_next_page().unwrap();
+    assert_eq!(state.activity_label(), Some("Loading more results..."));
+    state.page_loading = false;
+    state.filter_version_picker_open = true;
+    *state.filter_game_versions.lock().unwrap() = crate::tui::widgets::popups::LoadState::Loading;
+    assert_eq!(state.activity_label(), Some("Loading game versions..."));
+}
+
+#[test]
 fn rapidly_cycling_a_category_discards_superseded_rows_and_results() {
     let mut state = DiscoveryState::new(ContentKind::Mod);
     let instance = instance("one", "1.21.1");

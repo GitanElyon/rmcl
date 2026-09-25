@@ -2041,6 +2041,40 @@ impl DiscoveryState {
             .is_some_and(|changed| changed.elapsed() >= SEARCH_DEBOUNCE)
     }
 
+    pub(crate) fn activity_label(&self) -> Option<&'static str> {
+        if self.local_mode {
+            return None;
+        }
+        if self.search_changed_at.is_some() || self.page_loading {
+            return Some(if self.next_offset == 0 {
+                "Searching Discovery..."
+            } else {
+                "Loading more results..."
+            });
+        }
+        if self.retry_page_at.is_some() {
+            return Some("Retrying Discovery...");
+        }
+        if self
+            .version_popup
+            .as_ref()
+            .is_some_and(|popup| popup.loading)
+        {
+            return Some("Loading versions...");
+        }
+        if self.filter_version_picker_open
+            && self.filter_game_versions.lock().is_ok_and(|versions| {
+                matches!(*versions, crate::tui::widgets::popups::LoadState::Loading)
+            })
+        {
+            return Some("Loading game versions...");
+        }
+        if self.list.has_pending_icons() {
+            return Some("Loading Discovery icons...");
+        }
+        None
+    }
+
     fn apply_selected_sort(&mut self) {
         if self.local_mode {
             let selected = self.sort_panel_selected + 5;

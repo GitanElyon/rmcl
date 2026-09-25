@@ -126,6 +126,18 @@ pub fn has_version_popup() -> bool {
         .is_ok_and(|state| state.version_popup.is_some())
 }
 
+pub fn discovery_activity() -> Option<&'static str> {
+    let wizard = IMPORT_STATE.lock().ok()?;
+    let step = wizard.step.clone();
+    let loading_versions = matches!(wizard.versions, LoadState::Loading);
+    drop(wizard);
+    match step {
+        ImportStep::Discover => DISCOVERY_STATE.lock().ok()?.activity_label(),
+        ImportStep::Version if loading_versions => Some("Loading modpack versions..."),
+        _ => None,
+    }
+}
+
 pub fn handle_discovery_click(x: u16, y: u16) -> bool {
     if !IMPORT_STATE
         .lock()

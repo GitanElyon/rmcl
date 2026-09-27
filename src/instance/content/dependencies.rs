@@ -86,6 +86,12 @@ impl DependencyPlan {
             .skip(self.root_count)
             .filter(|item| item.replacement)
     }
+
+    pub fn has_dependency_changes(&self) -> bool {
+        self.dependency_installs().next().is_some()
+            || self.dependency_replacements().next().is_some()
+            || self.optional_dependencies > 0
+    }
 }
 
 pub async fn install(

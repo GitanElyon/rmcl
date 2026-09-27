@@ -1057,6 +1057,98 @@ fn rendering_visible_entries_restores_the_first_selection() {
 }
 
 #[test]
+fn incompatible_installed_version_renders_red_footer() {
+    use crate::net::modrinth::{VersionInfo, VersionType};
+
+    fn installed_entry(
+        name: &str,
+        project_id: &str,
+        version_id: &str,
+        footer: &str,
+    ) -> ContentEntry {
+        let mut item = entry(name);
+        item.footer_label = Some(footer.to_owned());
+        item.provider_project = Some(crate::instance::ProviderProject {
+            provider: "modrinth".to_owned(),
+            project_id: project_id.to_owned(),
+            version_id: version_id.to_owned(),
+        });
+        item
+    }
+    fn version_metadata(game_versions: &[&str]) -> VersionInfo {
+        VersionInfo {
+            id: "version".to_owned(),
+            project_id: "project".to_owned(),
+            name: "Version".to_owned(),
+            version_number: "1.0".to_owned(),
+            game_versions: game_versions
+                .iter()
+                .map(|version| (*version).to_owned())
+                .collect(),
+            loaders: vec!["fabric".to_owned()],
+            version_type: VersionType::Release,
+            dependencies: Vec::new(),
+            date_published: String::new(),
+            files: Vec::new(),
+        }
+    }
+
+    let mut state = ContentListState {
+        entries: vec![
+            installed_entry("Good", "good", "good-v1", "1.0.0+mc1.21.1"),
+            installed_entry("Bad", "bad", "bad-v1", "0.9.0+mc1.20.1"),
+        ],
+        ..ContentListState::default()
+    };
+    state.local_game_version = "1.21.1".to_owned();
+    state.version_metadata.insert(
+        ("modrinth".to_owned(), "good-v1".to_owned()),
+        version_metadata(&["1.21.1"]),
+    );
+    state.version_metadata.insert(
+        ("modrinth".to_owned(), "bad-v1".to_owned()),
+        version_metadata(&["1.20.1"]),
+    );
+    state.rebuild_display_metadata();
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 8)).unwrap();
+    terminal
+        .draw(|frame| {
+            super::render(
+                frame,
+                frame.area(),
+                &mut state,
+                true,
+                "Loading...",
+                "Empty",
+                &picker,
+                false,
+                false,
+            );
+        })
+        .unwrap();
+
+    let theme = crate::config::theme::THEME.as_ref();
+    let buffer = terminal.backend().buffer().clone();
+    let row_text = |y: u16| {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_owned())
+            .collect::<String>()
+    };
+    let footer_color = |footer: &str| {
+        (0..buffer.area.height).find_map(|y| {
+            let row = row_text(y);
+            row.find(footer).map(|start| {
+                let start = u16::try_from(start).unwrap();
+                buffer[(start, y)].fg
+            })
+        })
+    };
+    assert_eq!(footer_color("1.0.0+mc1.21.1"), Some(theme.text()));
+    assert_eq!(footer_color("0.9.0+mc1.20.1"), Some(theme.error()));
+}
+
+#[test]
 fn multiline_rendering_uses_the_space_beside_large_icons() {
     let mut world = entry("World");
     world.world_details = Some(WorldDetails {

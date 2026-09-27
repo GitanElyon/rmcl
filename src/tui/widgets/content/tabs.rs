@@ -1400,6 +1400,11 @@ pub(crate) fn render_version_popup(
         } else {
             None
         };
+    let skip_dependencies = popup.skip_dependencies;
+    let dependencies_changeable = popup
+        .dependency_plan
+        .as_ref()
+        .is_some_and(|plan| plan.has_dependency_changes());
     let popup_area = area.centered(
         Constraint::Percentage(50),
         Constraint::Length(
@@ -1408,6 +1413,7 @@ pub(crate) fn render_version_popup(
                 popup.dependency_plan.as_ref(),
                 popup.target_world.is_some(),
                 compatibility_warning.is_some(),
+                skip_dependencies && dependencies_changeable,
             )
             .min(area.height.saturating_sub(2)),
         ),
@@ -1511,19 +1517,28 @@ pub(crate) fn render_version_popup(
             .collect::<Vec<_>>()
     };
     let keybinds = if confirming {
-        crate::tui::widgets::popups::keybind_line(&[
-            ("h", " back"),
-            (
-                "Enter",
-                if reinstalling {
-                    " reinstall"
-                } else if replacing {
-                    " change"
+        let mut confirming_keybinds = vec![("h", " back")];
+        if dependencies_changeable {
+            confirming_keybinds.push((
+                "s",
+                if skip_dependencies {
+                    " include deps"
                 } else {
-                    " install"
+                    " skip deps"
                 },
-            ),
-        ])
+            ));
+        }
+        confirming_keybinds.push((
+            "Enter",
+            if reinstalling {
+                " reinstall"
+            } else if replacing {
+                " change"
+            } else {
+                " install"
+            },
+        ));
+        crate::tui::widgets::popups::keybind_line(&confirming_keybinds)
     } else {
         let mut keybinds = vec![("j/k", " navigate")];
         if can_switch_provider {
@@ -1578,16 +1593,20 @@ pub(crate) fn render_version_popup(
                 if let Some(world) = target_world.as_deref() {
                     rows.push(("World", world));
                 }
-                if !dependency_installs.is_empty() {
-                    rows.push(("Also installs", dependency_installs.as_str()));
-                }
-                if !dependency_replacements.is_empty() {
-                    rows.push(("Also changes", dependency_replacements.as_str()));
-                }
                 let optional_text;
-                if optional_dependencies > 0 {
-                    optional_text = optional_dependencies.to_string();
-                    rows.push(("Optional not installed", optional_text.as_str()));
+                if skip_dependencies && dependencies_changeable {
+                    rows.push(("Dependencies", "Skipped"));
+                } else {
+                    if !dependency_installs.is_empty() {
+                        rows.push(("Also installs", dependency_installs.as_str()));
+                    }
+                    if !dependency_replacements.is_empty() {
+                        rows.push(("Also changes", dependency_replacements.as_str()));
+                    }
+                    if optional_dependencies > 0 {
+                        optional_text = optional_dependencies.to_string();
+                        rows.push(("Optional not installed", optional_text.as_str()));
+                    }
                 }
                 crate::tui::widgets::popups::base::render_summary(&rows, area, buffer);
                 if let Some(warning) = compatibility_warning.as_deref() {
@@ -1686,6 +1705,7 @@ fn version_popup_height(
     plan: Option<&crate::instance::content::dependencies::DependencyPlan>,
     has_world: bool,
     has_warning: bool,
+    skipped: bool,
 ) -> u16 {
     if !confirming {
         return VERSION_POPUP_HEIGHT;
@@ -1695,9 +1715,13 @@ fn version_popup_height(
     };
     6 + u16::from(has_world)
         + u16::from(has_warning)
-        + u16::from(plan.dependency_installs().next().is_some())
-        + u16::from(plan.dependency_replacements().next().is_some())
-        + u16::from(plan.optional_dependencies > 0)
+        + if skipped {
+            1
+        } else {
+            u16::from(plan.dependency_installs().next().is_some())
+                + u16::from(plan.dependency_replacements().next().is_some())
+                + u16::from(plan.optional_dependencies > 0)
+        }
 }
 
 fn confirmation_values(values: &[String]) -> String {

@@ -764,6 +764,7 @@ pub struct VersionPopupState {
     pub confirming: bool,
     pub installing: bool,
     pub dependency_plan: Option<crate::instance::content::dependencies::DependencyPlan>,
+    pub skip_dependencies: bool,
     pub error: Option<String>,
 }
 
@@ -1206,7 +1207,7 @@ impl DiscoveryState {
     pub fn active_filter_count(&self) -> usize {
         let version_count = match &self.filters.game_version {
             GameVersionFilter::Current if !self.modpacks => 0,
-            GameVersionFilter::Any if self.modpacks => 0,
+            GameVersionFilter::Any if self.modpacks || self.local_mode => 0,
             GameVersionFilter::Specific(versions) => versions.len(),
             _ => 1,
         };
@@ -1290,7 +1291,10 @@ impl DiscoveryState {
                 .unwrap_or(0)
         };
         if installed {
-            let local = self.installed_filters.take().unwrap_or_default();
+            let local = self.installed_filters.take().unwrap_or(DiscoveryFilters {
+                game_version: GameVersionFilter::Any,
+                ..Default::default()
+            });
             self.discovery_filters = Some(std::mem::replace(&mut self.filters, local));
         } else {
             let discovery = self.discovery_filters.take().unwrap_or_default();
@@ -1310,7 +1314,7 @@ impl DiscoveryState {
     }
 
     fn reset_game_versions(&mut self) {
-        let default = if self.modpacks {
+        let default = if self.modpacks || self.local_mode {
             GameVersionFilter::Any
         } else {
             GameVersionFilter::Current
@@ -1680,6 +1684,7 @@ impl DiscoveryState {
             confirming: false,
             installing: false,
             dependency_plan: None,
+            skip_dependencies: false,
             error: None,
         });
         Some(VersionsRequest {
@@ -1911,6 +1916,14 @@ impl DiscoveryState {
             return None;
         }
         let version = popup.selected_version()?.clone();
+        let mut dependency_plan = popup.dependency_plan.clone();
+        if popup.skip_dependencies
+            && let Some(plan) = dependency_plan.as_mut()
+            && plan.has_dependency_changes()
+        {
+            plan.items.truncate(plan.root_count);
+            plan.optional_dependencies = 0;
+        }
         let request = InstallRequest {
             request_id: popup.request_id,
             generation: self.generation,
@@ -1919,7 +1932,7 @@ impl DiscoveryState {
             provider: popup.provider.clone(),
             version,
             installed_path: popup.installed_path.clone(),
-            dependency_plan: popup.dependency_plan.clone(),
+            dependency_plan,
             target_world: popup.target_world.clone(),
             pending: self.pending_actions.clone(),
         };
@@ -2552,6 +2565,7 @@ impl DiscoveryState {
                     match result {
                         Ok(plan) => {
                             popup.dependency_plan = Some(plan);
+                            popup.skip_dependencies = false;
                             popup.confirming = true;
                             popup.error = None;
                         }
@@ -2757,6 +2771,17 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut DiscoveryState) -> bool {
         }
         match key_event.code {
             KeyCode::Esc if !popup.installing => state.version_popup = None,
+            KeyCode::Char('s')
+                if popup.confirming
+                    && !popup.loading
+                    && !popup.installing
+                    && popup
+                        .dependency_plan
+                        .as_ref()
+                        .is_some_and(|plan| plan.has_dependency_changes()) =>
+            {
+                popup.skip_dependencies = !popup.skip_dependencies;
+            }
             _ if popup.selecting_world => {
                 super::list::handle_key_no_toggle(key_event, &mut popup.worlds);
             }

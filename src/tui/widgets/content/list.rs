@@ -582,13 +582,21 @@ impl ContentListState {
         } else {
             self.visible_provider_projects(filtered, viewport_height)
         };
+        // Installed panels also need the installed version's supported game
+        // versions to flag content incompatible with the instance version.
+        let want_version = !self.local_game_version.is_empty();
         for project in projects {
             let key = (
                 project.provider.clone(),
                 project.project_id.clone(),
                 project.version_id.clone(),
             );
-            if !self.requested_provider_icons.insert(key) {
+            let missing_version = want_version
+                && !project.version_id.is_empty()
+                && !self
+                    .version_metadata
+                    .contains_key(&(project.provider.clone(), project.version_id.clone()));
+            if !self.requested_provider_icons.insert(key) && !missing_version {
                 continue;
             }
             let pending = self.pending_provider_icons.clone();
@@ -596,13 +604,14 @@ impl ContentListState {
             let meta_dir = meta_dir.clone();
             let client = client.clone();
             let refresh_stats = self.needs_local_metadata();
+            let fetch_version = refresh_stats || missing_version;
             tokio::spawn(async move {
                 let Ok(_permit) = slots.acquire_owned().await else {
                     return;
                 };
                 match load_provider_metadata(&client, &meta_dir, &project, refresh_stats).await {
                     Ok((bytes, project_info)) => {
-                        let version = if refresh_stats {
+                        let version = if fetch_version {
                             load_installed_version(&client, &meta_dir, &project).await
                         } else {
                             None
@@ -654,7 +663,17 @@ impl ContentListState {
             if visible_height == 0 {
                 continue;
             }
-            if (entry.icon_bytes.is_none() || entry.description.trim().is_empty())
+            let missing_version = !self.local_game_version.is_empty()
+                && entry.provider_project.as_ref().is_some_and(|installed| {
+                    !installed.version_id.is_empty()
+                        && !self.version_metadata.contains_key(&(
+                            installed.provider.clone(),
+                            installed.version_id.clone(),
+                        ))
+                });
+            if (entry.icon_bytes.is_none()
+                || entry.description.trim().is_empty()
+                || missing_version)
                 && let Some(project) = entry.provider_project.clone()
             {
                 projects.push(project);
@@ -2152,6 +2171,8 @@ pub fn render(
         picker.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks;
     let entries = &state.entries;
     let display_metadata = &state.display_metadata;
+    let version_metadata = &state.version_metadata;
+    let local_game_version = state.local_game_version.clone();
     let filtered_rows = &filtered;
     let search = &state.search;
     let ready_image_stems: HashSet<String> = state.image_protocols.keys().cloned().collect();
@@ -2225,7 +2246,19 @@ pub fn render(
                 }
             });
         let title_suffix_style = crate::tui::widgets::status_badge_style(title_suffix_color);
-        let footer_label_style = Style::default().fg(if world_details.is_some() {
+        let incompatible_version = !local_game_version.is_empty()
+            && entry.provider_project.as_ref().is_some_and(|installed| {
+                !installed.version_id.is_empty()
+                    && version_metadata
+                        .get(&(installed.provider.clone(), installed.version_id.clone()))
+                        .is_some_and(|version| {
+                            !version.game_versions.is_empty()
+                                && !version.game_versions.contains(&local_game_version)
+                        })
+            });
+        let footer_label_style = Style::default().fg(if incompatible_version {
+            theme.error()
+        } else if world_details.is_some() {
             theme.text_dim()
         } else {
             theme.text()

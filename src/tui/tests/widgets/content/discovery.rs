@@ -560,18 +560,18 @@ fn installed_and_discovery_filters_stay_separate() {
     let mut state = DiscoveryState::new(ContentKind::Mod);
     state.filters.environment = EnvironmentFilter::Client;
     state.set_local_mode(true);
-    assert_eq!(state.filters.game_version, GameVersionFilter::Current);
+    assert_eq!(state.filters.game_version, GameVersionFilter::Any);
     assert_eq!(state.filters.environment, EnvironmentFilter::Any);
     state.filters.environment = EnvironmentFilter::Server;
-    state.filters.game_version = GameVersionFilter::Any;
+    state.filters.game_version = GameVersionFilter::Current;
     state.set_local_mode(false);
     assert_eq!(state.filters.environment, EnvironmentFilter::Client);
     assert_eq!(state.filters.game_version, GameVersionFilter::Current);
     state.set_local_mode(true);
     assert_eq!(state.filters.environment, EnvironmentFilter::Server);
-    assert_eq!(state.filters.game_version, GameVersionFilter::Any);
-    state.reset_game_versions();
     assert_eq!(state.filters.game_version, GameVersionFilter::Current);
+    state.reset_game_versions();
+    assert_eq!(state.filters.game_version, GameVersionFilter::Any);
     assert!(!state.search_due());
 }
 
@@ -1353,6 +1353,162 @@ fn dependency_resolution_opens_the_existing_confirmation() {
     assert!(!popup.loading);
     assert!(popup.dependency_plan.is_some());
     assert!(state.begin_install().unwrap().dependency_plan.is_some());
+}
+
+fn confirming_state_with_plan() -> DiscoveryState {
+    let project = DiscoveryProject {
+        id: "project".to_owned(),
+        slug: "project".to_owned(),
+        title: "Project".to_owned(),
+        description: String::new(),
+        downloads: 0,
+        icon_url: None,
+        icon_bytes: None,
+    };
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.list.entries.push(project_entry(project, None));
+    state.list.list_state.selected = Some(0);
+    let versions = state.begin_versions().unwrap();
+    DiscoveryState::push_action_result(
+        &versions.pending,
+        DiscoveryActionResult::Versions {
+            request_id: versions.request_id,
+            project_id: versions.project_id,
+            result: Ok(vec![version("1.0.0")]),
+        },
+    );
+    state.drain_pending();
+    let request = state.begin_dependency_resolution().unwrap();
+    let root_version = request.root.version.clone();
+    let mut dep_version = version("0.9.0");
+    dep_version.project_id = "dependency".to_owned();
+    let planned = |title: &str, version: VersionInfo| {
+        crate::instance::content::dependencies::PlannedInstall {
+            provider: "modrinth".to_owned(),
+            project_id: title.to_owned(),
+            title: title.to_owned(),
+            version,
+            installed_path: None,
+            kind: crate::instance::ContentKind::Mod,
+            destination: std::path::PathBuf::from("mods"),
+            provider_aliases: Vec::new(),
+            required_dependencies: Vec::new(),
+            automatic_dependency: false,
+            cleanup_eligible: false,
+            replacement: true,
+        }
+    };
+    DiscoveryState::push_action_result(
+        &request.pending,
+        DiscoveryActionResult::Dependencies {
+            request_id: request.request_id,
+            project_id: request.project_id,
+            result: Ok(crate::instance::content::dependencies::DependencyPlan {
+                items: vec![
+                    planned("project", root_version),
+                    planned("dependency", dep_version),
+                ],
+                root_count: 1,
+                optional_dependencies: 1,
+            }),
+        },
+    );
+    state.drain_pending();
+    assert!(state.version_popup.as_ref().unwrap().confirming);
+    state
+}
+
+#[test]
+fn confirming_popup_toggles_skip_dependencies_with_s() {
+    let mut state = confirming_state_with_plan();
+    assert!(!state.version_popup.as_ref().unwrap().skip_dependencies);
+
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('s')), &mut state));
+    assert!(state.version_popup.as_ref().unwrap().skip_dependencies);
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('s')), &mut state));
+    assert!(!state.version_popup.as_ref().unwrap().skip_dependencies);
+
+    // Toggling is blocked while loading or installing.
+    state.version_popup.as_mut().unwrap().loading = true;
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('s')), &mut state));
+    assert!(!state.version_popup.as_ref().unwrap().skip_dependencies);
+    state.version_popup.as_mut().unwrap().loading = false;
+    state.version_popup.as_mut().unwrap().installing = true;
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('s')), &mut state));
+    assert!(!state.version_popup.as_ref().unwrap().skip_dependencies);
+}
+
+#[test]
+fn skip_dependencies_does_nothing_without_dependency_changes() {
+    let mut state = confirming_state_with_plan();
+    let popup = state.version_popup.as_mut().unwrap();
+    let plan = popup.dependency_plan.as_mut().unwrap();
+    plan.items.truncate(plan.root_count);
+    plan.optional_dependencies = 0;
+    assert!(!plan.has_dependency_changes());
+
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('s')), &mut state));
+    assert!(!state.version_popup.as_ref().unwrap().skip_dependencies);
+
+    let install = state.begin_install().unwrap();
+    assert_eq!(install.dependency_plan.unwrap().items.len(), 1);
+}
+
+#[test]
+fn skipped_dependencies_install_only_the_root() {
+    let mut state = confirming_state_with_plan();
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('s')), &mut state));
+
+    let install = state.begin_install().unwrap();
+    let plan = install.dependency_plan.as_ref().unwrap();
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(plan.items[0].title, "project");
+    assert_eq!(plan.root_count, 1);
+    assert_eq!(plan.optional_dependencies, 0);
+}
+
+#[test]
+fn fresh_dependency_plan_resets_skip_dependencies() {
+    let mut state = confirming_state_with_plan();
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('s')), &mut state));
+    assert!(state.version_popup.as_ref().unwrap().skip_dependencies);
+
+    let popup = state.version_popup.as_ref().unwrap();
+    let (request_id, project_id, pending) = (
+        popup.request_id,
+        popup.project_id.clone(),
+        state.pending_actions.clone(),
+    );
+    DiscoveryState::push_action_result(
+        &pending,
+        DiscoveryActionResult::Dependencies {
+            request_id,
+            project_id,
+            result: Ok(crate::instance::content::dependencies::DependencyPlan {
+                items: Vec::new(),
+                root_count: 0,
+                optional_dependencies: 0,
+            }),
+        },
+    );
+    state.drain_pending();
+    assert!(!state.version_popup.as_ref().unwrap().skip_dependencies);
+}
+
+#[test]
+fn installed_mode_defaults_to_any_game_version() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    assert_eq!(state.filters.game_version, GameVersionFilter::Current);
+    assert_eq!(state.active_filter_count(), 0);
+
+    state.set_local_mode(true);
+    assert_eq!(state.filters.game_version, GameVersionFilter::Any);
+    assert_eq!(state.active_filter_count(), 0);
+
+    // The same Any filter counts as active in discovery mode.
+    state.set_local_mode(false);
+    state.filters.game_version = GameVersionFilter::Any;
+    assert_eq!(state.active_filter_count(), 1);
 }
 
 #[test]

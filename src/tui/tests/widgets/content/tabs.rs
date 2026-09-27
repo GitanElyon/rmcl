@@ -56,11 +56,11 @@ fn discovery_version_rows_only_show_the_version_number() {
 #[test]
 fn discovery_confirmation_popup_fits_its_summary() {
     assert_eq!(
-        version_popup_height(false, None, false, false),
+        version_popup_height(false, None, false, false, false),
         VERSION_POPUP_HEIGHT
     );
-    assert_eq!(version_popup_height(true, None, false, false), 6);
-    assert_eq!(version_popup_height(true, None, false, true), 7);
+    assert_eq!(version_popup_height(true, None, false, false, false), 6);
+    assert_eq!(version_popup_height(true, None, false, true, false), 7);
 }
 
 #[test]
@@ -137,6 +137,96 @@ fn install_summary_checks_selected_mod_release_not_picker_version() {
             .contains("This mod version may be incompatible with 26.3")
     );
     assert!(!format!("{}", terminal.backend()).contains("Warning:"));
+}
+
+#[test]
+fn skipped_dependencies_render_as_skipped_in_confirmation() {
+    use crate::instance::ContentKind;
+    use crate::instance::content::dependencies::{DependencyPlan, PlannedInstall};
+    use crate::net::modrinth::{DiscoveryProject, VersionInfo, VersionType};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let project = DiscoveryProject {
+        id: "project".to_owned(),
+        slug: "project".to_owned(),
+        title: "Project".to_owned(),
+        description: String::new(),
+        downloads: 0,
+        icon_url: None,
+        icon_bytes: None,
+    };
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state
+        .list
+        .entries
+        .push(crate::tui::widgets::content::discovery::project_entry(
+            project, None,
+        ));
+    state.list.list_state.selected = Some(0);
+    state.begin_versions();
+    let root_version = VersionInfo {
+        id: "version".to_owned(),
+        project_id: "project".to_owned(),
+        name: "1.0".to_owned(),
+        version_number: "1.0".to_owned(),
+        game_versions: vec!["26.3".to_owned()],
+        loaders: vec!["fabric".to_owned()],
+        version_type: VersionType::Release,
+        dependencies: Vec::new(),
+        date_published: String::new(),
+        files: Vec::new(),
+    };
+    let mut dep_version = root_version.clone();
+    dep_version.project_id = "dependency".to_owned();
+    dep_version.version_number = "2.0".to_owned();
+    let planned = |title: &str, version: VersionInfo| PlannedInstall {
+        provider: "modrinth".to_owned(),
+        project_id: title.to_owned(),
+        title: title.to_owned(),
+        version,
+        installed_path: None,
+        kind: ContentKind::Mod,
+        destination: std::path::PathBuf::from("mods"),
+        provider_aliases: Vec::new(),
+        required_dependencies: Vec::new(),
+        automatic_dependency: false,
+        cleanup_eligible: false,
+        replacement: true,
+    };
+    let popup = state.version_popup.as_mut().unwrap();
+    popup.loading = false;
+    popup.versions = vec![root_version.clone()];
+    popup.confirming = true;
+    popup.dependency_plan = Some(DependencyPlan {
+        items: vec![
+            planned("Project", root_version),
+            planned("Dependency", dep_version),
+        ],
+        root_count: 1,
+        optional_dependencies: 0,
+    });
+
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| {
+            render_version_popup(frame, frame.area(), &mut state, &picker, Some("26.3"));
+        })
+        .unwrap();
+    let screen = format!("{}", terminal.backend());
+    assert!(screen.contains("Also changes"));
+    assert!(screen.contains("skip deps"));
+
+    state.version_popup.as_mut().unwrap().skip_dependencies = true;
+    terminal
+        .draw(|frame| {
+            render_version_popup(frame, frame.area(), &mut state, &picker, Some("26.3"));
+        })
+        .unwrap();
+    let screen = format!("{}", terminal.backend());
+    assert!(screen.contains("Skipped"));
+    assert!(!screen.contains("Also changes"));
+    assert!(screen.contains("include deps"));
 }
 
 #[test]

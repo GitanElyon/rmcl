@@ -540,15 +540,20 @@ impl App {
                 self.spawn_active_discovery_version_source();
                 return Ok(());
             }
+            let installed = self.content_mode == widgets::content::ContentMode::Installed;
             let handled = self.active_discovery_state_mut().is_some_and(|state| {
-                state.set_local_mode(false);
+                state.set_local_mode(installed);
                 widgets::content::discovery::handle_key(&key_event, state)
             });
             if handled {
-                if matches!(
-                    key_event.code,
-                    KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Down | KeyCode::Up
-                ) || widgets::content::discovery::page_key_direction(&key_event).is_some()
+                let overlay_open = self.active_discovery_state().is_some_and(|state| {
+                    state.version_popup.is_some() || state.project_page_open()
+                });
+                if !overlay_open
+                    && (matches!(
+                        key_event.code,
+                        KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Down | KeyCode::Up
+                    ) || widgets::content::discovery::page_key_direction(&key_event).is_some())
                 {
                     self.spawn_active_discovery_page();
                 }

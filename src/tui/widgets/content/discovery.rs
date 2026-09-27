@@ -2915,6 +2915,11 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut DiscoveryState) -> bool {
         state.search.activate();
         return true;
     }
+    if state.local_mode {
+        // In local (Installed) mode the caller owns the list; don't navigate
+        // the shared discovery list.
+        return false;
+    }
     if let Some(next) = page_key_direction(key_event) {
         if next {
             state.list.next_page()

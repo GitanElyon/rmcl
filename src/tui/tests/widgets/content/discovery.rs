@@ -169,6 +169,28 @@ fn sort_panel_keeps_results_navigation_available() {
 }
 
 #[test]
+fn local_mode_panel_does_not_consume_list_navigation() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.list.entries = vec![
+        project_entry(project("one"), None),
+        project_entry(project("two"), None),
+    ];
+    state.list.list_state.selected = Some(0);
+    state.set_local_mode(true);
+
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('f')), &mut state));
+    assert!(state.sort_panel_open);
+    assert!(state.sort_panel_focused);
+    assert!(handle_key(&KeyEvent::from(KeyCode::Char('h')), &mut state));
+    assert!(!state.sort_panel_focused);
+
+    // In local mode j/k must be passed through (return false) so the caller
+    // can navigate its own installed list.
+    assert!(!handle_key(&KeyEvent::from(KeyCode::Char('j')), &mut state));
+    assert!(!handle_key(&KeyEvent::from(KeyCode::Char('k')), &mut state));
+}
+
+#[test]
 fn filter_panel_applies_version_environment_and_category_filters() {
     let mut state = DiscoveryState::new(ContentKind::Mod);
     handle_key(&KeyEvent::from(KeyCode::Char('f')), &mut state);

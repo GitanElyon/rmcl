@@ -13,6 +13,9 @@
   }:
     flake-utils.lib.eachDefaultSystem (system: let
       pkgs = nixpkgs.legacyPackages.${system};
+      # release binaries have the curseforge key compiled in; source builds
+      # don't, so forward the caller's key when building impurely.
+      curseforgeApiKey = builtins.getEnv "CURSEFORGE_API_KEY";
       # minecraft's bundled lwjgl natives dlopen the host's x11 stack, which
       # isn't on the default loader path on nixos. java is spawned as a child
       # of rmcl, so a wrapper LD_LIBRARY_PATH propagates all the way down.
@@ -31,6 +34,10 @@
         cargoLock.lockFile = ./Cargo.lock;
         nativeBuildInputs = [pkgs.jdk pkgs.makeWrapper];
         buildInputs = [pkgs.libxcb];
+
+        env = pkgs.lib.optionalAttrs (curseforgeApiKey != "") {
+          CURSEFORGE_API_KEY = curseforgeApiKey;
+        };
 
         postFixup = ''
           wrapProgram $out/bin/rmcl --prefix LD_LIBRARY_PATH : ${runtimeLibs}

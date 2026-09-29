@@ -20,6 +20,7 @@
         src = pkgs.lib.cleanSource ./.;
         cargoLock.lockFile = ./Cargo.lock;
         nativeBuildInputs = [pkgs.jdk];
+        buildInputs = [pkgs.libxcb];
 
         meta = with pkgs.lib; {
           description = "A fully featured Minecraft TUI launcher";

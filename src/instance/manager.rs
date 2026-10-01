@@ -16,6 +16,8 @@ pub enum InstanceError {
     AlreadyExists(String),
     #[error("Instance '{0}' not found")]
     NotFound(String),
+    #[error("Stop instance '{0}' before renaming or deleting it")]
+    InstanceRunning(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
@@ -405,6 +407,9 @@ impl InstanceManager {
 
     pub fn delete(&self, name: &str) -> Result<(), InstanceError> {
         validate_name(name)?;
+        if crate::instance::runtime::is_active(name) {
+            return Err(InstanceError::InstanceRunning(name.to_owned()));
+        }
         let instance_dir = self.instances_dir.join(name);
         if !instance_dir.exists() {
             tracing::warn!(
@@ -431,6 +436,9 @@ impl InstanceManager {
 
     pub fn rename(&self, old_name: &str, new_name: &str) -> Result<(), InstanceError> {
         validate_name(old_name)?;
+        if crate::instance::runtime::is_active(old_name) {
+            return Err(InstanceError::InstanceRunning(old_name.to_owned()));
+        }
         let new_name = new_name.trim();
         if new_name.is_empty() {
             tracing::warn!("Cannot rename instance '{}': new name is empty", old_name);
@@ -533,7 +541,16 @@ impl InstanceManager {
                 }
             };
             match serde_json::from_str::<InstanceConfig>(&contents) {
-                Ok(config) => instances.push(config),
+                Ok(mut config) => {
+                    let Some(directory_name) = entry.file_name().to_str().map(str::to_owned) else {
+                        continue;
+                    };
+                    if validate_name(&directory_name).is_err() {
+                        continue;
+                    }
+                    config.name = directory_name;
+                    instances.push(config);
+                }
                 Err(e) => {
                     tracing::error!("Failed to parse {}: {}", config_path.display(), e);
                 }
@@ -570,7 +587,10 @@ impl InstanceManager {
             }
         };
         match serde_json::from_str::<InstanceConfig>(&contents) {
-            Ok(config) => Ok(config),
+            Ok(mut config) => {
+                config.name = name.to_owned();
+                Ok(config)
+            }
             Err(e) => {
                 tracing::error!(
                     "Failed to parse instance '{}' config {}: {}",
@@ -609,7 +629,7 @@ impl InstanceManager {
 }
 
 // guard against path traversal and other filesystem shenanigans
-fn validate_name(name: &str) -> Result<(), InstanceError> {
+pub(crate) fn validate_name(name: &str) -> Result<(), InstanceError> {
     if name.is_empty() || name.len() > 64 {
         return Err(InstanceError::InvalidName(format!(
             "Name must be 1-64 chars, got: {:?}",

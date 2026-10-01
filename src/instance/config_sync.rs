@@ -11,6 +11,8 @@ pub enum ConfigSyncError {
     InvalidProfile(String),
     #[error("Cannot switch config profiles while '{instance}' is running")]
     InstanceRunning { instance: String },
+    #[error("Config profile '{0}' is in use by another instance")]
+    ProfileInUse(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Failed to save config profile: {0}")]
@@ -22,6 +24,7 @@ pub enum ConfigSyncError {
 #[derive(Debug)]
 pub struct ConfigSyncLock {
     file: std::fs::File,
+    profile_dir: PathBuf,
 }
 
 impl Drop for ConfigSyncLock {
@@ -37,16 +40,24 @@ pub fn prepare(
     meta_dir: &Path,
     minecraft_dir: &Path,
 ) -> Result<bool, ConfigSyncError> {
+    Ok(prepare_for_launch(profile, meta_dir, minecraft_dir)?.is_some())
+}
+
+pub fn prepare_for_launch(
+    profile: Option<&str>,
+    meta_dir: &Path,
+    minecraft_dir: &Path,
+) -> Result<Option<ConfigSyncLock>, ConfigSyncError> {
     let Some(profile) = profile.and_then(normalize_profile) else {
-        return Ok(false);
+        return Ok(None);
     };
     validate_profile(profile)?;
 
     let profile_dir = profile_dir(meta_dir, profile);
     if !profile_dir.exists() {
-        return Ok(false);
+        return Ok(None);
     }
-    let _lock = acquire_lock(&profile_dir)?;
+    let lock = acquire_lock(&profile_dir)?;
 
     if !profile_payload_exists(&profile_dir)? {
         sync_to_profile(minecraft_dir, &profile_dir)?;
@@ -54,7 +65,11 @@ pub fn prepare(
         sync_from_profile(&profile_dir, minecraft_dir)?;
     }
 
-    Ok(true)
+    Ok(Some(lock))
+}
+
+pub fn finish_launch(lock: ConfigSyncLock, minecraft_dir: &Path) -> Result<(), ConfigSyncError> {
+    sync_to_profile(minecraft_dir, &lock.profile_dir)
 }
 
 pub fn finish(
@@ -105,6 +120,7 @@ pub fn delete_profile(meta_dir: &Path, profile: &str) -> Result<(), ConfigSyncEr
     validate_profile(profile)?;
     let dir = profile_dir(meta_dir, profile);
     if dir.exists() {
+        let _lock = acquire_lock(&dir)?;
         remove_path(&dir)?;
     }
     Ok(())
@@ -291,14 +307,26 @@ fn acquire_lock(profile_dir: &Path) -> Result<ConfigSyncLock, ConfigSyncError> {
         .create(true)
         .truncate(false)
         .open(path)?;
-    file.lock()?;
-    Ok(ConfigSyncLock { file })
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return Err(ConfigSyncError::ProfileInUse(
+                profile_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            ));
+        }
+        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+    }
+    Ok(ConfigSyncLock {
+        file,
+        profile_dir: profile_dir.to_owned(),
+    })
 }
 
 fn mirror_dir(src: &Path, dst: &Path) -> Result<(), ConfigSyncError> {
-    // stage the copy in a sibling temp dir and swap it in only when complete.
-    // deleting dst up-front (the old behaviour) meant a failure mid-copy
-    // destroyed the current config tree with nothing to fall back to.
     let parent = dst.parent().filter(|p| !p.as_os_str().is_empty());
     let Some(parent) = parent else {
         return Err(std::io::Error::new(
@@ -310,6 +338,21 @@ fn mirror_dir(src: &Path, dst: &Path) -> Result<(), ConfigSyncError> {
     std::fs::create_dir_all(parent)?;
     let name = dst.file_name().and_then(|s| s.to_str()).unwrap_or("mirror");
     let staging = parent.join(format!(".{name}.mirror-tmp"));
+    let backup = parent.join(format!(".{name}.mirror-backup"));
+    if std::fs::symlink_metadata(dst).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(std::io::Error::other(format!(
+            "Cannot replace symlinked config directory '{}'",
+            dst.display()
+        ))
+        .into());
+    }
+    if backup.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("Previous config backup remains at {}", backup.display()),
+        )
+        .into());
+    }
     if staging.exists() {
         remove_path(&staging)?;
     }
@@ -319,10 +362,25 @@ fn mirror_dir(src: &Path, dst: &Path) -> Result<(), ConfigSyncError> {
         if src.exists() {
             copy_dir_contents(src, &staging)?;
         }
-        if dst.exists() {
-            remove_path(dst)?;
+        let had_dst = dst.exists();
+        if had_dst {
+            std::fs::rename(dst, &backup)?;
         }
-        std::fs::rename(&staging, dst)?;
+        if let Err(error) = std::fs::rename(&staging, dst) {
+            if had_dst && let Err(rollback) = std::fs::rename(&backup, dst) {
+                return Err(ConfigSyncError::SaveRollback {
+                    save: error.to_string(),
+                    rollback: rollback.to_string(),
+                });
+            }
+            return Err(error.into());
+        }
+        if had_dst && let Err(error) = remove_path(&backup) {
+            tracing::warn!(
+                "Could not remove old config backup '{}': {error}",
+                backup.display()
+            );
+        }
         Ok(())
     })();
 
@@ -351,7 +409,9 @@ fn profile_payload_exists(profile_dir: &Path) -> Result<bool, ConfigSyncError> {
     }
     for entry in std::fs::read_dir(profile_dir)? {
         let entry = entry?;
-        if entry.file_type()?.is_file() && is_options_file(&entry.file_name().to_string_lossy()) {
+        if (entry.file_type()?.is_file() || entry.file_type()?.is_symlink())
+            && is_options_file(&entry.file_name().to_string_lossy())
+        {
             return Ok(true);
         }
     }
@@ -359,30 +419,60 @@ fn profile_payload_exists(profile_dir: &Path) -> Result<bool, ConfigSyncError> {
 }
 
 fn mirror_options(src: &Path, dst: &Path) -> Result<(), ConfigSyncError> {
-    remove_options(dst)?;
     std::fs::create_dir_all(dst)?;
-    if !src.exists() {
-        return Ok(());
+    let staging = dst.join(".rmcl-options-stage");
+    if staging.exists() {
+        remove_path(&staging)?;
     }
-
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if entry.file_type()?.is_file() && is_options_file(&name.to_string_lossy()) {
-            std::fs::copy(entry.path(), dst.join(name))?;
+    std::fs::create_dir(&staging)?;
+    let result = (|| {
+        let mut copied = std::collections::HashSet::new();
+        if src.exists() {
+            for entry in std::fs::read_dir(src)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let file_type = entry.file_type()?;
+                if is_options_file(&name.to_string_lossy())
+                    && (file_type.is_file() || file_type.is_symlink())
+                {
+                    if file_type.is_symlink() {
+                        copy_link(&entry.path(), &staging.join(&name))?;
+                    } else {
+                        std::fs::copy(entry.path(), staging.join(&name))?;
+                    }
+                    copied.insert(name);
+                }
+            }
         }
+        for entry in std::fs::read_dir(&staging)? {
+            let entry = entry?;
+            crate::storage::replace_file(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+        remove_options(dst, &copied)?;
+        Ok(())
+    })();
+    if let Err(error) = std::fs::remove_dir_all(&staging) {
+        tracing::warn!(
+            "Could not remove options staging '{}': {error}",
+            staging.display()
+        );
     }
-    Ok(())
+    result
 }
 
-fn remove_options(dir: &Path) -> Result<(), ConfigSyncError> {
+fn remove_options(
+    dir: &Path,
+    copied: &std::collections::HashSet<std::ffi::OsString>,
+) -> Result<(), ConfigSyncError> {
     if !dir.exists() {
         return Ok(());
     }
 
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
-        if is_options_file(&entry.file_name().to_string_lossy()) {
+        if is_options_file(&entry.file_name().to_string_lossy())
+            && !copied.contains(&entry.file_name())
+        {
             remove_path(&entry.path())?;
         }
     }
@@ -415,10 +505,28 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> Result<(), ConfigSyncError> {
             copy_dir_contents(&source, &target)?;
         } else if file_type.is_file() {
             std::fs::copy(&source, &target)?;
+        } else if file_type.is_symlink() {
+            copy_link(&source, &target)?;
         }
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn copy_link(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(std::fs::read_link(source)?, target)
+}
+
+#[cfg(not(unix))]
+fn copy_link(source: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!(
+            "Cannot copy config symlink '{}' on this platform",
+            source.display()
+        ),
+    ))
 }
 
 #[cfg(test)]

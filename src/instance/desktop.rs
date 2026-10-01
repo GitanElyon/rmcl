@@ -8,7 +8,7 @@ use crate::instance::models::InstanceConfig;
 const ICON_BYTES: &[u8] = include_bytes!("../../assets/icon.svg");
 
 pub fn desktop_path(name: &str) -> Option<PathBuf> {
-    let sanitized = sanitize(name);
+    let sanitized = shortcut_name(name);
 
     #[cfg(target_os = "linux")]
     {
@@ -56,13 +56,53 @@ fn ensure_icon() -> Option<PathBuf> {
     Some(path)
 }
 
+fn shortcut_name(name: &str) -> String {
+    let mut encoded = String::new();
+    for character in name.chars() {
+        if character.is_alphanumeric() || matches!(character, '-' | '_') {
+            encoded.push(character);
+        } else {
+            for byte in character.to_string().bytes() {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    encoded
+}
+
+fn legacy_path(name: &str) -> Option<PathBuf> {
+    let legacy = desktop_path(&sanitize(name))?;
+    (Some(&legacy) != desktop_path(name).as_ref()).then_some(legacy)
+}
+
+fn owns_legacy_shortcut(path: &Path, name: &str) -> bool {
+    let content = build_content(name, None);
+    let command = content.lines().find(|line| {
+        line.starts_with("Exec=")
+            || line.starts_with("shell.Run ")
+            || line.starts_with("rmcl instance launch ")
+    });
+    command.is_some_and(|command| {
+        std::fs::read_to_string(path)
+            .is_ok_and(|existing| existing.lines().any(|line| line == command))
+    })
+}
+
 pub fn exists(name: &str) -> bool {
-    desktop_path(name).map(|p| p.exists()).unwrap_or(false)
+    desktop_path(name).is_some_and(|path| owns_legacy_shortcut(&path, name))
+        || legacy_path(name).is_some_and(|path| owns_legacy_shortcut(&path, name))
 }
 
 pub fn create(config: &InstanceConfig) -> std::io::Result<PathBuf> {
     let path = desktop_path(&config.name)
         .ok_or_else(|| std::io::Error::other("cannot resolve shortcut directory"))?;
+
+    if path.exists() && !owns_legacy_shortcut(&path, &config.name) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("Another shortcut already exists at '{}'", path.display()),
+        ));
+    }
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -81,6 +121,12 @@ pub fn create(config: &InstanceConfig) -> std::io::Result<PathBuf> {
         std::fs::set_permissions(&path, perms)?;
     }
 
+    if let Some(legacy) = legacy_path(&config.name)
+        && owns_legacy_shortcut(&legacy, &config.name)
+    {
+        std::fs::remove_file(legacy)?;
+    }
+
     Ok(path)
 }
 
@@ -88,8 +134,13 @@ pub fn remove(name: &str) -> std::io::Result<()> {
     let Some(path) = desktop_path(name) else {
         return Ok(());
     };
-    if path.exists() {
+    if owns_legacy_shortcut(&path, name) {
         std::fs::remove_file(path)?;
+    }
+    if let Some(legacy) = legacy_path(name)
+        && owns_legacy_shortcut(&legacy, name)
+    {
+        std::fs::remove_file(legacy)?;
     }
     Ok(())
 }
@@ -109,12 +160,13 @@ pub fn toggle(config: &InstanceConfig) -> std::io::Result<bool> {
 }
 
 pub fn rename(old_name: &str, new_config: &InstanceConfig) -> std::io::Result<()> {
-    let Some(old_path) = desktop_path(old_name).filter(|path| path.exists()) else {
+    if !exists(old_name) {
         return Ok(());
-    };
+    }
+    let same_path = desktop_path(old_name) == desktop_path(&new_config.name);
     create(new_config)?;
-    if desktop_path(&new_config.name).as_ref() != Some(&old_path) {
-        std::fs::remove_file(old_path)?;
+    if !same_path {
+        remove(old_name)?;
     }
     Ok(())
 }

@@ -84,22 +84,21 @@ pub enum MigrationError {
 
 pub fn is_needed(instances_dir: &Path, meta_dir: &Path) -> bool {
     let metadata = MetadataPaths::new(meta_dir);
-    if metadata.cache_rebuild_pending().exists() {
-        return true;
-    }
-    if marker_version(&metadata.layout_marker()) == Some(LAYOUT_VERSION) {
-        return false;
-    }
-    has_legacy_instances(instances_dir)
-        || [
-            "versions",
-            "libraries",
-            "assets",
-            "loader-profiles",
-            "config-sync",
-        ]
-        .iter()
-        .any(|path| meta_dir.join(path).exists())
+    metadata.cache_rebuild_pending().exists()
+        || has_legacy_instances(instances_dir)
+        || has_legacy_shared_data(meta_dir)
+}
+
+fn has_legacy_shared_data(meta_dir: &Path) -> bool {
+    [
+        "versions",
+        "libraries",
+        "assets",
+        "loader-profiles",
+        "config-sync",
+    ]
+    .iter()
+    .any(|path| meta_dir.join(path).exists())
 }
 
 pub fn initialize_new_layout(meta_dir: &Path) -> Result<(), MigrationError> {
@@ -137,6 +136,8 @@ pub fn run(
     let metadata = MetadataPaths::new(meta_dir);
     if marker_version(&metadata.layout_marker()) == Some(LAYOUT_VERSION)
         && metadata.cache_rebuild_pending().exists()
+        && !has_legacy_instances(instances_dir)
+        && !has_legacy_shared_data(meta_dir)
     {
         crate::config::upgrade_config_file(config_file)?;
         return Ok(latest_layout_backup(&metadata).unwrap_or_else(|| metadata.backups()));

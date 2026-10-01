@@ -15,6 +15,23 @@ fn sanitize_replaces_special_chars() {
 }
 
 #[test]
+fn shortcut_paths_do_not_collide_after_escaping() {
+    assert_ne!(shortcut_name("a b"), shortcut_name("a_b"));
+    assert_ne!(shortcut_name("a?b"), shortcut_name("a b"));
+    assert_ne!(shortcut_name("a%b"), shortcut_name("a%25b"));
+    assert_eq!(shortcut_name("my-instance_123"), "my-instance_123");
+}
+
+#[test]
+fn legacy_shortcut_is_attributed_to_the_right_instance() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("rmcl-a_b.desktop");
+    std::fs::write(&path, build_content("a b", None)).unwrap();
+    assert!(owns_legacy_shortcut(&path, "a b"));
+    assert!(!owns_legacy_shortcut(&path, "a_b"));
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn build_content_linux() {
     let content = build_content("TestPack", None);

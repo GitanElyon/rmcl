@@ -63,6 +63,56 @@ fn merge_keeps_replacement_when_a_dependency_is_also_an_update_root() {
     assert!(!merged.items[0].automatic_dependency);
 }
 
+#[tokio::test]
+async fn invalid_manifest_does_not_replace_installed_content() {
+    let temp = tempfile::tempdir().unwrap();
+    let minecraft = temp.path().join("minecraft");
+    let mods = minecraft.join("mods");
+    tokio::fs::create_dir_all(&mods).await.unwrap();
+    let old = mods.join("old.jar");
+    tokio::fs::write(&old, b"original").await.unwrap();
+    let manifest = temp.path().join("content.json");
+    tokio::fs::write(&manifest, b"{bad JSON").await.unwrap();
+    let selected = version(
+        "new",
+        "root",
+        VersionType::Release,
+        "2026-02-01",
+        Vec::new(),
+    );
+    let plan = DependencyPlan {
+        items: vec![PlannedInstall {
+            provider: "modrinth".to_owned(),
+            project_id: "root".to_owned(),
+            title: "Root".to_owned(),
+            version: selected.clone(),
+            installed_path: Some(old.clone()),
+            kind: ContentKind::Mod,
+            destination: mods.clone(),
+            provider_aliases: Vec::new(),
+            required_dependencies: Vec::new(),
+            automatic_dependency: false,
+            cleanup_eligible: false,
+            replacement: true,
+        }],
+        root_count: 1,
+        optional_dependencies: 0,
+    };
+
+    assert!(
+        install(
+            &provider(vec![selected]).registry(),
+            &manifest,
+            &minecraft,
+            &plan
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(tokio::fs::read(old).await.unwrap(), b"original");
+    assert!(!mods.join("new.jar").exists());
+}
+
 struct FakeProvider {
     versions: HashMap<String, VersionInfo>,
     compatible: HashMap<String, Vec<String>>,

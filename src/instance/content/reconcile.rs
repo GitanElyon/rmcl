@@ -620,7 +620,10 @@ fn content_files(minecraft_dir: &Path) -> std::io::Result<Vec<(ContentKind, Path
         }
     }
     if let Ok(worlds) = std::fs::read_dir(minecraft_dir.join("saves")) {
-        for world in worlds.flatten().filter(|entry| entry.path().is_dir()) {
+        for world in worlds
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        {
             let Ok(entries) = std::fs::read_dir(world.path().join("datapacks")) else {
                 continue;
             };
@@ -637,13 +640,19 @@ fn content_files(minecraft_dir: &Path) -> std::io::Result<Vec<(ContentKind, Path
 }
 
 fn supported_content_path(kind: ContentKind, path: &Path) -> bool {
-    if path.is_dir() {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() {
+        return false;
+    }
+    if metadata.is_dir() {
         return matches!(
             kind,
             ContentKind::ResourcePack | ContentKind::Shader | ContentKind::DataPack
         );
     }
-    if !path.is_file() {
+    if !metadata.is_file() {
         return false;
     }
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -661,7 +670,10 @@ fn directory_fingerprint_metadata(path: &Path) -> Result<FileFingerprint, std::i
     fn accumulate(path: &Path, size: &mut u64, modified_ns: &mut u128) -> std::io::Result<()> {
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
-            let metadata = entry.metadata()?;
+            let metadata = std::fs::symlink_metadata(entry.path())?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
             let modified = metadata
                 .modified()
                 .unwrap_or(SystemTime::UNIX_EPOCH)

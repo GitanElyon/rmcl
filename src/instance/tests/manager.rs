@@ -62,6 +62,45 @@ fn delete_missing_instance_returns_not_found() {
     assert!(matches!(result, Err(InstanceError::NotFound(_))));
 }
 
+#[test]
+fn running_instance_cannot_be_deleted_or_renamed() {
+    let (manager, tmp) = test_manager();
+    let name = format!("running-{}", std::process::id());
+    std::fs::create_dir_all(tmp.path().join(&name)).unwrap();
+    manager.save(&dummy_config(&name)).unwrap();
+    crate::instance::runtime::set_state(&name, crate::instance::runtime::RunState::Running);
+
+    let deletion = manager.delete(&name);
+    let rename = manager.rename(&name, "changed");
+    crate::instance::runtime::remove(&name);
+
+    assert!(matches!(deletion, Err(InstanceError::InstanceRunning(_))));
+    assert!(matches!(rename, Err(InstanceError::InstanceRunning(_))));
+    assert!(tmp.path().join(&name).exists());
+    assert!(!tmp.path().join("changed").exists());
+}
+
+#[test]
+fn copied_instance_uses_its_directory_as_identity() {
+    let (manager, tmp) = test_manager();
+    std::fs::create_dir_all(tmp.path().join("original")).unwrap();
+    manager.save(&dummy_config("original")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("copy")).unwrap();
+    std::fs::copy(
+        tmp.path().join("original/instance.json"),
+        tmp.path().join("copy/instance.json"),
+    )
+    .unwrap();
+
+    assert_eq!(manager.load_one("copy").unwrap().name, "copy");
+    assert!(
+        manager
+            .load_all()
+            .iter()
+            .any(|config| config.name == "copy")
+    );
+}
+
 #[tokio::test]
 async fn create_preserves_directory_without_instance_config() {
     let (manager, tmp) = test_manager();

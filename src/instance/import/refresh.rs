@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::instance::content::manifest::ContentManifest;
 use crate::instance::{InstanceConfig, InstanceManager, ProviderProject};
 use crate::net::modrinth::VersionInfo;
 use crate::storage::InstancePaths;
@@ -170,6 +171,13 @@ pub fn apply(
         &plan.new_owned,
         replace_conflicts,
     )?;
+    preserve_refresh_state(
+        &live,
+        &plan.staged_instance,
+        &plan.old_owned,
+        &plan.new_owned,
+        replace_conflicts,
+    )?;
 
     let backup = live.with_file_name(format!(".{}.rmcl-backup", plan.instance.name));
     if backup.exists() {
@@ -247,6 +255,54 @@ fn user_file_collisions(
     Ok(collisions)
 }
 
+fn preserve_refresh_state(
+    live: &Path,
+    staged: &Path,
+    old_owned: &HashSet<PathBuf>,
+    new_owned: &HashSet<PathBuf>,
+    replace_conflicts: &HashSet<PathBuf>,
+) -> Result<(), String> {
+    let old = InstancePaths::new(live);
+    let new = InstancePaths::new(staged);
+    let local_config = old.local_config();
+    if local_config.exists() {
+        std::fs::create_dir_all(new.local_config()).map_err(|e| e.to_string())?;
+        preserve_user_files(
+            &local_config,
+            &new.local_config(),
+            &local_config,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        )?;
+    }
+
+    let old_manifest = ContentManifest::load(&old.content_manifest()).map_err(|e| e.to_string())?;
+    let mut new_manifest =
+        ContentManifest::load(&new.content_manifest()).map_err(|e| e.to_string())?;
+    for record in &old_manifest.files {
+        let path = &record.relative_path;
+        if !old_owned.contains(path)
+            && !(new_owned.contains(path) && replace_conflicts.contains(path))
+            && old.minecraft().join(path).exists()
+        {
+            new_manifest.upsert(record.clone());
+        }
+    }
+    for path in new_owned {
+        if !replace_conflicts.contains(path)
+            && !old_owned.contains(path)
+            && old.minecraft().join(path).exists()
+            && old_manifest.record(path).is_none()
+        {
+            new_manifest.remove(path);
+        }
+    }
+    new_manifest
+        .save(&new.content_manifest())
+        .map_err(|e| e.to_string())
+}
+
 fn preserve_user_files(
     source: &Path,
     destination: &Path,
@@ -260,13 +316,34 @@ fn preserve_user_files(
         let path = entry.path();
         let relative = path.strip_prefix(root).map_err(|error| error.to_string())?;
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        if old_owned.contains(relative)
+            || new_owned.contains(relative) && replace_conflicts.contains(relative)
+        {
+            continue;
+        }
         if metadata.file_type().is_symlink() {
+            let target = destination.join(entry.file_name());
+            if let Ok(existing) = std::fs::symlink_metadata(&target) {
+                if existing.is_dir() {
+                    return Err(format!(
+                        "Cannot replace directory '{}' with a symbolic link",
+                        target.display()
+                    ));
+                }
+                std::fs::remove_file(&target).map_err(|error| error.to_string())?;
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(
+                std::fs::read_link(&path).map_err(|error| error.to_string())?,
+                &target,
+            )
+            .map_err(|error| error.to_string())?;
+            #[cfg(not(unix))]
             return Err(format!(
-                "Cannot safely preserve symbolic link '{}'",
+                "Cannot preserve symbolic link '{}' on this platform",
                 path.display()
             ));
-        }
-        if metadata.is_dir() {
+        } else if metadata.is_dir() {
             let target = destination.join(entry.file_name());
             std::fs::create_dir_all(&target).map_err(|error| error.to_string())?;
             preserve_user_files(
@@ -277,9 +354,7 @@ fn preserve_user_files(
                 new_owned,
                 replace_conflicts,
             )?;
-        } else if !(old_owned.contains(relative)
-            || new_owned.contains(relative) && replace_conflicts.contains(relative))
-        {
+        } else {
             let target = destination.join(entry.file_name());
             std::fs::copy(&path, target).map_err(|error| error.to_string())?;
         }
@@ -301,7 +376,7 @@ fn collect_files(
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
         if metadata.is_dir() {
             collect_files(&path, root, visit)?;
-        } else if metadata.is_file() {
+        } else if metadata.is_file() || metadata.file_type().is_symlink() {
             visit(
                 path.strip_prefix(root).map_err(|error| error.to_string())?,
                 &path,
@@ -331,6 +406,101 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::instance::content::manifest::{ContentFileRecord, ContentKind, FileFingerprint};
+
+    fn record(path: &str) -> ContentFileRecord {
+        ContentFileRecord {
+            relative_path: path.into(),
+            kind: ContentKind::Mod,
+            enabled: true,
+            fingerprint: FileFingerprint {
+                size: 1,
+                modified_ns: 1,
+                hashes: Default::default(),
+            },
+            resolution: Default::default(),
+            provider_aliases: Vec::new(),
+            provider_checks: Vec::new(),
+            required_dependencies: Vec::new(),
+            automatic_dependency: false,
+            cleanup_eligible: false,
+        }
+    }
+
+    #[test]
+    fn refresh_keeps_local_config_and_user_content_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = InstancePaths::new(temp.path().join("old"));
+        let new = InstancePaths::new(temp.path().join("new"));
+        std::fs::create_dir_all(old.local_config()).unwrap();
+        std::fs::write(old.local_config().join("options.txt"), b"local").unwrap();
+        std::fs::create_dir_all(old.minecraft().join("mods")).unwrap();
+        std::fs::write(old.minecraft().join("mods/user.jar"), b"user").unwrap();
+        std::fs::write(old.minecraft().join("mods/replace.jar"), b"user").unwrap();
+        std::fs::create_dir_all(new.minecraft().join("mods")).unwrap();
+        let mut previous = ContentManifest::default();
+        previous.upsert(record("mods/user.jar"));
+        previous.upsert(record("mods/replace.jar"));
+        previous.save(&old.content_manifest()).unwrap();
+        let mut staged = ContentManifest::default();
+        staged.upsert(record("mods/pack.jar"));
+        staged.save(&new.content_manifest()).unwrap();
+
+        preserve_refresh_state(
+            old.root(),
+            new.root(),
+            &HashSet::new(),
+            &HashSet::from([
+                PathBuf::from("mods/pack.jar"),
+                PathBuf::from("mods/replace.jar"),
+            ]),
+            &HashSet::from([PathBuf::from("mods/replace.jar")]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(new.local_config().join("options.txt")).unwrap(),
+            b"local"
+        );
+        let manifest = ContentManifest::load(&new.content_manifest()).unwrap();
+        assert!(manifest.record(Path::new("mods/user.jar")).is_some());
+        assert!(manifest.record(Path::new("mods/pack.jar")).is_some());
+        assert!(manifest.record(Path::new("mods/replace.jar")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_preserves_user_symlinks_without_following_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("old");
+        let new = temp.path().join("new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::os::unix::fs::symlink("outside", old.join("linked.jar")).unwrap();
+        std::os::unix::fs::symlink(&old, old.join("loop")).unwrap();
+        let collisions = user_file_collisions(
+            &old,
+            &HashSet::new(),
+            &HashSet::from([PathBuf::from("linked.jar")]),
+        )
+        .unwrap();
+        assert_eq!(collisions, vec![PathBuf::from("linked.jar")]);
+        preserve_user_files(
+            &old,
+            &new,
+            &old,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_link(new.join("linked.jar")).unwrap(),
+            PathBuf::from("outside")
+        );
+        assert_eq!(std::fs::read_link(new.join("loop")).unwrap(), old);
+    }
 
     #[test]
     fn preservation_replaces_pack_files_and_keeps_user_files() {

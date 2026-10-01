@@ -4,6 +4,52 @@
 use super::*;
 
 #[test]
+fn migrated_layout_detects_a_newly_copied_legacy_instance() {
+    let temp = tempfile::tempdir().unwrap();
+    let instances = temp.path().join("instances");
+    let meta = temp.path().join("meta");
+    fs::create_dir_all(&instances).unwrap();
+    initialize_new_layout(&meta).unwrap();
+    assert!(!is_needed(&instances, &meta));
+
+    fs::create_dir_all(instances.join("copied/.minecraft/saves")).unwrap();
+    assert!(is_needed(&instances, &meta));
+    fs::write(temp.path().join("config.toml"), b"[paths]").unwrap();
+    fs::write(
+        MetadataPaths::new(&meta).cache_rebuild_pending(),
+        LAYOUT_VERSION.to_string(),
+    )
+    .unwrap();
+    run(&instances, &meta, &temp.path().join("config.toml"), |_| {}).unwrap();
+    assert!(instances.join("copied/minecraft/saves").exists());
+}
+
+#[test]
+fn migrated_layout_detects_newly_copied_shared_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let instances = temp.path().join("instances");
+    let meta = temp.path().join("meta");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&instances).unwrap();
+    fs::write(&config, b"[paths]").unwrap();
+    initialize_new_layout(&meta).unwrap();
+    fs::write(
+        MetadataPaths::new(&meta).cache_rebuild_pending(),
+        LAYOUT_VERSION.to_string(),
+    )
+    .unwrap();
+    fs::create_dir_all(meta.join("versions")).unwrap();
+    fs::write(meta.join("versions/copied.json"), b"data").unwrap();
+
+    assert!(is_needed(&instances, &meta));
+    run(&instances, &meta, &config, |_| {}).unwrap();
+    assert_eq!(
+        fs::read(MetadataPaths::new(&meta).versions().join("copied.json")).unwrap(),
+        b"data"
+    );
+}
+
+#[test]
 fn migration_backs_up_and_renames_instance_directories() {
     let temp = tempfile::tempdir().unwrap();
     let instances = temp.path().join("instances");
@@ -155,7 +201,10 @@ fn migration_need_follows_legacy_data_marker_and_pending_rebuild() {
 
     assert!(is_needed(&instances, &meta));
     initialize_new_layout(&meta).unwrap();
+    assert!(is_needed(&instances, &meta));
+    fs::remove_dir_all(instances.join("Example/.minecraft")).unwrap();
     assert!(!is_needed(&instances, &meta));
+    fs::create_dir_all(meta.join("versions")).unwrap();
     fs::write(MetadataPaths::new(&meta).layout_marker(), b"invalid marker").unwrap();
     assert!(is_needed(&instances, &meta));
     initialize_new_layout(&meta).unwrap();

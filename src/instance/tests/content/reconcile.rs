@@ -5,6 +5,21 @@ use super::*;
 
 struct NoopProgress;
 
+#[cfg(unix)]
+#[test]
+fn linked_pack_contents_cannot_recurse_into_themselves() {
+    let temp = tempfile::tempdir().unwrap();
+    let minecraft = temp.path().join("minecraft");
+    let pack = minecraft.join("resourcepacks/unpacked");
+    std::fs::create_dir_all(&pack).unwrap();
+    std::fs::write(pack.join("pack.mcmeta"), b"pack").unwrap();
+    std::os::unix::fs::symlink(&pack, pack.join("again")).unwrap();
+
+    let files = content_files(&minecraft).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(directory_fingerprint_metadata(&pack).unwrap().size, 4);
+}
+
 impl InventoryProgress for NoopProgress {
     fn set_sub_action(&self, _text: &str) {}
 

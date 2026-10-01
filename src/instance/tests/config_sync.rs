@@ -108,6 +108,141 @@ fn prepare_releases_lock_for_another_instance() {
 }
 
 #[test]
+fn active_launch_keeps_its_profile_locked_until_finish() {
+    let tmp = tempfile::tempdir().unwrap();
+    let meta = tmp.path().join("meta");
+    let first = tmp.path().join("first/minecraft");
+    let second = tmp.path().join("second/minecraft");
+    std::fs::create_dir_all(first.join("config")).unwrap();
+    std::fs::create_dir_all(second.join("config")).unwrap();
+    create_profile(&meta, "main").unwrap();
+
+    let lock = prepare_for_launch(Some("main"), &meta, &first)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        prepare_for_launch(Some("main"), &meta, &second),
+        Err(ConfigSyncError::ProfileInUse(_))
+    ));
+    assert!(matches!(
+        delete_profile(&meta, "main"),
+        Err(ConfigSyncError::ProfileInUse(_))
+    ));
+    finish_launch(lock, &first).unwrap();
+    assert!(
+        prepare_for_launch(Some("main"), &meta, &second)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn failed_options_source_read_keeps_existing_options() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("not-a-directory");
+    let target = tmp.path().join("target");
+    std::fs::write(&source, b"invalid").unwrap();
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("options.txt"), b"keep").unwrap();
+
+    assert!(mirror_options(&source, &target).is_err());
+    assert_eq!(std::fs::read(target.join("options.txt")).unwrap(), b"keep");
+}
+
+#[cfg(unix)]
+#[test]
+fn config_sync_preserves_symlinked_config_and_options() {
+    let tmp = tempfile::tempdir().unwrap();
+    let minecraft = tmp.path().join("minecraft");
+    let profile = tmp.path().join("profile");
+    std::fs::create_dir_all(minecraft.join("config")).unwrap();
+    std::fs::write(tmp.path().join("shared.toml"), "settings").unwrap();
+    std::os::unix::fs::symlink(
+        tmp.path().join("shared.toml"),
+        minecraft.join("config/mod.toml"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        tmp.path().join("shared.toml"),
+        minecraft.join("options.txt"),
+    )
+    .unwrap();
+
+    sync_to_profile(&minecraft, &profile).unwrap();
+    assert!(
+        std::fs::symlink_metadata(profile.join("config/mod.toml"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        std::fs::symlink_metadata(profile.join("options.txt"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    sync_from_profile(&profile, &minecraft).unwrap();
+    assert!(
+        std::fs::symlink_metadata(minecraft.join("config/mod.toml"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        std::fs::symlink_metadata(minecraft.join("options.txt"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_only_profile_is_not_reinitialized_or_replaced() {
+    let tmp = tempfile::tempdir().unwrap();
+    let minecraft = tmp.path().join("minecraft");
+    let meta = tmp.path().join("meta");
+    let profile = crate::storage::MetadataPaths::new(&meta)
+        .profiles()
+        .join("linked");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::create_dir_all(&minecraft).unwrap();
+    std::fs::write(tmp.path().join("shared-options"), b"profile").unwrap();
+    std::os::unix::fs::symlink(
+        tmp.path().join("shared-options"),
+        profile.join("options.txt"),
+    )
+    .unwrap();
+
+    let lock = prepare_for_launch(Some("linked"), &meta, &minecraft).unwrap();
+    assert!(lock.is_some());
+    assert_eq!(
+        std::fs::read(minecraft.join("options.txt")).unwrap(),
+        b"profile"
+    );
+    assert!(
+        std::fs::symlink_metadata(minecraft.join("options.txt"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    let external = tmp.path().join("external-config");
+    std::fs::create_dir(&external).unwrap();
+    std::fs::write(external.join("keep.txt"), b"keep").unwrap();
+    std::fs::remove_dir(minecraft.join("config")).unwrap();
+    std::os::unix::fs::symlink(&external, minecraft.join("config")).unwrap();
+    assert!(sync_from_profile(&profile, &minecraft).is_err());
+    assert!(
+        std::fs::symlink_metadata(minecraft.join("config"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(external.join("keep.txt")).unwrap(), b"keep");
+}
+
+#[test]
 fn profile_rejects_path_traversal() {
     let tmp = tempfile::tempdir().unwrap();
     let err = prepare(Some("../bad"), tmp.path(), tmp.path()).unwrap_err();

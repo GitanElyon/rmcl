@@ -213,6 +213,8 @@ async fn install_staged(
         });
     }
 
+    let previous =
+        ContentManifest::load(manifest_path).map_err(|error| NetError::Parse(error.to_string()))?;
     let mut committed = Vec::new();
     for (index, file) in staged.iter().enumerate() {
         let item = &plan.items[file.item];
@@ -241,8 +243,6 @@ async fn install_staged(
         });
     }
 
-    let previous =
-        ContentManifest::load(manifest_path).map_err(|error| NetError::Parse(error.to_string()))?;
     let records = match build_records(plan, &previous, minecraft_dir, &staged) {
         Ok(records) => records,
         Err(error) => {

@@ -711,14 +711,12 @@ async fn run_launch_command(
 }
 
 fn finish_config_sync(
-    active: bool,
-    profile: Option<&str>,
-    meta_dir: &Path,
+    lock: Option<crate::instance::config_sync::ConfigSyncLock>,
     minecraft_dir: &Path,
     instance: &str,
 ) {
-    if active
-        && let Err(error) = crate::instance::config_sync::finish(profile, meta_dir, minecraft_dir)
+    if let Some(lock) = lock
+        && let Err(error) = crate::instance::config_sync::finish_launch(lock, minecraft_dir)
     {
         tracing::warn!("Failed to sync config for '{}': {}", instance, error);
     }
@@ -771,7 +769,7 @@ pub async fn launch(
             changed = true;
         }
         if changed {
-            account_store.save();
+            account_store.save()?;
         }
     }
 
@@ -800,9 +798,8 @@ pub async fn launch(
         invocation.game_args.len(),
         invocation.main_class
     );
-    let config_sync_profile = config.config_sync_profile.clone();
-    let config_sync_active = crate::instance::config_sync::prepare(
-        config_sync_profile.as_deref(),
+    let config_sync_lock = crate::instance::config_sync::prepare_for_launch(
+        config.config_sync_profile.as_deref(),
         meta_dir,
         &invocation.working_dir,
     )?;
@@ -815,13 +812,7 @@ pub async fn launch(
     )
     .await
     {
-        finish_config_sync(
-            config_sync_active,
-            config_sync_profile.as_deref(),
-            meta_dir,
-            &invocation.working_dir,
-            &name,
-        );
+        finish_config_sync(config_sync_lock, &invocation.working_dir, &name);
         return Err(error);
     }
 
@@ -865,13 +856,7 @@ pub async fn launch(
         Err(e) => {
             crate::instance::runtime::cleanup_kill_sender(&name);
             crate::instance::runtime::remove(&name);
-            finish_config_sync(
-                config_sync_active,
-                config_sync_profile.as_deref(),
-                meta_dir,
-                &invocation.working_dir,
-                &name,
-            );
+            finish_config_sync(config_sync_lock, &invocation.working_dir, &name);
             tracing::error!("[{}] Failed to spawn Minecraft process: {}", name, e);
             return Err(LaunchError::Io(e));
         }
@@ -1009,13 +994,7 @@ pub async fn launch(
             crate::feedback::errors::push_message(tracing::Level::WARN, error.to_string());
         }
 
-        finish_config_sync(
-            config_sync_active,
-            config_sync_profile.as_deref(),
-            &meta_dir_owned,
-            &minecraft_dir_owned,
-            &name_for_task,
-        );
+        finish_config_sync(config_sync_lock, &minecraft_dir_owned, &name_for_task);
         if code == Some(0) || killed_by_user {
             crate::instance::runtime::remove(&name_for_task);
             tracing::debug!(

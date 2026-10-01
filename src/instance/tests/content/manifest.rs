@@ -22,12 +22,11 @@ fn content_lock_excludes_independent_handles_until_drop() {
 }
 
 #[test]
-fn dropping_guard_releases_locks_with_duplicated_handles() {
+fn dropping_guard_releases_the_content_lock_with_a_duplicated_handle() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("instance/rmcl/content/manifest.json");
     let lock = ContentLock::acquire(&path).unwrap();
     let _manifest_handle = lock.file.try_clone().unwrap();
-    let _instance_handle = lock.instance_lock.as_ref().unwrap().try_clone().unwrap();
     drop(lock);
     ContentLock::acquire(&path).unwrap();
 }

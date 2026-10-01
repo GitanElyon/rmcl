@@ -111,10 +111,22 @@ pub fn cleanup_kill_sender(name: &str) {
     }
 }
 
+pub(crate) struct InstanceLock(std::fs::File);
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        // A concurrent fork can retain a descriptor until exec; closing our copy
+        // alone would leave the instance locked during that interval.
+        if let Err(error) = self.0.unlock() {
+            tracing::warn!("Could not release instance lock: {error}");
+        }
+    }
+}
+
 pub(crate) fn lock_instance(
     root: &std::path::Path,
     name: &str,
-) -> Result<std::fs::File, crate::instance::manager::InstanceError> {
+) -> Result<InstanceLock, crate::instance::manager::InstanceError> {
     crate::instance::manager::validate_name(name)?;
     let locks = root.join(".rmcl-locks");
     std::fs::create_dir_all(&locks)?;
@@ -125,7 +137,7 @@ pub(crate) fn lock_instance(
         .write(true)
         .open(locks.join(format!("{name}.lock")))?;
     match file.try_lock() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(InstanceLock(file)),
         Err(std::fs::TryLockError::WouldBlock) => Err(
             crate::instance::manager::InstanceError::InstanceRunning(name.to_owned()),
         ),

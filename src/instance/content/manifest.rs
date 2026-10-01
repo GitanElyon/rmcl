@@ -14,7 +14,7 @@ const MANIFEST_VERSION: u32 = 1;
 
 pub(crate) struct ContentLock {
     file: File,
-    instance_lock: Option<File>,
+    _instance_lock: Option<crate::instance::runtime::InstanceLock>,
     path: PathBuf,
 }
 
@@ -69,7 +69,7 @@ impl ContentLock {
         }
         Ok(Self {
             file,
-            instance_lock,
+            _instance_lock: instance_lock,
             path: path.to_owned(),
         })
     }
@@ -102,14 +102,6 @@ impl Drop for ContentLock {
         if let Err(error) = fs2::FileExt::unlock(&self.file) {
             tracing::warn!(
                 "Could not release content lock '{}': {error}",
-                self.path.display()
-            );
-        }
-        if let Some(file) = &self.instance_lock
-            && let Err(error) = file.unlock()
-        {
-            tracing::warn!(
-                "Could not release instance lock for '{}': {error}",
                 self.path.display()
             );
         }

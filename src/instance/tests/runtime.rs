@@ -4,6 +4,20 @@
 use super::*;
 
 #[test]
+fn dropping_an_instance_lock_releases_it_even_with_a_duplicated_descriptor() {
+    let temp = tempfile::tempdir().unwrap();
+    let lock = lock_instance(temp.path(), "duplicated").unwrap();
+    let duplicate = lock.0.try_clone().unwrap();
+    drop(lock);
+    let next = lock_instance(temp.path(), "duplicated");
+    drop(duplicate);
+    assert!(
+        next.is_ok(),
+        "A duplicate descriptor retained the released instance lock"
+    );
+}
+
+#[test]
 fn set_and_get_state() {
     set_state("run_test_1", RunState::Starting);
     assert_eq!(get("run_test_1"), Some(RunState::Starting));

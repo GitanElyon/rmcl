@@ -234,7 +234,11 @@ async fn cancelled_downloads_preserve_the_destination_and_remove_all_staging_fil
             loop {
                 if std::fs::read_dir(temp.path()).unwrap().any(|entry| {
                     let entry = entry.unwrap();
-                    entry.path() != destination && entry.metadata().unwrap().len() == 1
+                    // Windows directory metadata can lag writes to an open file.
+                    entry.path() != destination
+                        && std::fs::File::open(entry.path()).is_ok_and(|mut file| {
+                            matches!(std::io::Read::read(&mut file, &mut [0]), Ok(1))
+                        })
                 }) {
                     break;
                 }

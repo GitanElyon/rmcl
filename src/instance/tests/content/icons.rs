@@ -4,6 +4,22 @@
 use super::*;
 
 #[test]
+fn half_block_pixels_keep_the_top_and_bottom_colors() {
+    let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(1, 2, |_, y| {
+        if y == 0 {
+            image::Rgb([255, 0, 0])
+        } else {
+            image::Rgb([0, 0, 255])
+        }
+    }));
+    let rows = make_icon_pixels_from_image(&image, 1, 1);
+    let cell = &rows[0][0];
+    assert_eq!(cell.symbol, '▀');
+    assert_eq!((cell.fg_r, cell.fg_g, cell.fg_b), (255, 0, 0));
+    assert_eq!((cell.bg_r, cell.bg_g, cell.bg_b), (0, 0, 255));
+}
+
+#[test]
 fn quadrant_raster_has_requested_dimensions() {
     let image =
         image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 2, image::Rgb([12, 34, 56])));

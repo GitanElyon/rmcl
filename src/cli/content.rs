@@ -58,10 +58,24 @@ fn handle_content(matches: &ArgMatches, kind: &str, scan: Scanner) -> CliResult 
 pub(crate) fn find_entry_by_stem<'a>(
     entries: &'a [ContentEntry],
     target: &str,
-) -> Option<&'a ContentEntry> {
-    entries
+) -> io::Result<Option<&'a ContentEntry>> {
+    let exact = entries
         .iter()
-        .find(|entry| entry.file_stem.eq_ignore_ascii_case(target))
+        .any(|entry| entry.path.file_name().is_some_and(|name| name == target));
+    let mut matches = entries.iter().filter(|entry| {
+        if exact {
+            entry.path.file_name().is_some_and(|name| name == target)
+        } else {
+            entry.file_stem.eq_ignore_ascii_case(target)
+        }
+    });
+    let found = matches.next();
+    if matches.next().is_some() {
+        return Err(io::Error::other(format!(
+            "Content selector '{target}' is ambiguous; use its filename"
+        )));
+    }
+    Ok(found)
 }
 
 fn list_entries(instance: &str, scan: Scanner) -> CliResult {
@@ -95,7 +109,7 @@ fn toggle_entry(
     let instances_dir = crate::config::SETTINGS.read().paths.resolve_instances_dir();
     require_instance(&instances_dir, instance)?;
     let entries = scan(&instances_dir, instance);
-    let entry = find_entry_by_stem(&entries, target)
+    let entry = find_entry_by_stem(&entries, target)?
         .ok_or_else(|| io::Error::other(format!("{} '{}' not found", kind, target)))?;
 
     if entry.enabled == should_enable {

@@ -4,6 +4,106 @@
 use super::*;
 
 #[test]
+fn content_lock_excludes_independent_handles_until_drop() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("manifest.json");
+    let lock = ContentLock::acquire(&path).unwrap();
+    assert!(matches!(
+        ContentLock::acquire(&path),
+        Err(ManifestError::Busy(_))
+    ));
+    assert!(matches!(
+        ContentManifest::update(&path, |_| Ok(())),
+        Err(ManifestError::Busy(_))
+    ));
+    drop(lock);
+    assert!(path.with_extension("lock").exists());
+    ContentLock::acquire(&path).unwrap();
+}
+
+#[test]
+fn dropping_guard_releases_locks_with_duplicated_handles() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("instance/rmcl/content/manifest.json");
+    let lock = ContentLock::acquire(&path).unwrap();
+    let _manifest_handle = lock.file.try_clone().unwrap();
+    let _instance_handle = lock.instance_lock.as_ref().unwrap().try_clone().unwrap();
+    drop(lock);
+    ContentLock::acquire(&path).unwrap();
+}
+
+#[test]
+fn content_lock_excludes_other_processes() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("manifest.json");
+    let lock = ContentLock::acquire(&path).unwrap();
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "instance::content::manifest::tests::content_lock_probe",
+        ])
+        .env("RMCL_TEST_CONTENT_MANIFEST", &path)
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+    drop(lock);
+    ContentLock::acquire(&path).unwrap();
+}
+
+#[test]
+fn content_lock_probe() {
+    if let Some(path) = std::env::var_os("RMCL_TEST_CONTENT_MANIFEST") {
+        assert!(matches!(
+            ContentLock::acquire(Path::new(&path)),
+            Err(ManifestError::Busy(_))
+        ));
+    }
+}
+
+#[test]
+fn guarded_publication_rejects_an_uncooperative_manifest_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("manifest.json");
+    let previous = ContentManifest::default();
+    previous.save(&path).unwrap();
+    let lock = ContentLock::acquire(&path).unwrap();
+    std::fs::write(&path, br#"{"version":1,"files":[{"relative_path":"mods/foreign.jar","kind":"mod","enabled":true,"fingerprint":{"size":1,"modified_ns":0,"hashes":{}}}]}"#).unwrap();
+    assert!(matches!(
+        lock.save_if_unchanged(&previous, &previous),
+        Err(ManifestError::Changed(_))
+    ));
+    assert_eq!(
+        ContentManifest::load(&path).unwrap().files[0].relative_path,
+        Path::new("mods/foreign.jar")
+    );
+}
+
+#[test]
+fn loading_rejects_duplicate_and_escaping_ownership_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("manifest.json");
+    for (relative, copies) in [("../escape.jar", 1), ("mods/a.jar", 2)] {
+        let record = serde_json::json!({
+            "relative_path": relative, "kind": "mod", "enabled": true,
+            "fingerprint": { "size": 0, "modified_ns": 0, "hashes": {} },
+        });
+        let files = vec![record; copies];
+        let manifest = serde_json::json!({ "version": 1, "files": files });
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(matches!(
+            ContentManifest::load(&path),
+            Err(ManifestError::InvalidPath(_))
+        ));
+    }
+}
+
+#[test]
 fn curseforge_fingerprint_ignores_whitespace() {
     let temp = tempfile::tempdir().unwrap();
     let compact = temp.path().join("compact.jar");
@@ -21,7 +121,7 @@ fn curseforge_fingerprint_ignores_whitespace() {
 #[test]
 fn manifest_round_trip_and_lookup_are_exact() {
     let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("rmcl/content/manifest.json");
+    let path = temp.path().join("instance/rmcl/content/manifest.json");
     let record = ContentFileRecord {
         relative_path: PathBuf::from("mods/fabric-api.jar"),
         kind: ContentKind::Mod,

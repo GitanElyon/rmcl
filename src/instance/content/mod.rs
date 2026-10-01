@@ -7,6 +7,7 @@ pub mod datapacks;
 pub mod dependencies;
 pub mod entry;
 pub mod icons;
+pub(crate) mod local;
 pub mod manifest;
 pub mod mods;
 mod packs;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::*;
+use crate::instance::FileFingerprint;
 
 struct NoopProgress;
 
@@ -18,6 +19,24 @@ fn linked_pack_contents_cannot_recurse_into_themselves() {
     let files = content_files(&minecraft).unwrap();
     assert_eq!(files.len(), 1);
     assert_eq!(directory_fingerprint_metadata(&pack).unwrap().size, 4);
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_rejects_content_directories_linked_outside_the_instance() {
+    let temp = tempfile::tempdir().unwrap();
+    let minecraft = temp.path().join("minecraft");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&minecraft).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("foreign.jar"), b"foreign").unwrap();
+    std::os::unix::fs::symlink(&outside, minecraft.join("mods")).unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+    let error = reconcile_inventory(&manifest_path, &minecraft, 24, 512, &NoopProgress)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("symlink"));
+    assert!(!manifest_path.exists());
 }
 
 impl InventoryProgress for NoopProgress {
@@ -165,16 +184,97 @@ fn newly_configured_provider_retries_an_unmatched_record() {
 }
 
 #[test]
+fn reconciliation_keeps_newer_provider_ownership_for_unchanged_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let minecraft = temp.path().join("minecraft");
+    let manifest_path = temp.path().join("manifest.json");
+    let path = minecraft.join("mods/example.jar");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"original").unwrap();
+    let mut record = resolved_record();
+    record.fingerprint = fingerprint(&path).unwrap();
+    let previous = ContentManifest {
+        version: 1,
+        files: vec![record.clone()],
+    };
+    let mut current = previous.clone();
+    current.files[0].resolution = Resolution::Resolved {
+        project: ProviderProject {
+            provider: "curseforge".to_owned(),
+            project_id: "chosen".to_owned(),
+            version_id: "new".to_owned(),
+        },
+    };
+    current.files[0].provider_aliases = vec![record.resolved_project().unwrap().clone()];
+    current.save(&manifest_path).unwrap();
+    let saved =
+        save_reconciled_manifest(&manifest_path, &minecraft, previous.clone(), &previous).unwrap();
+    assert_eq!(saved.files, current.files);
+}
+
+#[test]
+fn reconciliation_revalidates_hashes_after_provider_matching() {
+    let temp = tempfile::tempdir().unwrap();
+    let minecraft = temp.path().join("minecraft");
+    let manifest_path = temp.path().join("manifest.json");
+    let path = minecraft.join("mods/example.jar");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"original").unwrap();
+    let mut inventory =
+        reconcile_inventory(&manifest_path, &minecraft, 24, 512, &NoopProgress).unwrap();
+    inventory.manifest.files[0].resolution = resolved_record().resolution;
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::fs::write(&path, b"external").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    let saved = save_reconciled_manifest(
+        &manifest_path,
+        &minecraft,
+        inventory.manifest,
+        &inventory.previous,
+    )
+    .unwrap();
+    assert!(saved.files.is_empty());
+    assert_eq!(std::fs::read(path).unwrap(), b"external");
+}
+
+#[test]
+fn an_incomplete_directory_scan_does_not_publish_a_partial_inventory() {
+    let temp = tempfile::tempdir().unwrap();
+    let minecraft = temp.path().join("minecraft");
+    let manifest_path = temp.path().join("manifest.json");
+    let pack = minecraft.join("resourcepacks/example.zip");
+    std::fs::create_dir_all(pack.parent().unwrap()).unwrap();
+    std::fs::write(&pack, b"pack").unwrap();
+    let first = reconcile_inventory(&manifest_path, &minecraft, 24, 512, &NoopProgress).unwrap();
+    first.manifest.save(&manifest_path).unwrap();
+    let saved_bytes = std::fs::read(&manifest_path).unwrap();
+    std::fs::write(minecraft.join("mods"), b"not a directory").unwrap();
+    assert!(reconcile_inventory(&manifest_path, &minecraft, 24, 512, &NoopProgress).is_err());
+    assert_eq!(std::fs::read(manifest_path).unwrap(), saved_bytes);
+}
+
+#[test]
 fn reconciliation_saves_provider_aliases_for_an_existing_resolution() {
     let temp = tempfile::tempdir().unwrap();
     let manifest_path = temp.path().join("manifest.json");
+    let minecraft = temp.path().join("minecraft");
+    let mut record = resolved_record();
+    let path = minecraft.join(&record.relative_path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"original").unwrap();
+    record.fingerprint = fingerprint(&path).unwrap();
     let current = ContentManifest {
         version: 1,
-        files: vec![resolved_record()],
+        files: vec![record.clone()],
     };
     current.save(&manifest_path).unwrap();
 
-    let mut enriched = resolved_record();
+    let mut enriched = record;
     enriched.provider_aliases.push(ProviderProject {
         provider: "curseforge".to_owned(),
         project_id: "42".to_owned(),
@@ -183,15 +283,41 @@ fn reconciliation_saves_provider_aliases_for_an_existing_resolution() {
     enriched.provider_checks = vec!["modrinth".to_owned(), "curseforge".to_owned()];
     let saved = save_reconciled_manifest(
         &manifest_path,
-        &temp.path().join("minecraft"),
+        &minecraft,
         ContentManifest {
             version: 1,
             files: vec![enriched.clone()],
         },
+        &current,
     )
     .unwrap();
 
     assert_eq!(saved.files, vec![enriched]);
+    let stale = saved.clone();
+    let mut managed = saved;
+    managed.files[0].automatic_dependency = true;
+    managed.files[0].cleanup_eligible = true;
+    managed.save(&manifest_path).unwrap();
+    let merged =
+        save_reconciled_manifest(&manifest_path, &minecraft, stale.clone(), &stale).unwrap();
+    assert!(merged.files[0].automatic_dependency);
+    std::fs::write(&path, b"replacement").unwrap();
+    let mut newer = merged.clone();
+    newer.files[0].fingerprint = fingerprint(&path).unwrap();
+    newer.save(&manifest_path).unwrap();
+    assert_eq!(
+        save_reconciled_manifest(&manifest_path, &minecraft, stale.clone(), &stale)
+            .unwrap()
+            .files,
+        newer.files
+    );
+    std::fs::remove_file(path).unwrap();
+    assert!(
+        save_reconciled_manifest(&manifest_path, &minecraft, stale.clone(), &stale)
+            .unwrap()
+            .files
+            .is_empty()
+    );
 }
 
 #[test]

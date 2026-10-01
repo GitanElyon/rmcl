@@ -1,18 +1,120 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha1::Digest as _;
 
 const MANIFEST_VERSION: u32 = 1;
-static MANIFEST_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) struct ContentLock {
+    file: File,
+    instance_lock: Option<File>,
+    path: PathBuf,
+}
+
+impl ContentLock {
+    pub(crate) fn acquire(path: &Path) -> Result<Self, ManifestError> {
+        let parent = path.parent().ok_or_else(|| {
+            ManifestError::InvalidPath(format!("{} has no parent", path.display()))
+        })?;
+        let instance_dir = parent
+            .parent()
+            .filter(|state| {
+                path.file_name().is_some_and(|name| name == "manifest.json")
+                    && parent.file_name().is_some_and(|name| name == "content")
+                    && state
+                        .file_name()
+                        .is_some_and(|name| name == crate::storage::INSTANCE_STATE_DIR_NAME)
+            })
+            .and_then(Path::parent);
+        let instance_lock = if let Some(instance_dir) = instance_dir {
+            let root = instance_dir.parent().ok_or_else(|| {
+                ManifestError::InvalidPath(format!("{} has no instance root", path.display()))
+            })?;
+            let name = instance_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    ManifestError::InvalidPath(format!("{} has no instance name", path.display()))
+                })?;
+            Some(crate::instance::runtime::lock_instance(root, name).map_err(
+                |error| match error {
+                    crate::instance::manager::InstanceError::InstanceRunning(_) => {
+                        ManifestError::Busy(path.to_owned())
+                    }
+                    error => ManifestError::Io(std::io::Error::other(error)),
+                },
+            )?)
+        } else {
+            None
+        };
+        std::fs::create_dir_all(parent)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("lock"))?;
+        if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
+            if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
+                return Err(ManifestError::Busy(path.to_owned()));
+            }
+            return Err(error.into());
+        }
+        Ok(Self {
+            file,
+            instance_lock,
+            path: path.to_owned(),
+        })
+    }
+
+    pub(crate) fn load(&self) -> Result<ContentManifest, ManifestError> {
+        ContentManifest::load(&self.path)
+    }
+
+    pub(crate) fn save(&self, manifest: &ContentManifest) -> Result<(), ManifestError> {
+        let bytes = serde_json::to_vec_pretty(manifest)?;
+        crate::storage::write_atomic(&self.path, &bytes)?;
+        Ok(())
+    }
+
+    pub(crate) fn save_if_unchanged(
+        &self,
+        manifest: &ContentManifest,
+        previous: &ContentManifest,
+    ) -> Result<(), ManifestError> {
+        let current = self.load()?;
+        if current.version != previous.version || current.files != previous.files {
+            return Err(ManifestError::Changed(self.path.clone()));
+        }
+        self.save(manifest)
+    }
+}
+
+impl Drop for ContentLock {
+    fn drop(&mut self) {
+        if let Err(error) = fs2::FileExt::unlock(&self.file) {
+            tracing::warn!(
+                "Could not release content lock '{}': {error}",
+                self.path.display()
+            );
+        }
+        if let Some(file) = &self.instance_lock
+            && let Err(error) = file.unlock()
+        {
+            tracing::warn!(
+                "Could not release instance lock for '{}': {error}",
+                self.path.display()
+            );
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,10 +222,13 @@ impl Default for ContentManifest {
 
 impl ContentManifest {
     pub fn load(path: &Path) -> Result<Self, ManifestError> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let bytes = std::fs::read(path)?;
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(error.into()),
+        };
         let mut manifest: Self = serde_json::from_slice(&bytes)?;
         if manifest.version != MANIFEST_VERSION {
             return Err(ManifestError::UnsupportedVersion(manifest.version));
@@ -133,36 +238,32 @@ impl ContentManifest {
         manifest
             .files
             .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        for (index, record) in manifest.files.iter().enumerate() {
+            if !crate::storage::safe_relative_path(&record.relative_path)
+                || index > 0 && manifest.files[index - 1].relative_path == record.relative_path
+            {
+                return Err(ManifestError::InvalidPath(format!(
+                    "Unsafe or duplicate content path '{}'",
+                    record.relative_path.display()
+                )));
+            }
+        }
         Ok(manifest)
     }
 
     pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
-        let parent = path.parent().ok_or_else(|| {
-            ManifestError::InvalidPath(format!("{} has no parent", path.display()))
-        })?;
-        std::fs::create_dir_all(parent)?;
-        let bytes = serde_json::to_vec_pretty(self)?;
-        crate::storage::write_atomic(path, &bytes)?;
-        Ok(())
+        ContentLock::acquire(path)?.save(self)
     }
 
     pub fn update<T>(
         path: &Path,
         update: impl FnOnce(&mut Self) -> Result<T, ManifestError>,
     ) -> Result<T, ManifestError> {
-        let lock = {
-            let mut locks = MANIFEST_LOCKS
-                .lock()
-                .map_err(|_| ManifestError::LockPoisoned)?;
-            locks
-                .entry(path.to_owned())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-        let _guard = lock.lock().map_err(|_| ManifestError::LockPoisoned)?;
-        let mut manifest = Self::load(path)?;
+        let lock = ContentLock::acquire(path)?;
+        let mut manifest = lock.load()?;
+        let previous = manifest.clone();
         let result = update(&mut manifest)?;
-        manifest.save(path)?;
+        lock.save_if_unchanged(&manifest, &previous)?;
         Ok(result)
     }
 
@@ -200,10 +301,13 @@ impl ContentManifest {
     }
 
     pub fn rename_record(&mut self, from: &Path, to: &Path, enabled: bool) -> bool {
+        if from != to && self.record(to).is_some() {
+            return false;
+        }
         let Some(index) = self
             .files
             .iter()
-            .position(|record| record.relative_path == from || record.relative_path == to)
+            .position(|record| record.relative_path == from)
         else {
             return false;
         };
@@ -362,8 +466,10 @@ pub enum ManifestError {
     UnsupportedVersion(u32),
     #[error("Invalid manifest path: {0}")]
     InvalidPath(String),
-    #[error("Content manifest lock was poisoned")]
-    LockPoisoned,
+    #[error("Content is being changed by another operation: {0}")]
+    Busy(PathBuf),
+    #[error("Content manifest changed during the operation; refresh before retrying: {0}")]
+    Changed(PathBuf),
 }
 
 pub fn fingerprint(path: &Path) -> Result<FileFingerprint, std::io::Error> {

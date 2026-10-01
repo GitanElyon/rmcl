@@ -8,6 +8,24 @@ use flate2::{Compression, write::GzEncoder};
 use super::*;
 
 #[test]
+fn oversized_and_malformed_world_metadata_fall_back() {
+    let temp = tempfile::tempdir().unwrap();
+    for bytes in [
+        vec![0; (super::super::MAX_LOCAL_METADATA_BYTES + 1) as usize],
+        // Root compound, unknown byte array with a huge declared length and no payload.
+        vec![10, 0, 0, 7, 0, 1, b'x', 0x7f, 0xff, 0xff, 0xff],
+    ] {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&bytes).unwrap();
+        std::fs::write(temp.path().join("level.dat"), encoder.finish().unwrap()).unwrap();
+        assert_eq!(
+            scan_one_world(temp.path(), "fallback", true).name,
+            "fallback"
+        );
+    }
+}
+
+#[test]
 fn world_scan_uses_level_dat_metadata_and_falls_back_cleanly() {
     let temp = tempfile::tempdir().unwrap();
     let world = temp.path().join("world-folder");

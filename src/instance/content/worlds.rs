@@ -157,7 +157,8 @@ impl WorldMetadata {
 fn read_world_metadata(world_dir: &Path) -> Option<WorldMetadata> {
     let path = world_dir.join("level.dat");
     let file = File::open(&path).ok()?;
-    match fastnbt::from_reader::<_, LevelDat>(GzDecoder::new(file)) {
+    let bytes = super::read_local_metadata(GzDecoder::new(file))?;
+    match fastnbt::from_bytes::<LevelDat>(&bytes) {
         Ok(level) => Some(level.data),
         Err(error) => {
             tracing::debug!(

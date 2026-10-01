@@ -4,12 +4,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::local::{current_fingerprint, directory_fingerprint_metadata, relative_path};
 use crate::feedback::progress::{ProgressTask, ProgressTaskHandle};
 use crate::instance::InstanceConfig;
 use crate::instance::content::manifest::{
-    ContentFileRecord, ContentKind, ContentManifest, FileFingerprint, ProviderProject, Resolution,
+    ContentFileRecord, ContentKind, ContentLock, ContentManifest, ProviderProject, Resolution,
     fingerprint, fingerprint_metadata,
 };
 use crate::instance::content::provider::{FingerprintQuery, ProviderRegistry};
@@ -188,38 +188,31 @@ async fn reconcile(job: ReconcileJob, task: &ProgressTask) -> ReconcileResult {
                     inventory.queries.len() as u64,
                 );
             }
-            match resolution_result {
-                Ok(()) => match save_reconciled_manifest(
+            let saved = tokio::task::spawn_blocking(move || {
+                save_reconciled_manifest(
                     &manifest_path,
                     &minecraft_dir,
                     inventory.manifest,
-                ) {
-                    Ok(manifest) => ReconcileResult {
-                        instance_name,
-                        instance_created,
-                        manifest,
-                        error: None,
-                    },
-                    Err(error) => ReconcileResult {
-                        instance_name,
-                        instance_created,
-                        manifest: ContentManifest::default(),
-                        error: Some(error.to_string()),
-                    },
-                },
-                Err(error) => {
-                    let saved = save_reconciled_manifest(
-                        &manifest_path,
-                        &minecraft_dir,
-                        inventory.manifest,
-                    );
-                    ReconcileResult {
-                        instance_name,
-                        instance_created,
-                        manifest: saved.unwrap_or_default(),
-                        error: Some(error.to_string()),
-                    }
-                }
+                    &inventory.previous,
+                )
+            })
+            .await
+            .unwrap_or_else(|error| {
+                Err(std::io::Error::other(format!("Content save task failed: {error}")).into())
+            });
+            let error = match (resolution_result, &saved) {
+                (Ok(()), Ok(_)) => None,
+                (Err(error), Ok(_)) => Some(error.to_string()),
+                (Ok(()), Err(error)) => Some(error.to_string()),
+                (Err(error), Err(save_error)) => Some(format!(
+                    "Provider matching failed: {error}; could not save content inventory: {save_error}"
+                )),
+            };
+            ReconcileResult {
+                instance_name,
+                instance_created,
+                manifest: saved.unwrap_or_default(),
+                error,
             }
         }
         Ok(Err(error)) => ReconcileResult {
@@ -241,18 +234,46 @@ fn save_reconciled_manifest(
     manifest_path: &Path,
     minecraft_dir: &Path,
     reconciled: ContentManifest,
+    previous: &ContentManifest,
 ) -> Result<ContentManifest, crate::instance::content::manifest::ManifestError> {
-    let reconciled_paths = reconciled
-        .files
-        .iter()
-        .map(|record| record.relative_path.clone())
-        .collect::<HashSet<_>>();
     ContentManifest::update(manifest_path, |current| {
-        current.files.retain(|record| {
-            reconciled_paths.contains(&record.relative_path)
-                || minecraft_dir.join(&record.relative_path).exists()
-        });
-        for record in reconciled.files {
+        for record in current.files.clone() {
+            relative_path(minecraft_dir, &minecraft_dir.join(&record.relative_path))?;
+            match std::fs::symlink_metadata(minecraft_dir.join(&record.relative_path)) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    current.remove(&record.relative_path)
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for mut record in reconciled.files {
+            let path = minecraft_dir.join(&record.relative_path);
+            relative_path(minecraft_dir, &path)?;
+            if current.record(&record.relative_path) != previous.record(&record.relative_path) {
+                continue;
+            }
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            let fresh = current_fingerprint(&path, &record.fingerprint)?;
+            if fresh != record.fingerprint {
+                continue;
+            }
+            if let Some(existing) = current.record(&record.relative_path)
+                && existing.fingerprint == record.fingerprint
+            {
+                record
+                    .required_dependencies
+                    .clone_from(&existing.required_dependencies);
+                record.automatic_dependency = existing.automatic_dependency;
+                record.cleanup_eligible = existing.cleanup_eligible;
+            }
             let keep_resolved = current
                 .record(&record.relative_path)
                 .is_some_and(|existing| {
@@ -273,6 +294,7 @@ fn save_reconciled_manifest(
 }
 
 struct Inventory {
+    previous: ContentManifest,
     manifest: ContentManifest,
     queries: Vec<FingerprintQuery>,
 }
@@ -299,7 +321,8 @@ fn reconcile_inventory(
     max_fingerprint_size_mib: u64,
     task: &impl InventoryProgress,
 ) -> Result<Inventory, Box<dyn std::error::Error + Send + Sync>> {
-    let previous = ContentManifest::load(manifest_path)?;
+    let lock = ContentLock::acquire(manifest_path)?;
+    let previous = lock.load()?;
     let files = content_files(minecraft_dir)?;
     let file_count = files.len() as u64;
     if file_count == 0 {
@@ -319,7 +342,7 @@ fn reconcile_inventory(
                 .and_then(|name| name.to_str())
                 .unwrap_or("content"),
         );
-        let relative_path = path.strip_prefix(minecraft_dir)?.to_path_buf();
+        let relative_path = relative_path(minecraft_dir, &path)?;
         let enabled = !path
             .file_name()
             .and_then(|name| name.to_str())
@@ -443,7 +466,11 @@ fn reconcile_inventory(
         manifest.files.push(record);
         task.set_progress(index as u64 + 1, file_count);
     }
-    Ok(Inventory { manifest, queries })
+    Ok(Inventory {
+        previous,
+        manifest,
+        queries,
+    })
 }
 
 fn provider_was_not_checked(record: &ContentFileRecord, provider: &str) -> bool {
@@ -609,27 +636,26 @@ fn content_files(minecraft_dir: &Path) -> std::io::Result<Vec<(ContentKind, Path
         ContentKind::Shader,
     ] {
         let directory = minecraft_dir.join(kind.directory());
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+        let entries = read_content_directory(&directory)?;
+        for entry in entries {
+            let entry = entry?;
             let path = entry.path();
-            if supported_content_path(kind, &path) {
+            if supported_content_path(kind, &path)? {
                 files.push((kind, path));
             }
         }
     }
-    if let Ok(worlds) = std::fs::read_dir(minecraft_dir.join("saves")) {
-        for world in worlds
-            .flatten()
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        {
-            let Ok(entries) = std::fs::read_dir(world.path().join("datapacks")) else {
+    {
+        for world in read_content_directory(&minecraft_dir.join("saves"))? {
+            let world = world?;
+            if !world.file_type()?.is_dir() {
                 continue;
-            };
-            for entry in entries.flatten() {
+            }
+            let entries = read_content_directory(&world.path().join("datapacks"))?;
+            for entry in entries {
+                let entry = entry?;
                 let path = entry.path();
-                if supported_content_path(ContentKind::DataPack, &path) {
+                if supported_content_path(ContentKind::DataPack, &path)? {
                     files.push((ContentKind::DataPack, path));
                 }
             }
@@ -639,64 +665,40 @@ fn content_files(minecraft_dir: &Path) -> std::io::Result<Vec<(ContentKind, Path
     Ok(files)
 }
 
-fn supported_content_path(kind: ContentKind, path: &Path) -> bool {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
+fn read_content_directory(
+    path: &Path,
+) -> std::io::Result<impl Iterator<Item = std::io::Result<std::fs::DirEntry>> + use<>> {
+    match std::fs::read_dir(path) {
+        Ok(entries) => Ok(Some(entries).into_iter().flatten()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(None.into_iter().flatten())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn supported_content_path(kind: ContentKind, path: &Path) -> std::io::Result<bool> {
+    let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
-        return false;
+        return Ok(false);
     }
     if metadata.is_dir() {
-        return matches!(
+        return Ok(matches!(
             kind,
             ContentKind::ResourcePack | ContentKind::Shader | ContentKind::DataPack
-        );
+        ));
     }
     if !metadata.is_file() {
-        return false;
+        return Ok(false);
     }
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
+        return Ok(false);
     };
-    match kind {
+    Ok(match kind {
         ContentKind::Mod => name.ends_with(".jar") || name.ends_with(".jar.disabled"),
         ContentKind::ResourcePack | ContentKind::Shader | ContentKind::DataPack => {
             name.ends_with(".zip") || name.ends_with(".zip.disabled")
         }
-    }
-}
-
-fn directory_fingerprint_metadata(path: &Path) -> Result<FileFingerprint, std::io::Error> {
-    fn accumulate(path: &Path, size: &mut u64, modified_ns: &mut u128) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let metadata = std::fs::symlink_metadata(entry.path())?;
-            if metadata.file_type().is_symlink() {
-                continue;
-            }
-            let modified = metadata
-                .modified()
-                .unwrap_or(SystemTime::UNIX_EPOCH)
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            *modified_ns = (*modified_ns).max(modified);
-            if metadata.is_dir() {
-                accumulate(&entry.path(), size, modified_ns)?;
-            } else if metadata.is_file() {
-                *size = size.saturating_add(metadata.len());
-            }
-        }
-        Ok(())
-    }
-
-    let mut size = 0;
-    let mut modified_ns = 0;
-    accumulate(path, &mut size, &mut modified_ns)?;
-    Ok(FileFingerprint {
-        size,
-        modified_ns,
-        hashes: Default::default(),
     })
 }
 

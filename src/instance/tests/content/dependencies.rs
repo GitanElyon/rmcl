@@ -16,8 +16,10 @@ use crate::net::modrinth::{
 
 #[test]
 fn concurrent_installs_use_distinct_staging_directories() {
-    let minecraft = Path::new("/instance/minecraft");
-    assert_ne!(staging_directory(minecraft), staging_directory(minecraft));
+    let temp = tempfile::tempdir().unwrap();
+    let first = StagingDirectory::new(temp.path()).unwrap();
+    let second = StagingDirectory::new(temp.path()).unwrap();
+    assert_ne!(first.path(), second.path());
 }
 
 #[test]
@@ -35,6 +37,7 @@ fn merge_keeps_replacement_when_a_dependency_is_also_an_update_root() {
         title: "Library".to_owned(),
         version: selected.clone(),
         installed_path: Some(PathBuf::from("/minecraft/mods/library.jar")),
+        expected_record: None,
         kind: ContentKind::Mod,
         destination: PathBuf::from("/minecraft/mods"),
         provider_aliases: Vec::new(),
@@ -87,6 +90,7 @@ async fn invalid_manifest_does_not_replace_installed_content() {
             title: "Root".to_owned(),
             version: selected.clone(),
             installed_path: Some(old.clone()),
+            expected_record: None,
             kind: ContentKind::Mod,
             destination: mods.clone(),
             provider_aliases: Vec::new(),
@@ -122,6 +126,9 @@ struct FakeProvider {
     resolved: HashMap<String, ProviderProject>,
     fail_project: Option<String>,
     fail_download: Option<String>,
+    download_barrier: Option<std::sync::Arc<tokio::sync::Barrier>>,
+    download_pause: Option<std::sync::Arc<tokio::sync::Notify>>,
+    download_filename: Option<String>,
 }
 
 impl FakeProvider {
@@ -253,8 +260,18 @@ impl ContentProvider for FakeProvider {
         } else {
             "jar"
         };
-        let path = destination.join(format!("{}.{extension}", version.id));
+        let path = destination.join(
+            self.download_filename
+                .clone()
+                .unwrap_or_else(|| format!("{}.{extension}", version.id)),
+        );
         tokio::fs::write(&path, version.id.as_bytes()).await?;
+        if let Some(barrier) = &self.download_barrier {
+            barrier.wait().await;
+        }
+        if let Some(pause) = &self.download_pause {
+            pause.notified().await;
+        }
         Ok(crate::net::modrinth::DownloadOutcome::Downloaded(path))
     }
 }
@@ -384,6 +401,9 @@ fn provider(versions: Vec<VersionInfo>) -> FakeProvider {
         resolved: HashMap::new(),
         fail_project: None,
         fail_download: None,
+        download_barrier: None,
+        download_pause: None,
+        download_filename: None,
     }
 }
 
@@ -1137,5 +1157,788 @@ async fn failed_dependency_download_leaves_no_partial_install() {
             .is_err()
     );
     assert!(!manifest_path.exists());
-    assert_eq!(std::fs::read_dir(&mods).unwrap().count(), 0);
+    match std::fs::read_dir(&mods) {
+        Ok(entries) => assert_eq!(entries.count(), 0),
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+    }
+}
+
+fn required(project: &str, pin: Option<&str>) -> VersionDependency {
+    VersionDependency {
+        version_id: pin.map(str::to_owned),
+        ..dependency(project, DependencyType::Required)
+    }
+}
+
+fn release(id: &str, project: &str, dependencies: Vec<VersionDependency>) -> VersionInfo {
+    version(
+        id,
+        project,
+        VersionType::Release,
+        if id.ends_with('2') {
+            "2026-02-01"
+        } else {
+            "2026-01-01"
+        },
+        dependencies,
+    )
+}
+
+async fn resolve_graph(versions: Vec<VersionInfo>) -> Result<DependencyPlan, NetError> {
+    let selected = versions[0].clone();
+    resolve(
+        &provider(versions).registry(),
+        &ContentManifest::default(),
+        Path::new("/minecraft"),
+        &instance(),
+        root(selected),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn matching_exact_requirement_remains_binding() {
+    let error = resolve_graph(vec![
+        release(
+            "r1",
+            "root",
+            vec![
+                required("c", None),
+                required("d", None),
+                required("e", None),
+            ],
+        ),
+        release("d1", "d", vec![required("c", Some("c2"))]),
+        release("e1", "e", vec![required("c", Some("c1"))]),
+        release("c1", "c", Vec::new()),
+        release("c2", "c", Vec::new()),
+    ])
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("Conflicting required versions"));
+}
+
+#[tokio::test]
+async fn replacing_a_parent_retracts_its_exact_requirements() {
+    let plan = resolve_graph(vec![
+        release("r1", "root", vec![required("d", None), required("e", None)]),
+        release("d1", "d", vec![required("b", None)]),
+        release("e1", "e", vec![required("f", None)]),
+        release("f1", "f", vec![required("b", Some("b1"))]),
+        release("b2", "b", vec![required("c", Some("c1"))]),
+        release("b1", "b", vec![required("c", Some("c2"))]),
+        release("c1", "c", Vec::new()),
+        release("c2", "c", Vec::new()),
+    ])
+    .await
+    .unwrap();
+    assert_eq!(
+        plan.items
+            .iter()
+            .find(|item| item.project_id == "b")
+            .unwrap()
+            .version
+            .id,
+        "b1"
+    );
+    let c = plan
+        .items
+        .iter()
+        .find(|item| item.project_id == "c")
+        .unwrap();
+    assert_eq!(c.version.id, "c2");
+    assert!(
+        plan.items
+            .iter()
+            .find(|item| item.project_id == "b")
+            .unwrap()
+            .required_dependencies
+            .contains(&c.identity())
+    );
+}
+
+#[tokio::test]
+async fn settling_retries_a_pin_after_its_competitor_disappears() {
+    let plan = resolve_graph(vec![
+        release("r1", "root", vec![required("d", None), required("e", None)]),
+        release("d1", "d", vec![required("b", None)]),
+        release("e1", "e", vec![required("f", None)]),
+        release(
+            "f1",
+            "f",
+            vec![required("c", Some("c2")), required("g", None)],
+        ),
+        release("g1", "g", vec![required("b", Some("b1"))]),
+        release("b2", "b", vec![required("c", Some("c1"))]),
+        release("b1", "b", Vec::new()),
+        release("c1", "c", Vec::new()),
+        release("c2", "c", Vec::new()),
+    ])
+    .await
+    .unwrap();
+    assert_eq!(
+        plan.items
+            .iter()
+            .find(|item| item.project_id == "c")
+            .unwrap()
+            .version
+            .id,
+        "c2"
+    );
+}
+
+#[tokio::test]
+async fn unreachable_parents_do_not_keep_exact_requirements() {
+    let plan = resolve_graph(vec![
+        release("r1", "root", vec![required("d", None), required("e", None)]),
+        release("d1", "d", vec![required("b", None)]),
+        release("e1", "e", vec![required("f", None)]),
+        release("f1", "f", vec![required("g", None)]),
+        release(
+            "g1",
+            "g",
+            vec![required("c", Some("c2")), required("h", None)],
+        ),
+        release("h1", "h", vec![required("b", Some("b1"))]),
+        release("b2", "b", vec![required("orphan", None)]),
+        release("orphan1", "orphan", vec![required("c", Some("c1"))]),
+        release("b1", "b", Vec::new()),
+        release("c1", "c", Vec::new()),
+        release("c2", "c", Vec::new()),
+    ])
+    .await
+    .unwrap();
+    assert!(!plan.items.iter().any(|item| item.project_id == "orphan"));
+    assert_eq!(
+        plan.items
+            .iter()
+            .find(|item| item.project_id == "c")
+            .unwrap()
+            .version
+            .id,
+        "c2"
+    );
+}
+
+#[tokio::test]
+async fn superseded_parent_errors_and_cycles_do_not_reject_the_final_graph() {
+    for old_dependencies in [vec![required("missing", None)], vec![required("c", None)]] {
+        let plan = resolve_graph(vec![
+            release("r1", "root", vec![required("d", None), required("e", None)]),
+            release("d1", "d", vec![required("b", None)]),
+            release("e1", "e", vec![required("f", None)]),
+            release("f1", "f", vec![required("b", Some("b1"))]),
+            release("b2", "b", old_dependencies),
+            release("b1", "b", Vec::new()),
+            release("c1", "c", vec![required("b", None)]),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(
+            plan.items
+                .iter()
+                .find(|item| item.project_id == "b")
+                .unwrap()
+                .version
+                .id,
+            "b1"
+        );
+        assert!(!plan.items.iter().any(|item| item.project_id == "c"));
+    }
+}
+
+#[tokio::test]
+async fn cycles_through_reused_nodes_are_rejected_but_diamonds_are_valid() {
+    for cycle in [false, true] {
+        let result = resolve_graph(vec![
+            release("r1", "root", vec![required("b", None), required("c", None)]),
+            release("b1", "b", vec![required("d", None)]),
+            release("c1", "c", vec![required("d", None)]),
+            release(
+                "d1",
+                "d",
+                if cycle {
+                    vec![required("c", None)]
+                } else {
+                    Vec::new()
+                },
+            ),
+        ])
+        .await;
+        if cycle {
+            assert!(result.unwrap_err().to_string().contains("cycle"));
+        } else {
+            assert_eq!(
+                result
+                    .unwrap()
+                    .items
+                    .iter()
+                    .filter(|item| item.project_id == "d")
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn changing_version_cycles_terminate_with_a_diagnostic() {
+    let error = resolve_graph(vec![
+        release("r1", "root", vec![required("a", None)]),
+        release("a2", "a", vec![required("b", Some("b2"))]),
+        release("b2", "b", vec![required("a", Some("a1"))]),
+        release("a1", "a", vec![required("b", Some("b1"))]),
+        release("b1", "b", vec![required("a", Some("a2"))]),
+    ])
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("did not converge"));
+}
+
+#[tokio::test]
+async fn replaced_incompatible_versions_are_absent_from_the_final_inventory() {
+    let temp = tempfile::tempdir().unwrap();
+    let minecraft = temp.path().join("minecraft");
+    let manifest_path = temp.path().join("manifest.json");
+    let mut record = installed_record("b", "b1", true);
+    let old = minecraft.join(&record.relative_path);
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, b"b1").unwrap();
+    record.fingerprint = super::super::manifest::fingerprint(&old).unwrap();
+    let manifest = ContentManifest {
+        version: 1,
+        files: vec![record],
+    };
+    manifest.save(&manifest_path).unwrap();
+    let mut a = release("a2", "a", vec![required("b", Some("b2"))]);
+    a.dependencies.push(VersionDependency {
+        version_id: Some("b1".to_owned()),
+        ..dependency("b", DependencyType::Incompatible)
+    });
+    let registry = provider(vec![
+        a.clone(),
+        release("b1", "b", Vec::new()),
+        release("b2", "b", Vec::new()),
+    ])
+    .registry();
+    let plan = resolve(&registry, &manifest, &minecraft, &instance(), root(a))
+        .await
+        .unwrap();
+    assert!(
+        plan.items
+            .iter()
+            .find(|item| item.project_id == "b")
+            .unwrap()
+            .replacement
+    );
+    install(&registry, &manifest_path, &minecraft, &plan)
+        .await
+        .unwrap();
+    assert!(!old.exists());
+    assert_eq!(std::fs::read(minecraft.join("mods/b2.jar")).unwrap(), b"b2");
+    let final_manifest = ContentManifest::load(&manifest_path).unwrap();
+    assert!(
+        final_manifest
+            .files
+            .iter()
+            .all(|record| record.resolved_project().unwrap().version_id != "b1")
+    );
+}
+
+#[tokio::test]
+async fn an_unreplaced_duplicate_incompatible_file_still_blocks_the_plan() {
+    let mut a = release("a2", "a", vec![required("b", Some("b2"))]);
+    a.dependencies.push(VersionDependency {
+        version_id: Some("b1".to_owned()),
+        ..dependency("b", DependencyType::Incompatible)
+    });
+    let registry = provider(vec![
+        a.clone(),
+        release("b1", "b", Vec::new()),
+        release("b2", "b", Vec::new()),
+    ])
+    .registry();
+    let first = installed_record("b", "b1", true);
+    let mut duplicate = first.clone();
+    duplicate.relative_path = "mods/z-b.jar".into();
+    let manifest = ContentManifest {
+        version: 1,
+        files: vec![first, duplicate],
+    };
+    let error = resolve(
+        &registry,
+        &manifest,
+        Path::new("/minecraft"),
+        &instance(),
+        root(a),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("incompatible"));
+}
+
+fn update_request(
+    minecraft: &Path,
+    current: &VersionInfo,
+    target: &VersionInfo,
+) -> super::super::updates::UpdateRequest {
+    super::super::updates::UpdateRequest {
+        title: target.project_id.clone(),
+        installed_path: minecraft.join(format!("mods/{}.jar", current.project_id)),
+        target_world: None,
+        update: super::super::updates::AvailableUpdate {
+            installed: ProviderProject {
+                provider: "modrinth".to_owned(),
+                project_id: current.project_id.clone(),
+                version_id: current.id.clone(),
+            },
+            current: Some(current.clone()),
+            target: target.clone(),
+            kind: ContentKind::Mod,
+        },
+    }
+}
+
+#[tokio::test]
+async fn rejected_bulk_roots_are_removed_from_survivor_projections() {
+    let minecraft = Path::new("/minecraft");
+    let a1 = release("a1", "a", Vec::new());
+    let mut a2 = release("a2", "a", Vec::new());
+    a2.dependencies.push(VersionDependency {
+        version_id: Some("b1".to_owned()),
+        ..dependency("b", DependencyType::Incompatible)
+    });
+    let b1 = release("b1", "b", Vec::new());
+    let b2 = release("b2", "b", vec![required("missing", None)]);
+    let c1 = release("c1", "c", Vec::new());
+    let c2 = release("c2", "c", Vec::new());
+    let requests = vec![
+        update_request(minecraft, &a1, &a2),
+        update_request(minecraft, &b1, &b2),
+        update_request(minecraft, &c1, &c2),
+    ];
+    let registry = provider(vec![a1, a2, b1, b2, c1, c2]).registry();
+    let manifest = ContentManifest {
+        version: 1,
+        files: vec![
+            installed_record("a", "a1", true),
+            installed_record("b", "b1", true),
+            installed_record("c", "c1", true),
+        ],
+    };
+    let plan = super::super::updates::plan_bulk_with_registry(
+        &registry,
+        &instance(),
+        &manifest,
+        minecraft,
+        requests,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(plan.roots.len(), 1);
+    assert_eq!(plan.roots[0].target.id, "c2");
+    assert_eq!(plan.dependency_plan.items.len(), 1);
+    assert_eq!(plan.conflicts.len(), 2);
+    assert!(
+        plan.conflicts
+            .iter()
+            .any(|conflict| conflict.title == "a" && conflict.reason.contains("incompatible"))
+    );
+    assert!(
+        plan.conflicts
+            .iter()
+            .any(|conflict| conflict.title == "b" && conflict.reason.contains("missing"))
+    );
+}
+
+#[tokio::test]
+async fn accepted_bulk_dependencies_keep_actual_old_ownership_and_replace_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let minecraft = temp.path().join("minecraft");
+    let manifest_path = temp.path().join("manifest.json");
+    std::fs::create_dir_all(minecraft.join("mods")).unwrap();
+    let a1 = release("a1", "a", Vec::new());
+    let a2 = release("a2", "a", vec![required("b", None)]);
+    let b1 = release("b1", "b", Vec::new());
+    let b2 = release("b2", "b", Vec::new());
+    let requests = vec![
+        update_request(&minecraft, &a1, &a2),
+        update_request(&minecraft, &b1, &b2),
+    ];
+    let registry = provider(vec![a1, a2, b1, b2]).registry();
+    let mut manifest = ContentManifest::default();
+    for (project, version) in [("a", "a1"), ("b", "b1")] {
+        let mut record = installed_record(project, version, true);
+        let path = minecraft.join(&record.relative_path);
+        std::fs::write(&path, version.as_bytes()).unwrap();
+        record.fingerprint = super::super::manifest::fingerprint(&path).unwrap();
+        record.provider_aliases.push(ProviderProject {
+            provider: "curseforge".to_owned(),
+            project_id: project.to_owned(),
+            version_id: format!("cf-{version}"),
+        });
+        manifest.upsert(record);
+    }
+    manifest.save(&manifest_path).unwrap();
+    let plan = super::super::updates::plan_bulk_with_registry(
+        &registry,
+        &instance(),
+        &manifest,
+        &minecraft,
+        requests,
+        Vec::new(),
+    )
+    .await;
+    assert!(plan.conflicts.is_empty());
+    assert_eq!(plan.dependency_plan.root_count, 2);
+    let b = plan
+        .dependency_plan
+        .items
+        .iter()
+        .find(|item| item.project_id == "b")
+        .unwrap();
+    assert!(b.replacement);
+    assert_eq!(
+        b.expected_record
+            .as_ref()
+            .unwrap()
+            .resolved_project()
+            .unwrap()
+            .version_id,
+        "b1"
+    );
+    assert!(b.provider_aliases.is_empty());
+    install(&registry, &manifest_path, &minecraft, &plan.dependency_plan)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(minecraft.join("mods/a2.jar")).unwrap(), b"a2");
+    assert_eq!(std::fs::read(minecraft.join("mods/b2.jar")).unwrap(), b"b2");
+    assert!(!minecraft.join("mods/a.jar").exists());
+    assert!(!minecraft.join("mods/b.jar").exists());
+    assert!(
+        ContentManifest::load(&manifest_path)
+            .unwrap()
+            .files
+            .iter()
+            .all(|record| record.provider_aliases.is_empty())
+    );
+}
+
+#[tokio::test]
+async fn merged_plans_recheck_incompatibilities_between_selected_roots() {
+    let mut a = release("a2", "a", Vec::new());
+    a.dependencies.push(VersionDependency {
+        version_id: Some("b2".to_owned()),
+        ..dependency("b", DependencyType::Incompatible)
+    });
+    let b = release("b2", "b", Vec::new());
+    let registry = provider(vec![a.clone(), b.clone()]).registry();
+    let mut plans = Vec::new();
+    for selected in [a, b] {
+        plans.push(
+            resolve(
+                &registry,
+                &ContentManifest::default(),
+                Path::new("/minecraft"),
+                &instance(),
+                root(selected),
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    assert!(
+        merge(plans)
+            .unwrap_err()
+            .to_string()
+            .contains("incompatible")
+    );
+}
+
+#[tokio::test]
+async fn concurrent_installs_revalidate_target_names_and_project_ownership() {
+    for same_project in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let minecraft = temp.path().join("minecraft");
+        let manifest_path = temp.path().join("manifest.json");
+        let first = release("a1", "a", Vec::new());
+        let second = release("b2", if same_project { "a" } else { "b" }, Vec::new());
+        let mut fake = provider(vec![first.clone(), second.clone()]);
+        fake.download_barrier = Some(std::sync::Arc::new(tokio::sync::Barrier::new(2)));
+        if !same_project {
+            fake.download_filename = Some("shared.jar".to_owned());
+        }
+        let registry = fake.registry();
+        let first = resolve(
+            &registry,
+            &ContentManifest::default(),
+            &minecraft,
+            &instance(),
+            root(first),
+        )
+        .await
+        .unwrap();
+        let second = resolve(
+            &registry,
+            &ContentManifest::default(),
+            &minecraft,
+            &instance(),
+            root(second),
+        )
+        .await
+        .unwrap();
+        let (left, right) = tokio::join!(
+            install(&registry, &manifest_path, &minecraft, &first),
+            install(&registry, &manifest_path, &minecraft, &second)
+        );
+        assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+        let manifest = ContentManifest::load(&manifest_path).unwrap();
+        assert_eq!(manifest.files.len(), 1);
+        let installed = &manifest.files[0];
+        assert_eq!(
+            std::fs::read(minecraft.join(&installed.relative_path)).unwrap(),
+            installed.resolved_project().unwrap().version_id.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read_dir(minecraft.join("mods")).unwrap().count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn install_rejects_changed_old_bytes_and_new_incompatible_inventory() {
+    let temp = tempfile::tempdir().unwrap();
+    let minecraft = temp.path().join("minecraft");
+    let manifest_path = temp.path().join("manifest.json");
+    std::fs::create_dir_all(minecraft.join("mods")).unwrap();
+    let a1 = release("a1", "a", Vec::new());
+    let a2 = release("a2", "a", Vec::new());
+    let registry = provider(vec![a1, a2.clone()]).registry();
+    let mut record = installed_record("a", "a1", true);
+    let old = minecraft.join(&record.relative_path);
+    std::fs::write(&old, b"original").unwrap();
+    record.fingerprint = super::super::manifest::fingerprint(&old).unwrap();
+    let manifest = ContentManifest {
+        version: 1,
+        files: vec![record.clone()],
+    };
+    manifest.save(&manifest_path).unwrap();
+    let mut selected = root(a2);
+    selected.installed_path = Some(old.clone());
+    let plan = resolve(&registry, &manifest, &minecraft, &instance(), selected)
+        .await
+        .unwrap();
+    let modified = std::fs::metadata(&old).unwrap().modified().unwrap();
+    std::fs::write(&old, b"external").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert!(
+        install(&registry, &manifest_path, &minecraft, &plan)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("changed")
+    );
+    assert_eq!(std::fs::read(&old).unwrap(), b"external");
+    assert!(!minecraft.join("mods/a2.jar").exists());
+
+    let mut b = release("b2", "b", Vec::new());
+    b.dependencies
+        .push(dependency("a", DependencyType::Incompatible));
+    let registry = provider(vec![b.clone()]).registry();
+    let plan = resolve(
+        &registry,
+        &ContentManifest::default(),
+        &minecraft,
+        &instance(),
+        root(b),
+    )
+    .await
+    .unwrap();
+    assert!(
+        install(&registry, &manifest_path, &minecraft, &plan)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("incompatible")
+    );
+    assert_eq!(std::fs::read(old).unwrap(), b"external");
+}
+
+#[tokio::test]
+async fn cancelling_a_download_removes_staging_without_changing_live_content() {
+    let temp = tempfile::tempdir().unwrap();
+    let minecraft = temp.path().join("minecraft");
+    let manifest_path = temp.path().join("manifest.json");
+    std::fs::create_dir_all(minecraft.join("mods")).unwrap();
+    let old = minecraft.join("mods/a.jar");
+    std::fs::write(&old, b"old").unwrap();
+    let mut record = installed_record("a", "a1", true);
+    record.fingerprint = super::super::manifest::fingerprint(&old).unwrap();
+    let manifest = ContentManifest {
+        version: 1,
+        files: vec![record],
+    };
+    manifest.save(&manifest_path).unwrap();
+    let a2 = release("a2", "a", Vec::new());
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let mut fake = provider(vec![a2.clone()]);
+    fake.download_barrier = Some(barrier.clone());
+    fake.download_pause = Some(std::sync::Arc::new(tokio::sync::Notify::new()));
+    let registry = std::sync::Arc::new(fake.registry());
+    let mut selected = root(a2);
+    selected.installed_path = Some(old.clone());
+    let plan = resolve(&registry, &manifest, &minecraft, &instance(), selected)
+        .await
+        .unwrap();
+    let job_minecraft = minecraft.clone();
+    let job_manifest = manifest_path.clone();
+    let job =
+        tokio::spawn(async move { install(&registry, &job_manifest, &job_minecraft, &plan).await });
+    barrier.wait().await;
+    job.abort();
+    assert!(matches!(job.await, Err(error) if error.is_cancelled()));
+    assert_eq!(std::fs::read(old).unwrap(), b"old");
+    assert_eq!(
+        ContentManifest::load(&manifest_path).unwrap().files,
+        manifest.files
+    );
+    assert!(!minecraft.join("mods/a2.jar").exists());
+    assert!(!std::fs::read_dir(&minecraft).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".rmcl-install-")
+    }));
+}
+
+#[tokio::test]
+async fn replacing_a_disabled_root_keeps_its_disabled_filename_and_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let minecraft = temp.path().join("minecraft");
+    let manifest_path = temp.path().join("manifest.json");
+    let mut record = installed_record("a", "a1", false);
+    record.relative_path = "mods/a.jar.disabled".into();
+    let old = minecraft.join(&record.relative_path);
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, b"old").unwrap();
+    record.fingerprint = super::super::manifest::fingerprint(&old).unwrap();
+    let manifest = ContentManifest {
+        version: 1,
+        files: vec![record],
+    };
+    manifest.save(&manifest_path).unwrap();
+    let a2 = release("a2", "a", Vec::new());
+    let registry = provider(vec![a2.clone()]).registry();
+    let mut selected = root(a2);
+    selected.installed_path = Some(old.clone());
+    let plan = resolve(&registry, &manifest, &minecraft, &instance(), selected)
+        .await
+        .unwrap();
+    let installed = install(&registry, &manifest_path, &minecraft, &plan)
+        .await
+        .unwrap();
+    assert_eq!(installed.root_path, minecraft.join("mods/a2.jar.disabled"));
+    assert_eq!(std::fs::read(&installed.root_path).unwrap(), b"a2");
+    assert!(!old.exists());
+    assert!(!ContentManifest::load(&manifest_path).unwrap().files[0].enabled);
+}
+
+#[tokio::test]
+async fn installation_rejects_a_target_owned_by_another_record_even_when_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let minecraft = temp.path().join("minecraft");
+    let manifest_path = temp.path().join("manifest.json");
+    let a2 = release("a2", "a", Vec::new());
+    let registry = provider(vec![a2.clone()]).registry();
+    let plan = resolve(
+        &registry,
+        &ContentManifest::default(),
+        &minecraft,
+        &instance(),
+        root(a2),
+    )
+    .await
+    .unwrap();
+    let mut record = installed_record("foreign", "foreign1", true);
+    record.relative_path = "mods/a2.jar".into();
+    let manifest = ContentManifest {
+        version: 1,
+        files: vec![record],
+    };
+    manifest.save(&manifest_path).unwrap();
+    let error = install(&registry, &manifest_path, &minecraft, &plan)
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("already owns"));
+    assert_eq!(
+        ContentManifest::load(&manifest_path).unwrap().files,
+        manifest.files
+    );
+    assert!(!minecraft.join("mods/a2.jar").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn installation_rejects_linked_destinations_and_dangling_targets() {
+    let temp = tempfile::tempdir().unwrap();
+    let minecraft = temp.path().join("minecraft");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&minecraft).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+    let a2 = release("a2", "a", Vec::new());
+    let registry = provider(vec![a2.clone()]).registry();
+    let plan = resolve(
+        &registry,
+        &ContentManifest::default(),
+        &minecraft,
+        &instance(),
+        root(a2),
+    )
+    .await
+    .unwrap();
+    std::os::unix::fs::symlink(&outside, minecraft.join("mods")).unwrap();
+    assert!(
+        install(&registry, &manifest_path, &minecraft, &plan)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("symlink")
+    );
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    std::fs::remove_file(minecraft.join("mods")).unwrap();
+    std::fs::create_dir(minecraft.join("mods")).unwrap();
+    let target = minecraft.join("mods/a2.jar");
+    std::os::unix::fs::symlink(outside.join("missing"), &target).unwrap();
+    assert!(
+        install(&registry, &manifest_path, &minecraft, &plan)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("already exists")
+    );
+    assert!(
+        std::fs::symlink_metadata(target)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        ContentManifest::load(&manifest_path)
+            .unwrap()
+            .files
+            .is_empty()
+    );
 }

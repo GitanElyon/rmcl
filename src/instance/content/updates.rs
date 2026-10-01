@@ -182,7 +182,6 @@ pub async fn scan(instance: &InstanceConfig, manifest: &ContentManifest) -> Upda
         .collect();
 
     let slots = Arc::new(tokio::sync::Semaphore::new(8));
-    // one registry (and therefore one pooled http client) for the whole scan
     let registry = Arc::new(
         crate::instance::content::provider::ProviderRegistry::configured(
             crate::net::HttpClient::new(),
@@ -293,83 +292,125 @@ pub async fn plan_bulk(
     manifest: &ContentManifest,
     minecraft_dir: &std::path::Path,
     requests: Vec<UpdateRequest>,
-    mut conflicts: Vec<UpdateConflict>,
+    conflicts: Vec<UpdateConflict>,
 ) -> BulkUpdatePlan {
     let registry = crate::instance::content::provider::ProviderRegistry::configured(
         crate::net::HttpClient::new(),
     );
-    let projected_manifest = project_updates(manifest, minecraft_dir, &requests);
-    let mut accepted = Vec::new();
-    let mut roots = Vec::new();
-    for request in requests {
-        let root = InstallRoot {
-            provider: request.update.installed.provider.clone(),
-            project_id: request.update.installed.project_id.clone(),
-            title: request.title.clone(),
-            version: request.update.target.clone(),
-            installed_path: Some(request.installed_path.clone()),
-            kind: request.update.kind,
-            target_world: request.target_world.clone(),
-            force_reinstall: false,
-        };
-        let mut resolution_manifest = projected_manifest.clone();
-        if let Ok(relative_path) = request.installed_path.strip_prefix(minecraft_dir)
-            && let Some(current) = manifest.record(relative_path)
-            && let Some(projected) = resolution_manifest
-                .files
-                .iter_mut()
-                .find(|record| record.relative_path == relative_path)
-        {
-            projected.resolution = current.resolution.clone();
-        }
-        let plan = match super::dependencies::resolve(
-            &registry,
-            &resolution_manifest,
-            minecraft_dir,
-            instance,
-            root,
-        )
-        .await
-        {
-            Ok(plan) => plan,
-            Err(error) => {
-                conflicts.push(UpdateConflict {
-                    title: request.title,
-                    installed_path: request.installed_path,
-                    reason: error.to_string(),
-                });
-                continue;
-            }
-        };
-        let mut proposed = accepted.clone();
-        proposed.push(plan.clone());
-        if let Err(error) = super::dependencies::merge(proposed) {
-            conflicts.push(UpdateConflict {
-                title: request.title,
-                installed_path: request.installed_path,
-                reason: error.to_string(),
-            });
-            continue;
-        }
-        roots.push(PlannedRootUpdate {
-            title: request.title,
-            installed_path: request.installed_path,
-            current_version: request.update.current.as_ref().map_or_else(
-                || request.update.installed.version_id.clone(),
-                |version| version.version_number.clone(),
-            ),
-            target: request.update.target,
-        });
-        accepted.push(plan);
-    }
-    BulkUpdatePlan {
-        dependency_plan: super::dependencies::merge(accepted).unwrap_or(DependencyPlan {
+    plan_bulk_with_registry(
+        &registry,
+        instance,
+        manifest,
+        minecraft_dir,
+        requests,
+        conflicts,
+    )
+    .await
+}
+
+pub(super) async fn plan_bulk_with_registry(
+    registry: &super::provider::ProviderRegistry,
+    instance: &InstanceConfig,
+    manifest: &ContentManifest,
+    minecraft_dir: &std::path::Path,
+    mut requests: Vec<UpdateRequest>,
+    mut conflicts: Vec<UpdateConflict>,
+) -> BulkUpdatePlan {
+    loop {
+        let request_count = requests.len();
+        let projected_manifest = project_updates(manifest, minecraft_dir, &requests);
+        let mut accepted = Vec::new();
+        let mut survivors = Vec::new();
+        let mut dependency_plan = DependencyPlan {
             items: Vec::new(),
             root_count: 0,
             optional_dependencies: 0,
-        }),
-        roots,
-        conflicts,
+        };
+        for request in requests {
+            let root = InstallRoot {
+                provider: request.update.installed.provider.clone(),
+                project_id: request.update.installed.project_id.clone(),
+                title: request.title.clone(),
+                version: request.update.target.clone(),
+                installed_path: Some(request.installed_path.clone()),
+                kind: request.update.kind,
+                target_world: request.target_world.clone(),
+                force_reinstall: false,
+            };
+            let mut resolution_manifest = projected_manifest.clone();
+            if let Ok(relative_path) = request.installed_path.strip_prefix(minecraft_dir)
+                && let Some(current) = manifest.record(relative_path)
+                && let Some(projected) = resolution_manifest
+                    .files
+                    .iter_mut()
+                    .find(|record| record.relative_path == relative_path)
+            {
+                *projected = current.clone();
+            }
+            let mut plan = match super::dependencies::resolve(
+                registry,
+                &resolution_manifest,
+                minecraft_dir,
+                instance,
+                root,
+            )
+            .await
+            {
+                Ok(plan) => plan,
+                Err(error) => {
+                    conflicts.push(UpdateConflict {
+                        title: request.title,
+                        installed_path: request.installed_path,
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            for item in &mut plan.items {
+                item.expected_record = item
+                    .installed_path
+                    .as_ref()
+                    .and_then(|path| path.strip_prefix(minecraft_dir).ok())
+                    .and_then(|relative| manifest.record(relative))
+                    .cloned();
+            }
+            let mut proposed = accepted.clone();
+            proposed.push(plan.clone());
+            match super::dependencies::merge(proposed) {
+                Ok(merged) => dependency_plan = merged,
+                Err(error) => {
+                    conflicts.push(UpdateConflict {
+                        title: request.title,
+                        installed_path: request.installed_path,
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+            }
+            accepted.push(plan);
+            survivors.push(request);
+        }
+        if survivors.len() != request_count {
+            requests = survivors;
+            continue;
+        }
+        let roots = survivors
+            .into_iter()
+            .map(|request| PlannedRootUpdate {
+                current_version: request.update.current.as_ref().map_or_else(
+                    || request.update.installed.version_id.clone(),
+                    |version| version.version_number.clone(),
+                ),
+                title: request.title,
+                installed_path: request.installed_path,
+                target: request.update.target,
+            })
+            .collect();
+        return BulkUpdatePlan {
+            dependency_plan,
+            roots,
+            conflicts,
+        };
     }
 }
 
@@ -397,6 +438,7 @@ fn project_updates(
                 version_id: request.update.target.id.clone(),
             },
         };
+        record.provider_aliases.clear();
     }
     projected
 }

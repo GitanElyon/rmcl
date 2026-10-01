@@ -128,12 +128,10 @@ async fn launch_instance(matches: &ArgMatches) -> CliResult {
     loop {
         match crate::instance::runtime::get(name) {
             Some(RunState::Crashed(Some(code))) => {
-                println!("Game exited with status {}", code);
-                break;
+                return Err(io::Error::other(format!("Game exited with status {code}")).into());
             }
             Some(RunState::Crashed(None)) => {
-                println!("Game was terminated");
-                break;
+                return Err(io::Error::other("Game was terminated without an exit code").into());
             }
             Some(_) => tokio::time::sleep(Duration::from_millis(500)).await,
             None => {
@@ -297,10 +295,10 @@ fn apply_config_update(
 ) -> CliResult {
     match key {
         "memory-max" => {
-            config.memory_max = crate::instance::normalize_memory_value(value);
+            config.memory_max = parse_memory_update(value)?;
         }
         "memory-min" => {
-            config.memory_min = crate::instance::normalize_memory_value(value);
+            config.memory_min = parse_memory_update(value)?;
         }
         "java-path" => {
             config.java_path = if value.is_empty() {
@@ -325,6 +323,16 @@ fn apply_config_update(
     }
 
     Ok(())
+}
+
+fn parse_memory_update(value: &str) -> Result<Option<String>, io::Error> {
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        crate::instance::normalize_memory_value(value)
+            .map(Some)
+            .ok_or_else(|| io::Error::other(format!("invalid memory size '{value}'")))
+    }
 }
 
 #[cfg(test)]

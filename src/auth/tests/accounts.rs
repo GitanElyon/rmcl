@@ -8,6 +8,7 @@ impl AccountStore {
         Self {
             accounts: Vec::new(),
             path,
+            load_error: None,
         }
     }
 }
@@ -58,6 +59,7 @@ fn make_store(dir: &std::path::Path) -> AccountStore {
     AccountStore {
         accounts: Vec::new(),
         path: dir.join("accounts.json"),
+        load_error: None,
     }
 }
 
@@ -77,7 +79,7 @@ fn microsoft_account(name: &str) -> Account {
 fn store_add_first_becomes_active() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = make_store(tmp.path());
-    store.add(create_offline_account("Alice"));
+    store.add(create_offline_account("Alice")).unwrap();
     assert_eq!(store.accounts.len(), 1);
     assert!(store.accounts[0].active);
 }
@@ -86,8 +88,8 @@ fn store_add_first_becomes_active() {
 fn store_add_second_stays_inactive() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = make_store(tmp.path());
-    store.add(create_offline_account("Alice"));
-    store.add(create_offline_account("Bob"));
+    store.add(create_offline_account("Alice")).unwrap();
+    store.add(create_offline_account("Bob")).unwrap();
     assert_eq!(store.accounts.len(), 2);
     assert!(store.accounts[0].active);
     assert!(!store.accounts[1].active);
@@ -97,11 +99,11 @@ fn store_add_second_stays_inactive() {
 fn store_add_duplicate_uuid_replaces() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = make_store(tmp.path());
-    store.add(create_offline_account("Alice"));
+    store.add(create_offline_account("Alice")).unwrap();
     let mut dup = create_offline_account("Alice");
     dup.username = "AliceRenamed".to_owned();
     dup.uuid = store.accounts[0].uuid.clone();
-    store.add(dup);
+    store.add(dup).unwrap();
     assert_eq!(store.accounts.len(), 1);
     assert_eq!(store.accounts[0].username, "AliceRenamed");
 }
@@ -117,10 +119,10 @@ fn store_active_account_none_when_empty() {
 fn store_has_microsoft_account_when_one_exists() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = make_store(tmp.path());
-    store.add(create_offline_account("Offline"));
+    store.add(create_offline_account("Offline")).unwrap();
     assert!(!store.has_microsoft_account());
 
-    store.add(microsoft_account("Owner"));
+    store.add(microsoft_account("Owner")).unwrap();
     assert!(store.has_microsoft_account());
 }
 
@@ -128,8 +130,8 @@ fn store_has_microsoft_account_when_one_exists() {
 fn store_active_account_returns_active() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = make_store(tmp.path());
-    store.add(create_offline_account("Alice"));
-    store.add(create_offline_account("Bob"));
+    store.add(create_offline_account("Alice")).unwrap();
+    store.add(create_offline_account("Bob")).unwrap();
     let active = store.active_account().unwrap();
     assert_eq!(active.username, "Alice");
 }
@@ -138,9 +140,9 @@ fn store_active_account_returns_active() {
 fn store_set_active_changes_active() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = make_store(tmp.path());
-    store.add(create_offline_account("Alice"));
-    store.add(create_offline_account("Bob"));
-    store.set_active(1);
+    store.add(create_offline_account("Alice")).unwrap();
+    store.add(create_offline_account("Bob")).unwrap();
+    store.set_active(1).unwrap();
     assert!(!store.accounts[0].active);
     assert!(store.accounts[1].active);
 }
@@ -149,9 +151,9 @@ fn store_set_active_changes_active() {
 fn store_set_active_out_of_bounds_keeps_selection() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = make_store(tmp.path());
-    store.add(create_offline_account("Alice"));
-    store.add(create_offline_account("Bob"));
-    store.set_active(99);
+    store.add(create_offline_account("Alice")).unwrap();
+    store.add(create_offline_account("Bob")).unwrap();
+    store.set_active(99).unwrap();
     assert!(
         store.accounts[0].active,
         "existing selection must survive a bad index"
@@ -163,11 +165,11 @@ fn store_set_active_out_of_bounds_keeps_selection() {
 fn store_add_replacing_active_keeps_active() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = make_store(tmp.path());
-    store.add(create_offline_account("Alice"));
-    store.add(create_offline_account("Bob"));
+    store.add(create_offline_account("Alice")).unwrap();
+    store.add(create_offline_account("Bob")).unwrap();
     let mut dup = create_offline_account("Alice");
     dup.username = "AliceRenamed".to_owned();
-    store.add(dup);
+    store.add(dup).unwrap();
     assert!(
         store.accounts.iter().any(|a| a.active),
         "re-adding the active account must not orphan the selection"
@@ -180,9 +182,9 @@ fn store_add_replacing_active_keeps_active() {
 fn store_remove_activates_first_remaining() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = make_store(tmp.path());
-    store.add(create_offline_account("Alice"));
-    store.add(create_offline_account("Bob"));
-    store.remove(0);
+    store.add(create_offline_account("Alice")).unwrap();
+    store.add(create_offline_account("Bob")).unwrap();
+    store.remove(0).unwrap();
     assert_eq!(store.accounts.len(), 1);
     assert_eq!(store.accounts[0].username, "Bob");
     assert!(store.accounts[0].active);
@@ -192,8 +194,8 @@ fn store_remove_activates_first_remaining() {
 fn store_remove_out_of_bounds_noop() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = make_store(tmp.path());
-    store.add(create_offline_account("Alice"));
-    store.remove(5);
+    store.add(create_offline_account("Alice")).unwrap();
+    store.remove(5).unwrap();
     assert_eq!(store.accounts.len(), 1);
 }
 
@@ -201,9 +203,9 @@ fn store_remove_out_of_bounds_noop() {
 fn store_save_and_reload() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = make_store(tmp.path());
-    store.add(create_offline_account("Alice"));
-    store.add(create_offline_account("Bob"));
-    store.save();
+    store.add(create_offline_account("Alice")).unwrap();
+    store.add(create_offline_account("Bob")).unwrap();
+    store.save().unwrap();
 
     let reloaded = AccountStore {
         accounts: serde_json::from_str(
@@ -211,8 +213,43 @@ fn store_save_and_reload() {
         )
         .unwrap(),
         path: tmp.path().join("accounts.json"),
+        load_error: None,
     };
     assert_eq!(reloaded.accounts.len(), 2);
     assert_eq!(reloaded.accounts[0].username, "Alice");
     assert!(reloaded.accounts[0].active);
+}
+
+#[cfg(unix)]
+#[test]
+fn account_file_remains_owner_only_after_replacement() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut store = make_store(tmp.path());
+    store.add(microsoft_account("Owner")).unwrap();
+    let path = tmp.path().join("accounts.json");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    store.add(create_offline_account("Player")).unwrap();
+    assert_eq!(
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn invalid_account_file_cannot_be_overwritten_by_a_new_account() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("accounts.json");
+    std::fs::write(&path, b"{broken credentials").unwrap();
+    let mut store = AccountStore::load_from(path.clone());
+
+    assert!(store.add(microsoft_account("Owner")).is_err());
+    assert!(store.accounts.is_empty());
+    assert_eq!(std::fs::read(path).unwrap(), b"{broken credentials");
 }

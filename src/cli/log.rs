@@ -71,19 +71,28 @@ pub(crate) fn resolve_log_path(
     instance: &str,
     file: Option<&str>,
 ) -> Result<PathBuf, io::Error> {
-    if let Some(name) = file {
-        let path = crate::instance::logs::files::log_dir(instances_dir, instance).join(name);
-        if !path.exists() {
-            return Err(io::Error::other(format!("log '{}' not found", name)));
+    let log_dir = crate::instance::logs::files::log_dir(instances_dir, instance);
+    let path = if let Some(name) = file {
+        let filename = Path::new(name);
+        if !crate::storage::safe_relative_path(filename) || filename.components().count() != 1 {
+            return Err(io::Error::other("log file must be a single filename"));
         }
-        return Ok(path);
+        log_dir.join(filename)
+    } else {
+        crate::instance::logs::files::scan_log_files(instances_dir, instance)
+            .into_iter()
+            .next()
+            .map(|entry| entry.path)
+            .ok_or_else(|| io::Error::other(format!("no log files found for '{}'", instance)))?
+    };
+    let log_dir = std::fs::canonicalize(log_dir)?;
+    let path = std::fs::canonicalize(path)?;
+    if path.parent() != Some(log_dir.as_path()) || !path.is_file() {
+        return Err(io::Error::other(
+            "log file is outside the instance log directory",
+        ));
     }
-
-    crate::instance::logs::files::scan_log_files(instances_dir, instance)
-        .into_iter()
-        .next()
-        .map(|entry| entry.path)
-        .ok_or_else(|| io::Error::other(format!("no log files found for '{}'", instance)))
+    Ok(path)
 }
 
 use super::utils::{require_instance, required_arg};

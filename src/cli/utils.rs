@@ -23,6 +23,7 @@ pub fn required_arg<'a>(matches: &'a ArgMatches, name: &str) -> Result<&'a str, 
 // checks for instance.json rather than just the directory, since a folder
 // without config is just a sad empty directory pretending to be an instance
 pub fn require_instance(instances_dir: &std::path::Path, name: &str) -> Result<(), io::Error> {
+    crate::instance::manager::validate_name(name).map_err(io::Error::other)?;
     if !instances_dir.join(name).join("instance.json").exists() {
         return Err(io::Error::other(format!("Instance '{name}' not found")));
     }

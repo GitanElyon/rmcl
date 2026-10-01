@@ -32,3 +32,21 @@ fn resolves_named_log_file() {
         Some("latest.log")
     );
 }
+
+#[test]
+fn rejects_log_paths_outside_the_instance() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("demo/minecraft/logs/launches");
+    std::fs::create_dir_all(&dir).unwrap();
+    let outside = tmp.path().join("outside.txt");
+    std::fs::write(&outside, "private").unwrap();
+
+    assert!(resolve_log_path(tmp.path(), "demo", Some(outside.to_str().unwrap())).is_err());
+    assert!(resolve_log_path(tmp.path(), "demo", Some("../../outside.txt")).is_err());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, dir.join("escape.log")).unwrap();
+        assert!(resolve_log_path(tmp.path(), "demo", Some("escape.log")).is_err());
+        assert!(resolve_log_path(tmp.path(), "demo", None).is_err());
+    }
+}

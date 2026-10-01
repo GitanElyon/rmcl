@@ -90,6 +90,9 @@ async fn run_full_oauth_flow() -> Result<(String, Option<String>), String> {
 }
 
 pub fn start_microsoft_auth() -> Arc<Mutex<Option<AuthResult>>> {
+    if let Ok(mut slot) = DEVICE_CODE_DISPLAY.lock() {
+        *slot = None;
+    }
     let result: Arc<Mutex<Option<AuthResult>>> = Arc::new(Mutex::new(None));
     let result_clone = result.clone();
 
@@ -110,7 +113,12 @@ async fn run_full_auth_flow() -> AuthResult {
         Err(e) => return AuthResult::Error(e),
     };
 
-    exchange_and_build_account(&ms_access_token, ms_refresh_token.as_deref()).await
+    let Some(refresh_token) = ms_refresh_token.as_deref() else {
+        return AuthResult::Error(
+            "Microsoft did not return a refresh token; try signing in again".to_owned(),
+        );
+    };
+    exchange_and_build_account(&ms_access_token, Some(refresh_token)).await
 }
 
 async fn exchange_and_build_account(
@@ -158,8 +166,8 @@ async fn exchange_and_build_account(
         account_type: AccountType::Microsoft,
         active: false,
         refresh_token: ms_refresh_token.map(|s| s.to_owned()),
-        cached_mc_token: None,
-        cached_mc_token_expires_at: None,
+        cached_mc_token: Some(mc_token.access_token().as_ref().to_owned()),
+        cached_mc_token_expires_at: Some(chrono::Utc::now().timestamp() + MC_TOKEN_CACHE_TTL_SECS),
     })
 }
 

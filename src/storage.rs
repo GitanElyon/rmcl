@@ -153,7 +153,23 @@ pub fn clear_disposable_caches(meta_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+pub fn safe_relative_path(path: &Path) -> bool {
+    let mut components = path.components();
+    components
+        .next()
+        .is_some_and(|part| matches!(part, std::path::Component::Normal(_)))
+        && components.all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_with_mode(path, bytes, false)
+}
+
+pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_with_mode(path, bytes, true)
+}
+
+fn write_atomic_with_mode(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
@@ -167,10 +183,16 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let result = (|| {
         use std::io::Write;
 
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        let mut file = options.open(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         replace_file(&temporary, path)
@@ -182,12 +204,12 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     std::fs::rename(source, destination)
 }
 
 #[cfg(windows)]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     if !destination.exists() {
         return std::fs::rename(source, destination);
     }

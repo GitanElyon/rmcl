@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::io;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::ArgMatches;
@@ -58,22 +59,11 @@ async fn add_account(matches: &ArgMatches) -> CliResult {
 // then one for the final auth result. not the prettiest pattern
 // but it keeps the oauth complexity out of the CLI layer.
 async fn add_microsoft_account() -> CliResult {
-    if let Ok(mut slot) = crate::auth::DEVICE_CODE_DISPLAY.lock() {
-        *slot = None;
-    }
-
     let result_arc = crate::auth::start_microsoft_auth();
 
-    loop {
-        if let Ok(slot) = crate::auth::DEVICE_CODE_DISPLAY.lock()
-            && let Some(info) = slot.as_ref()
-        {
-            println!("Open: {}", info.verification_uri);
-            println!("Code: {}", info.user_code);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    let info = wait_for_device_code(&result_arc).await?;
+    println!("Open: {}", info.verification_uri);
+    println!("Code: {}", info.user_code);
 
     loop {
         if let Ok(slot) = result_arc.lock()
@@ -82,7 +72,7 @@ async fn add_microsoft_account() -> CliResult {
             return match result {
                 AuthResult::Success(account) => {
                     let mut store = AccountStore::load();
-                    store.add(account.clone());
+                    store.add(account.clone())?;
                     println!("Added Microsoft account '{}'.", account.username);
                     Ok(())
                 }
@@ -90,6 +80,24 @@ async fn add_microsoft_account() -> CliResult {
             };
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn wait_for_device_code(
+    result: &Arc<Mutex<Option<AuthResult>>>,
+) -> io::Result<crate::auth::DeviceCodeInfo> {
+    loop {
+        if let Ok(slot) = crate::auth::DEVICE_CODE_DISPLAY.lock()
+            && let Some(info) = slot.as_ref()
+        {
+            return Ok(info.clone());
+        }
+        if let Ok(slot) = result.lock()
+            && let Some(AuthResult::Error(message)) = slot.as_ref()
+        {
+            return Err(io::Error::other(message.clone()));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -105,22 +113,21 @@ fn add_offline_account(store: &mut AccountStore, username: &str) -> CliResult {
         .into());
     }
 
-    store.add(crate::auth::create_offline_account(username));
+    store.add(crate::auth::create_offline_account(username))?;
     Ok(())
 }
 
 fn delete_account(matches: &ArgMatches) -> CliResult {
     let username = required_arg(matches, "username")?;
     let mut store = AccountStore::load();
-    let index = find_account_index(&store.accounts, username)
-        .ok_or_else(|| io::Error::other(format!("account '{}' not found", username)))?;
+    let index = find_account_index(&store.accounts, username)?;
 
     if !matches.get_flag("yes") && !confirm(&format!("Delete '{}'", username))? {
         println!("Cancelled.");
         return Ok(());
     }
 
-    store.remove(index);
+    store.remove(index)?;
     println!("Deleted '{}'.", username);
     Ok(())
 }
@@ -128,17 +135,29 @@ fn delete_account(matches: &ArgMatches) -> CliResult {
 fn use_account(matches: &ArgMatches) -> CliResult {
     let username = required_arg(matches, "username")?;
     let mut store = AccountStore::load();
-    let index = find_account_index(&store.accounts, username)
-        .ok_or_else(|| io::Error::other(format!("account '{}' not found", username)))?;
-    store.set_active(index);
+    let index = find_account_index(&store.accounts, username)?;
+    store.set_active(index)?;
     println!("Active account set to '{}'.", username);
     Ok(())
 }
 
-fn find_account_index(accounts: &[Account], username: &str) -> Option<usize> {
-    accounts
+fn find_account_index(accounts: &[Account], selector: &str) -> io::Result<usize> {
+    if let Some(index) = accounts.iter().position(|account| account.uuid == selector) {
+        return Ok(index);
+    }
+    let mut matches = accounts
         .iter()
-        .position(|account| account.username.eq_ignore_ascii_case(username))
+        .enumerate()
+        .filter(|(_, account)| account.username.eq_ignore_ascii_case(selector));
+    let (index, _) = matches
+        .next()
+        .ok_or_else(|| io::Error::other(format!("account '{selector}' not found")))?;
+    if matches.next().is_some() {
+        return Err(io::Error::other(format!(
+            "Account '{selector}' is ambiguous; use its UUID"
+        )));
+    }
+    Ok(index)
 }
 
 use super::utils::{confirm, required_arg};

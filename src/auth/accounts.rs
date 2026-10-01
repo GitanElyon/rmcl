@@ -34,26 +34,36 @@ pub enum AuthResult {
 pub struct AccountStore {
     pub accounts: Vec<Account>,
     path: PathBuf,
+    load_error: Option<String>,
 }
 
 impl AccountStore {
     pub fn load() -> Self {
-        let path = account_store_path();
-        let accounts = match std::fs::read_to_string(&path) {
+        Self::load_from(account_store_path())
+    }
+
+    fn load_from(path: PathBuf) -> Self {
+        let (accounts, load_error) = match std::fs::read_to_string(&path) {
             Ok(content) => match serde_json::from_str(&content) {
-                Ok(accounts) => accounts,
+                Ok(accounts) => (accounts, None),
                 Err(e) => {
                     tracing::warn!("Failed to parse accounts file {}: {}", path.display(), e);
-                    Vec::new()
+                    (
+                        Vec::new(),
+                        Some(format!("Invalid accounts file {}: {e}", path.display())),
+                    )
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::debug!("No accounts file at {}", path.display());
-                Vec::new()
+                (Vec::new(), None)
             }
             Err(e) => {
                 tracing::warn!("Failed to read accounts file {}: {}", path.display(), e);
-                Vec::new()
+                (
+                    Vec::new(),
+                    Some(format!("Cannot read accounts file {}: {e}", path.display())),
+                )
             }
         };
         tracing::debug!(
@@ -61,36 +71,25 @@ impl AccountStore {
             accounts.len(),
             path.display()
         );
-        Self { accounts, path }
+        Self {
+            accounts,
+            path,
+            load_error,
+        }
     }
 
-    pub fn save(&self) {
-        if let Some(parent) = self.path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            tracing::error!("Failed to create accounts directory: {}", e);
-            return;
+    pub fn save(&self) -> std::io::Result<()> {
+        if let Some(error) = &self.load_error {
+            return Err(std::io::Error::other(error.clone()));
         }
-        match serde_json::to_string_pretty(&self.accounts) {
-            Ok(json) => {
-                // this file holds microsoft refresh tokens: a torn write on
-                // crash would permanently lock the user out, so write atomically.
-                if let Err(e) = crate::storage::write_atomic(&self.path, json.as_bytes()) {
-                    tracing::error!(
-                        "Failed to write accounts file {}: {}",
-                        self.path.display(),
-                        e
-                    );
-                } else {
-                    tracing::debug!(
-                        "Saved {} account(s) to {}",
-                        self.accounts.len(),
-                        self.path.display()
-                    );
-                }
-            }
-            Err(e) => tracing::error!("Failed to serialize accounts: {}", e),
-        }
+        let json = serde_json::to_vec_pretty(&self.accounts).map_err(std::io::Error::other)?;
+        crate::storage::write_atomic_private(&self.path, &json)?;
+        tracing::debug!(
+            "Saved {} account(s) to {}",
+            self.accounts.len(),
+            self.path.display()
+        );
+        Ok(())
     }
 
     pub fn active_account(&self) -> Option<&Account> {
@@ -103,25 +102,31 @@ impl AccountStore {
             .any(|account| account.account_type == AccountType::Microsoft)
     }
 
-    pub fn set_active(&mut self, index: usize) {
+    pub fn set_active(&mut self, index: usize) -> std::io::Result<()> {
         let Some(account) = self.accounts.get(index) else {
             // out-of-range: leave the current selection untouched. marking
             // every account inactive here would break the single-active
             // invariant and orphan the store with no usable account.
             tracing::warn!("Tried to select missing account index {}", index);
-            return;
+            return Ok(());
         };
+        let previous = self.accounts.clone();
         let username = account.username.clone();
         for (i, acc) in self.accounts.iter_mut().enumerate() {
             acc.active = i == index;
         }
         tracing::info!("Selected account '{}'", username);
-        self.save();
+        if let Err(error) = self.save() {
+            self.accounts = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     // if an account with the same uuid already exists, replace it.
     // first account added auto-becomes active so there's always a selection.
-    pub fn add(&mut self, account: Account) {
+    pub fn add(&mut self, account: Account) -> std::io::Result<()> {
+        let previous = self.accounts.clone();
         let uuid = &account.uuid;
         let replaced = self.accounts.iter().any(|a| a.uuid == *uuid);
         // re-adding the currently active account must not drop the selection:
@@ -141,14 +146,19 @@ impl AccountStore {
             account_type,
             username
         );
-        self.save();
+        if let Err(error) = self.save() {
+            self.accounts = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
-    pub fn remove(&mut self, index: usize) {
+    pub fn remove(&mut self, index: usize) -> std::io::Result<()> {
         if index >= self.accounts.len() {
             tracing::warn!("Tried to remove missing account index {}", index);
-            return;
+            return Ok(());
         }
+        let previous = self.accounts.clone();
         let account = self.accounts.remove(index);
         tracing::info!(
             "Removed {:?} account '{}'",
@@ -159,7 +169,11 @@ impl AccountStore {
             self.accounts[0].active = true;
             tracing::debug!("Activated fallback account '{}'", self.accounts[0].username);
         }
-        self.save();
+        if let Err(error) = self.save() {
+            self.accounts = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 }
 

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::io;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::ArgMatches;
@@ -24,6 +23,7 @@ pub async fn handle_account(matches: &ArgMatches) -> CliResult {
 
 fn list_accounts() -> CliResult {
     let store = AccountStore::load();
+    store.check_loaded()?;
     let rows = store
         .accounts
         .iter()
@@ -32,11 +32,12 @@ fn list_accounts() -> CliResult {
                 active_marker(account.active).to_string(),
                 account.username.clone(),
                 format!("{:?}", account.account_type),
+                account.uuid.clone(),
             ]
         })
         .collect::<Vec<_>>();
 
-    print_table(&[" ", "Username", "Type"], &rows);
+    print_table(&[" ", "Username", "Type", "UUID"], &rows);
     Ok(())
 }
 
@@ -54,10 +55,6 @@ async fn add_account(matches: &ArgMatches) -> CliResult {
     Ok(())
 }
 
-// microsoft auth runs on a background thread via device code flow.
-// polls two shared slots: one for the device code to display,
-// then one for the final auth result. not the prettiest pattern
-// but it keeps the oauth complexity out of the CLI layer.
 async fn add_microsoft_account() -> CliResult {
     let result_arc = crate::auth::start_microsoft_auth();
 
@@ -66,7 +63,7 @@ async fn add_microsoft_account() -> CliResult {
     println!("Code: {}", info.user_code);
 
     loop {
-        if let Ok(slot) = result_arc.lock()
+        if let Ok(slot) = result_arc.result.lock()
             && let Some(result) = slot.as_ref()
         {
             return match result {
@@ -84,15 +81,15 @@ async fn add_microsoft_account() -> CliResult {
 }
 
 async fn wait_for_device_code(
-    result: &Arc<Mutex<Option<AuthResult>>>,
+    result: &crate::auth::MicrosoftAuth,
 ) -> io::Result<crate::auth::DeviceCodeInfo> {
     loop {
-        if let Ok(slot) = crate::auth::DEVICE_CODE_DISPLAY.lock()
+        if let Ok(slot) = result.device_code.lock()
             && let Some(info) = slot.as_ref()
         {
             return Ok(info.clone());
         }
-        if let Ok(slot) = result.lock()
+        if let Ok(slot) = result.result.lock()
             && let Some(AuthResult::Error(message)) = slot.as_ref()
         {
             return Err(io::Error::other(message.clone()));
@@ -102,6 +99,7 @@ async fn wait_for_device_code(
 }
 
 fn add_offline_account(store: &mut AccountStore, username: &str) -> CliResult {
+    store.check_loaded()?;
     let username = username.trim();
     if username.is_empty() {
         return Err(io::Error::other("offline username cannot be empty").into());
@@ -120,6 +118,7 @@ fn add_offline_account(store: &mut AccountStore, username: &str) -> CliResult {
 fn delete_account(matches: &ArgMatches) -> CliResult {
     let username = required_arg(matches, "username")?;
     let mut store = AccountStore::load();
+    store.check_loaded()?;
     let index = find_account_index(&store.accounts, username)?;
 
     if !matches.get_flag("yes") && !confirm(&format!("Delete '{}'", username))? {
@@ -135,6 +134,7 @@ fn delete_account(matches: &ArgMatches) -> CliResult {
 fn use_account(matches: &ArgMatches) -> CliResult {
     let username = required_arg(matches, "username")?;
     let mut store = AccountStore::load();
+    store.check_loaded()?;
     let index = find_account_index(&store.accounts, username)?;
     store.set_active(index)?;
     println!("Active account set to '{}'.", username);

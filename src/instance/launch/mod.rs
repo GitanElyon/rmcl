@@ -731,6 +731,9 @@ pub async fn launch(
     let name = config.name.clone();
 
     let mut account_store = crate::auth::AccountStore::load();
+    account_store
+        .check_loaded()
+        .map_err(|error| LaunchError::Auth(error.to_string()))?;
     let account =
         select_launch_account(&account_store.accounts, config.preferred_account.as_deref());
     let Some(acc) = account.cloned() else {
@@ -753,25 +756,7 @@ pub async fn launch(
         AccountType::Offline => ("0".to_string(), None, None),
     };
 
-    if let Some(stored) = account_store
-        .accounts
-        .iter_mut()
-        .find(|a| a.uuid == acc.uuid)
-    {
-        let mut changed = false;
-        if let Some(new_rt) = new_refresh {
-            stored.refresh_token = Some(new_rt);
-            changed = true;
-        }
-        if let Some(expires) = new_expires {
-            stored.cached_mc_token = Some(token.clone());
-            stored.cached_mc_token_expires_at = Some(expires);
-            changed = true;
-        }
-        if changed {
-            account_store.save()?;
-        }
-    }
+    account_store.update_credentials(&acc.uuid, new_refresh, &token, new_expires)?;
 
     let user_type = match acc.account_type {
         AccountType::Microsoft => "msa",

@@ -3,6 +3,42 @@
 
 use super::*;
 
+#[tokio::test]
+async fn profile_status_errors_and_stalls_are_reported_accurately() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    let server = MockServer::start().await;
+    let client = reqwest::Client::builder()
+        .read_timeout(std::time::Duration::from_millis(30))
+        .build()
+        .unwrap();
+    for status in [404, 401, 429, 503] {
+        let route = format!("/{status}");
+        Mock::given(path(&route))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let error = fetch_profile(&client, &format!("{}{route}", server.uri()), "test")
+            .await
+            .err()
+            .unwrap();
+        if status == 404 {
+            assert!(error.contains("does not own"));
+        } else {
+            assert!(error.contains(&status.to_string()));
+            assert!(!error.contains("does not own"));
+        }
+    }
+    Mock::given(path("/stall"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(1)))
+        .mount(&server)
+        .await;
+    assert!(
+        fetch_profile(&client, &format!("{}/stall", server.uri()), "test")
+            .await
+            .is_err()
+    );
+}
+
 fn microsoft_account(cached_mc_token_expires_at: Option<i64>) -> Account {
     Account {
         uuid: "00000000-0000-0000-0000-000000000000".to_owned(),
@@ -29,6 +65,7 @@ fn cached_mc_token_expires_inside_refresh_margin() {
     let account = microsoft_account(Some(now + MC_TOKEN_CACHE_REFRESH_MARGIN_SECS));
 
     assert!(valid_cached_mc_token(&account, now).is_none());
+    assert!(valid_cached_mc_token(&microsoft_account(Some(i64::MIN)), now).is_none());
 }
 
 #[test]

@@ -65,10 +65,10 @@ fn device_code_failure_does_not_wait_for_a_code() {
     let _guard = crate::tests::TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    *crate::auth::DEVICE_CODE_DISPLAY.lock().unwrap() = None;
-    let result = std::sync::Arc::new(std::sync::Mutex::new(Some(crate::auth::AuthResult::Error(
+    let result = crate::auth::MicrosoftAuth::default();
+    *result.result.lock().unwrap() = Some(crate::auth::AuthResult::Error(
         "device code failed".to_owned(),
-    ))));
+    ));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()

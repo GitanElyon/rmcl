@@ -49,9 +49,6 @@ fn create_offline_account_fields() {
     assert_eq!(acc.account_type, AccountType::Offline);
     assert!(!acc.active);
     assert!(acc.refresh_token.is_none());
-    // pin the uuid to the deterministic offline_uuid output so a regression
-    // in the uuid derivation (e.g. salt change) would fail this test, not
-    // just a non-empty-string check that any garbage would pass.
     assert_eq!(acc.uuid, offline_uuid("TestPlayer"));
 }
 
@@ -248,8 +245,42 @@ fn invalid_account_file_cannot_be_overwritten_by_a_new_account() {
     let path = tmp.path().join("accounts.json");
     std::fs::write(&path, b"{broken credentials").unwrap();
     let mut store = AccountStore::load_from(path.clone());
+    assert!(store.check_loaded().is_err());
 
     assert!(store.add(microsoft_account("Owner")).is_err());
     assert!(store.accounts.is_empty());
     assert_eq!(std::fs::read(path).unwrap(), b"{broken credentials");
+}
+
+#[test]
+fn stale_account_mutations_preserve_new_credentials_and_selection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut first = make_store(tmp.path());
+    first.add(microsoft_account("Owner")).unwrap();
+    first.add(create_offline_account("Player")).unwrap();
+    let mut stale = AccountStore::load_from(first.path.clone());
+    let uuid = first.accounts[0].uuid.clone();
+    first
+        .update_credentials(
+            &uuid,
+            Some("new-refresh".to_owned()),
+            "new-token",
+            Some(12345),
+        )
+        .unwrap();
+    first.add(create_offline_account("New")).unwrap();
+    stale.set_active(1).unwrap();
+    assert_eq!(stale.accounts.len(), 3);
+    assert_eq!(
+        stale.accounts[0].refresh_token.as_deref(),
+        Some("new-refresh")
+    );
+    first
+        .update_credentials(&uuid, None, "newer-token", Some(23456))
+        .unwrap();
+    assert_eq!(first.active_account().unwrap().username, "Player");
+    assert_eq!(
+        first.accounts[0].cached_mc_token.as_deref(),
+        Some("newer-token")
+    );
 }

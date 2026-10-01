@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::sync::{Arc, Mutex};
-
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -28,7 +26,7 @@ pub enum AddMode {
     OfflineBlocked,
     DeviceCodeWaiting {
         info: DeviceCodeInfo,
-        pending: Arc<Mutex<Option<AuthResult>>>,
+        pending: auth::MicrosoftAuth,
     },
 }
 
@@ -58,7 +56,7 @@ impl AccountState {
     // can't block on it because the TUI needs to keep rendering
     pub fn drain_auth_result(&mut self) {
         if let AddMode::DeviceCodeWaiting { pending, .. } = &self.add_mode {
-            let result = match pending.lock() {
+            let result = match pending.result.lock() {
                 Ok(mut slot) => slot.take(),
                 _ => None,
             };
@@ -208,9 +206,9 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut AccountState) -> bool {
 }
 
 pub fn drain_device_code(state: &mut AccountState) {
-    if let AddMode::DeviceCodeWaiting { info, .. } = &mut state.add_mode
+    if let AddMode::DeviceCodeWaiting { info, pending } = &mut state.add_mode
         && info.user_code.is_empty()
-        && let Ok(mut slot) = auth::DEVICE_CODE_DISPLAY.lock()
+        && let Ok(mut slot) = pending.device_code.lock()
         && let Some(dc_info) = slot.take()
     {
         info.user_code = dc_info.user_code;
@@ -345,15 +343,10 @@ fn render_account_list(
 }
 
 fn popup_area(frame: &Frame, width: u16, height: u16) -> Rect {
-    let area = frame.area();
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect {
-        x,
-        y,
-        width: width.min(area.width),
-        height: height.min(area.height),
-    }
+    frame.area().centered(
+        ratatui::layout::Constraint::Length(width),
+        ratatui::layout::Constraint::Length(height),
+    )
 }
 
 fn render_choose_popup(frame: &mut Frame) {

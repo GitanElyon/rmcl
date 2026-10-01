@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::Span,
-    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Paragraph, ScrollbarState},
 };
 use ratatui_image::{Resize, StatefulImage, protocol::StatefulProtocol};
 use unicode_segmentation::UnicodeSegmentation;
@@ -445,17 +445,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut ScreenshotsState, is_fo
         height: area.height.saturating_sub(2),
     };
     frame.render_stateful_widget(
-        Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("\u{25b2}"))
-            .style(
-                Style::default()
-                    .fg(theme.text_dim())
-                    .add_modifier(Modifier::BOLD),
-            )
-            .thumb_symbol("\u{2551}")
-            .track_symbol(Some(""))
-            .end_symbol(Some("\u{25bc}")),
+        super::scrollbar(theme.text_dim()),
         scrollbar_area,
         &mut state.scrollbar_state,
     );

@@ -6,6 +6,7 @@ use crossterm::event::KeyEvent;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
+    widgets::{Scrollbar, ScrollbarOrientation},
 };
 
 pub mod account;
@@ -45,6 +46,16 @@ pub(crate) fn status_badge_style(color: Color) -> Style {
 
 pub(crate) fn status_badge(label: impl Into<String>, color: Color) -> Span<'static> {
     Span::styled(format!(" {} ", label.into()), status_badge_style(color))
+}
+
+pub(crate) fn scrollbar(color: Color) -> Scrollbar<'static> {
+    Scrollbar::default()
+        .orientation(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("\u{25b2}"))
+        .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
+        .thumb_symbol("\u{2551}")
+        .track_symbol(Some(""))
+        .end_symbol(Some("\u{25bc}"))
 }
 
 pub trait WidgetKey {

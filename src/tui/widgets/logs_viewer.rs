@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Paragraph, ScrollbarState},
 };
 use tui_widget_list::{ListBuilder, ListState as TuiListState, ListView};
 
@@ -550,17 +550,7 @@ fn render_list(frame: &mut Frame, area: Rect, state: &mut LogsState, is_focused:
         height: inner.height.saturating_sub(2),
     };
     frame.render_stateful_widget(
-        Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("\u{25b2}"))
-            .style(
-                Style::default()
-                    .fg(theme.accent())
-                    .add_modifier(Modifier::BOLD),
-            )
-            .thumb_symbol("\u{2551}")
-            .track_symbol(Some(""))
-            .end_symbol(Some("\u{25bc}")),
+        super::scrollbar(theme.accent()),
         scrollbar_area,
         &mut state.scrollbar_state,
     );
@@ -639,17 +629,7 @@ fn render_viewer(
         height: area.height.saturating_sub(2),
     };
     frame.render_stateful_widget(
-        Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("\u{25b2}"))
-            .style(
-                Style::default()
-                    .fg(theme.accent())
-                    .add_modifier(Modifier::BOLD),
-            )
-            .thumb_symbol("\u{2551}")
-            .track_symbol(Some(""))
-            .end_symbol(Some("\u{25bc}")),
+        super::scrollbar(theme.accent()),
         scrollbar_area,
         &mut state.viewer_scrollbar_state,
     );

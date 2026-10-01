@@ -126,7 +126,7 @@ fn rewrite_linux_desktop_entries(_data_dir: &Path, _instances_dir: &Path) {
         };
         for entry in entries.flatten() {
             let name = entry.file_name();
-            let sanitized = sanitize(&name.to_string_lossy());
+            let sanitized = crate::instance::desktop::sanitize(&name.to_string_lossy());
             let old = apps_dir.join(format!("mcl-{sanitized}.desktop"));
             let new = apps_dir.join(format!("rmcl-{sanitized}.desktop"));
             if old.exists()
@@ -159,7 +159,7 @@ fn rewrite_native_desktop_shortcuts(_desktop_dir: &Path, _instances_dir: &Path) 
             let display = entry.file_name().to_string_lossy().into_owned();
             // mcl named shortcut files with the sanitized form of the
             // instance name ("My Pack" -> "My_Pack"), so look those up.
-            let sanitized = sanitize(&display);
+            let sanitized = crate::instance::desktop::sanitize(&display);
             let path = _desktop_dir.join(format!("Minecraft - {sanitized}.{ext}"));
             if !path.exists() {
                 continue;
@@ -172,19 +172,6 @@ fn rewrite_native_desktop_shortcuts(_desktop_dir: &Path, _instances_dir: &Path) 
             }
         }
     }
-}
-
-#[allow(dead_code)]
-fn sanitize(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

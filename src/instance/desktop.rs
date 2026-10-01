@@ -225,7 +225,7 @@ fn quote_windows_arg(value: &str) -> String {
     quoted
 }
 
-fn sanitize(name: &str) -> String {
+pub(crate) fn sanitize(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {

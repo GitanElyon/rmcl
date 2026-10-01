@@ -12,7 +12,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Paragraph, ScrollbarState},
 };
 use ratatui_image::{CropOptions, Resize, StatefulImage, protocol::StatefulProtocol};
 use tui_widget_list::{ListBuilder, ListState as TuiListState, ListView};
@@ -2439,17 +2439,7 @@ pub fn render(
         height: list_area.height.saturating_sub(2),
     };
     frame.render_stateful_widget(
-        Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("\u{25b2}"))
-            .style(
-                Style::default()
-                    .fg(theme.text_dim())
-                    .add_modifier(Modifier::BOLD),
-            )
-            .thumb_symbol("\u{2551}")
-            .track_symbol(Some(""))
-            .end_symbol(Some("\u{25bc}")),
+        crate::tui::widgets::scrollbar(theme.text_dim()),
         scrollbar_area,
         &mut state.scrollbar_state,
     );

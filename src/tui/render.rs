@@ -221,7 +221,7 @@ impl App {
             layout::{Alignment, Margin},
             style::{Modifier, Style},
             text::Line,
-            widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation},
+            widgets::{Block, Clear, Paragraph},
         };
 
         let theme = THEME.as_ref();
@@ -298,17 +298,7 @@ impl App {
             height: overlay.height.saturating_sub(2),
         };
         frame.render_stateful_widget(
-            Scrollbar::default()
-                .orientation(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("\u{25b2}"))
-                .style(
-                    Style::default()
-                        .fg(theme.text_dim())
-                        .add_modifier(Modifier::BOLD),
-                )
-                .thumb_symbol("\u{2551}")
-                .track_symbol(Some(""))
-                .end_symbol(Some("\u{25bc}")),
+            widgets::scrollbar(theme.text_dim()),
             scrollbar_area,
             &mut self.log_overlay_scrollbar,
         );

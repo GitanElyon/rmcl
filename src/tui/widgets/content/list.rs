@@ -350,6 +350,10 @@ impl Default for ContentListState {
 }
 
 impl ContentListState {
+    pub(crate) fn is_scanning(&self) -> bool {
+        self.stream_rx.is_some()
+    }
+
     pub(crate) fn has_pending_icons(&self) -> bool {
         !self.pending_entry_images.is_empty()
     }
@@ -1667,19 +1671,6 @@ async fn load_installed_version(
 }
 
 impl ContentListState {
-    pub fn forget_instance(&mut self, instance_name: &str) {
-        let world_prefix = format!("{instance_name}:");
-        if self
-            .loaded_for
-            .as_deref()
-            .is_some_and(|source| source == instance_name || source.starts_with(&world_prefix))
-        {
-            self.loaded_for = None;
-            self.sort_metadata.get_mut().clear();
-            self.invalidate_filtered();
-        }
-    }
-
     pub fn start_load(
         &mut self,
         content_dir: &Path,

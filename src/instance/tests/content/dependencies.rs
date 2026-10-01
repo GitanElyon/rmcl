@@ -129,6 +129,8 @@ struct FakeProvider {
     download_barrier: Option<std::sync::Arc<tokio::sync::Barrier>>,
     download_pause: Option<std::sync::Arc<tokio::sync::Notify>>,
     download_filename: Option<String>,
+    compatible_started: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    compatible_pause: HashMap<String, std::sync::Arc<tokio::sync::Semaphore>>,
 }
 
 impl FakeProvider {
@@ -223,6 +225,12 @@ impl ContentProvider for FakeProvider {
         _game_version: &str,
         _loader: ModLoader,
     ) -> Result<Vec<VersionInfo>, NetError> {
+        if let Some(started) = &self.compatible_started {
+            let _ = started.send(project_id.to_owned());
+        }
+        if let Some(pause) = self.compatible_pause.get(project_id) {
+            pause.acquire().await.unwrap().forget();
+        }
         Ok(self
             .compatible
             .get(project_id)
@@ -404,7 +412,162 @@ fn provider(versions: Vec<VersionInfo>) -> FakeProvider {
         download_barrier: None,
         download_pause: None,
         download_filename: None,
+        compatible_started: None,
+        compatible_pause: HashMap::new(),
     }
+}
+
+#[test]
+fn update_checks_prioritize_list_rows_and_publish_before_the_rest_finish() {
+    use crate::instance::content::updates::{AvailableUpdate, UpdateSnapshot, scan_with_registry};
+    let _guard = crate::tests::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut manifest = ContentManifest::default();
+            let mut versions = Vec::new();
+            let mut pauses = HashMap::new();
+            for index in 0..12 {
+                let project = format!("project-{index:02}");
+                let old = format!("{project}-old");
+                manifest.files.push(installed_record(&project, &old, true));
+                for (suffix, date) in [
+                    ("old", "2026-01-01T00:00:00Z"),
+                    ("new", "2026-02-01T00:00:00Z"),
+                ] {
+                    versions.push(version(
+                        &format!("{project}-{suffix}"),
+                        &project,
+                        VersionType::Release,
+                        date,
+                        Vec::new(),
+                    ));
+                }
+                pauses.insert(project, std::sync::Arc::new(tokio::sync::Semaphore::new(0)));
+            }
+            let priority = manifest
+                .files
+                .iter()
+                .rev()
+                .map(|record| record.resolved_project().unwrap().clone())
+                .collect::<Vec<_>>();
+            let first = priority[0].clone();
+            let known = priority.last().unwrap().clone();
+            let previous = UpdateSnapshot {
+                game_version: "1.21.1".to_owned(),
+                loader: ModLoader::Fabric,
+                inventory: priority.clone(),
+                checked_at: 0,
+                updates: vec![AvailableUpdate {
+                    installed: known.clone(),
+                    current: None,
+                    target: versions
+                        .iter()
+                        .find(|version| version.id == format!("{}-new", known.project_id))
+                        .unwrap()
+                        .clone(),
+                    kind: ContentKind::Mod,
+                }],
+                failures: Vec::new(),
+            };
+            let (started, mut requests) = tokio::sync::mpsc::unbounded_channel();
+            let (published, mut results) = tokio::sync::mpsc::unbounded_channel();
+            let mut provider = provider(versions);
+            provider
+                .compatible
+                .insert(known.project_id.clone(), vec![known.version_id.clone()]);
+            provider.compatible_started = Some(started);
+            provider.compatible_pause = pauses.clone();
+            let registry = std::sync::Arc::new(provider.registry());
+            let expected = priority[..8]
+                .iter()
+                .map(|project| project.project_id.clone())
+                .collect::<HashSet<_>>();
+            let scan = tokio::spawn(async move {
+                let complete = scan_with_registry(
+                    &instance(),
+                    &manifest,
+                    &priority,
+                    registry,
+                    Some(&previous),
+                    |snapshot| {
+                        published.send(snapshot.clone()).unwrap();
+                    },
+                )
+                .await;
+                let offline = scan_with_registry(
+                    &instance(),
+                    &manifest,
+                    &priority,
+                    std::sync::Arc::new(ProviderRegistry::new(Vec::new())),
+                    Some(&complete),
+                    |_| {},
+                )
+                .await;
+                assert_eq!(offline.updates.len(), complete.updates.len());
+                assert_eq!(offline.failures.len(), 12);
+                complete
+            });
+            let mut requested = HashSet::new();
+            for _ in 0..8 {
+                requested.insert(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), requests.recv())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                );
+            }
+            assert_eq!(requested, expected);
+            assert!(requests.try_recv().is_err());
+            assert_eq!(
+                crate::feedback::progress::PROGRESS.lock().unwrap().progress,
+                Some((0, 12))
+            );
+            pauses[&first.project_id].add_permits(1);
+            let partial = tokio::time::timeout(std::time::Duration::from_secs(5), results.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!scan.is_finished());
+            assert!(partial.update_for(&first).is_some());
+            assert!(partial.update_for(&known).is_some());
+            assert_eq!(partial.checked_at, 0);
+            assert_eq!(
+                crate::feedback::progress::PROGRESS.lock().unwrap().progress,
+                Some((1, 12))
+            );
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 5)).unwrap();
+            terminal
+                .draw(|frame| {
+                    crate::tui::widgets::status::render(
+                        frame,
+                        frame.area(),
+                        crate::tui::app::FocusedArea::Overview,
+                        &mut throbber_widgets_tui::ThrobberState::default(),
+                        None,
+                    )
+                })
+                .unwrap();
+            let overview = terminal.backend().to_string();
+            assert!(overview.contains("8%"));
+            assert!(overview.contains("1/12 item(s) checked"));
+            for pause in pauses.values() {
+                pause.add_permits(1);
+            }
+            let complete = tokio::time::timeout(std::time::Duration::from_secs(5), scan)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(complete.updates.len(), 11);
+            assert!(complete.failures.is_empty());
+            assert!(complete.checked_at > 0);
+            assert!(complete.update_for(&known).is_none());
+        });
 }
 
 #[tokio::test]

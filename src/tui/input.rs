@@ -2255,7 +2255,7 @@ impl App {
                     );
                 }
                 if outcome.content_updates_enabled {
-                    self.spawn_selected_content_update_check();
+                    self.queue_content_update_checks();
                 }
                 if outcome.restart_required && outcome.restart_changed {
                     error_buffer::push_message(
@@ -2357,6 +2357,10 @@ impl App {
     }
 
     pub(super) fn reset_discovery_states(&mut self) {
+        self.reconciliation_for = None;
+        for cached in self.cached_instance_content.values_mut() {
+            cached.reconciliation_for = None;
+        }
         self.mods_discovery_state =
             widgets::content::DiscoveryState::new(crate::instance::ContentKind::Mod);
         self.resource_packs_discovery_state =
@@ -2365,6 +2369,13 @@ impl App {
             widgets::content::DiscoveryState::new(crate::instance::ContentKind::Shader);
         self.datapacks_discovery_state =
             widgets::content::DiscoveryState::new(crate::instance::ContentKind::DataPack);
+    }
+
+    pub(super) fn queue_content_update_checks(&mut self) {
+        self.content_update_check_pending = true;
+        for cached in self.cached_instance_content.values_mut() {
+            cached.update_check_pending = true;
+        }
     }
 
     pub(super) fn spawn_selected_content_update_check(&self) {
@@ -2381,7 +2392,42 @@ impl App {
             self.instance_manager.instances_dir.join(&instance.name),
         )
         .content_updates();
-        crate::instance::content::updates::spawn(instance, manifest.clone(), path);
+        crate::instance::content::updates::spawn(
+            instance,
+            manifest.clone(),
+            path,
+            self.content_update_priority(),
+        );
+    }
+
+    pub(super) fn content_update_priority(&self) -> Vec<crate::instance::ProviderProject> {
+        let active = match self.content_tab {
+            widgets::content::ContentTab::ResourcePacks => &self.resource_packs_state,
+            widgets::content::ContentTab::Shaders => &self.shaders_state,
+            widgets::content::ContentTab::Worlds => &self.world_datapacks_state,
+            _ => &self.mods_state,
+        };
+        [
+            active,
+            &self.mods_state,
+            &self.resource_packs_state,
+            &self.shaders_state,
+            &self.world_datapacks_state,
+        ]
+        .into_iter()
+        .flat_map(|state| {
+            state
+                .filtered_indices()
+                .into_iter()
+                .filter_map(|index| state.entries[index].provider_project.clone())
+                .chain(
+                    state
+                        .entries
+                        .iter()
+                        .filter_map(|entry| entry.provider_project.clone()),
+                )
+        })
+        .collect()
     }
 }
 

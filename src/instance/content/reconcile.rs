@@ -174,26 +174,30 @@ async fn reconcile(job: ReconcileJob, task: &ProgressTask) -> ReconcileResult {
 
     match inventory {
         Ok(Ok((mut inventory, manifest_path))) => {
-            let registry = ProviderRegistry::configured(client);
-            task.set_action(format!("Identifying content for {instance_name}"));
-            task.set_sub_action(format!("{} file(s) need matching", inventory.queries.len()));
-            if !inventory.queries.is_empty() {
-                task.set_progress(0, inventory.queries.len() as u64);
-            }
-            let resolution_result =
-                resolve_queries(&registry, &inventory.queries, &mut inventory.manifest).await;
-            if !inventory.queries.is_empty() {
-                task.set_progress(
-                    inventory.queries.len() as u64,
-                    inventory.queries.len() as u64,
-                );
-            }
+            let resolution_result = if inventory.queries.is_empty() {
+                Ok(())
+            } else {
+                let registry = ProviderRegistry::configured(client);
+                task.set_action(format!("Identifying content for {instance_name}"));
+                resolve_queries(
+                    &registry,
+                    &inventory.queries,
+                    &mut inventory.manifest,
+                    &task.handle(),
+                )
+                .await
+            };
+            task.set_action(format!("Saving content index for {instance_name}"));
+            task.set_sub_action("Validating content files");
+            task.set_progress(0, inventory.manifest.files.len() as u64);
+            let save_progress = task.handle();
             let saved = tokio::task::spawn_blocking(move || {
                 save_reconciled_manifest(
                     &manifest_path,
                     &minecraft_dir,
                     inventory.manifest,
                     &inventory.previous,
+                    &save_progress,
                 )
             })
             .await
@@ -235,6 +239,7 @@ fn save_reconciled_manifest(
     minecraft_dir: &Path,
     reconciled: ContentManifest,
     previous: &ContentManifest,
+    task: &impl InventoryProgress,
 ) -> Result<ContentManifest, crate::instance::content::manifest::ManifestError> {
     ContentManifest::update(manifest_path, |current| {
         for record in current.files.clone() {
@@ -247,7 +252,11 @@ fn save_reconciled_manifest(
                 Err(error) => return Err(error.into()),
             }
         }
-        for mut record in reconciled.files {
+        let total = reconciled.files.len() as u64;
+        task.set_progress(0, total);
+        for (index, mut record) in reconciled.files.into_iter().enumerate() {
+            task.set_sub_action(record.relative_path.to_string_lossy().as_ref());
+            task.set_progress(index as u64, total);
             let path = minecraft_dir.join(&record.relative_path);
             relative_path(minecraft_dir, &path)?;
             if current.record(&record.relative_path) != previous.record(&record.relative_path) {
@@ -289,6 +298,7 @@ fn save_reconciled_manifest(
                 current.upsert(record);
             }
         }
+        task.set_progress(total, total);
         Ok(current.clone())
     })
 }
@@ -496,6 +506,7 @@ async fn resolve_queries(
     registry: &ProviderRegistry,
     queries: &[FingerprintQuery],
     manifest: &mut ContentManifest,
+    task: &impl InventoryProgress,
 ) -> Result<(), crate::net::NetError> {
     if queries.is_empty() {
         return Ok(());
@@ -503,8 +514,14 @@ async fn resolve_queries(
     let mut matches: HashMap<String, Vec<ProviderProject>> = HashMap::new();
     let mut checked = Vec::new();
     let mut last_error = None;
-    for provider in registry.providers() {
+    let total = (queries.len() * registry.providers().len()) as u64;
+    task.set_progress(0, total);
+    for (index, provider) in registry.providers().iter().enumerate() {
         let provider_id = provider.id();
+        task.set_sub_action(&format!(
+            "{} file(s) need matching ({provider_id})",
+            queries.len()
+        ));
         match tokio::time::timeout(
             std::time::Duration::from_secs(10),
             provider.resolve_files(queries),
@@ -533,6 +550,7 @@ async fn resolve_queries(
                 last_error = Some(format!("{provider_id} content matching timed out"));
             }
         }
+        task.set_progress(((index + 1) * queries.len()) as u64, total);
     }
     if checked.is_empty() {
         return Err(crate::net::NetError::TaskFailed(last_error.unwrap_or_else(

@@ -29,6 +29,9 @@ impl App {
         use ratatui::style::Style;
         use ratatui::widgets::Block;
 
+        if load_content {
+            self.sync_instance_content();
+        }
         let theme = THEME.as_ref();
         frame.render_widget(
             Block::default().style(Style::default().bg(theme.background())),

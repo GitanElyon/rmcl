@@ -28,6 +28,7 @@ impl App {
         let mut drawn_image_skips = Vec::new();
         let mut image_redraw_marker = false;
         while !self.exit {
+            self.sync_instance_content();
             let redraw_requested = crate::feedback::take_redraw_request();
             let edited_config_changed = self.drain_edited_configs();
             if let Some(params) = new_instance::take_result() {
@@ -83,10 +84,9 @@ impl App {
                 self.instances_state.modpack_updates.remove(&name);
                 widgets::instances::spawn_modpack_update_check(&instance);
                 self.modpack_update_popup = None;
-                self.reconciliation_for = None;
-                self.content_manifest = None;
-                self.content_update_snapshot = None;
+                self.forget_instance_content(&name);
             }
+            self.sync_instance_content();
             let mut local_streamed = false;
             let mut content_changed = false;
             let mut toggles = Vec::new();
@@ -159,6 +159,21 @@ impl App {
             self.ensure_content_reconciliation(content_changed);
             if local_streamed {
                 self.apply_cached_content_manifest();
+            }
+            if self.content_update_check_pending
+                && ![
+                    &self.mods_state,
+                    &self.resource_packs_state,
+                    &self.shaders_state,
+                    &self.world_datapacks_state,
+                ]
+                .iter()
+                .any(|state| state.is_scanning())
+            {
+                self.content_update_check_pending = false;
+                if crate::config::SETTINGS.read().general.check_content_updates {
+                    self.spawn_selected_content_update_check();
+                }
             }
             self.ensure_provider_conflict_popup();
             self.ensure_active_discovery_loaded();
@@ -289,7 +304,77 @@ impl App {
         !complete
     }
 
+    pub(super) fn sync_instance_content(&mut self) {
+        let key = self.instances_state.selected_instance().map(|instance| {
+            super::app::InstanceContentKey {
+                root: self.instance_manager.instances_dir.clone(),
+                name: instance.name.clone(),
+                created: instance.created,
+                game_version: instance.game_version.clone(),
+                loader: instance.loader,
+            }
+        });
+        if self.content_for == key {
+            return;
+        }
+        if let Some(previous) = self.content_for.take() {
+            let mut cached = super::app::CachedInstanceContent::default();
+            cached.swap(self);
+            self.cached_instance_content.insert(previous, cached);
+        }
+        self.cached_instance_content.retain(|cached, _| {
+            cached.root == self.instance_manager.instances_dir
+                && self.instances_state.instances.iter().any(|instance| {
+                    instance.name == cached.name
+                        && instance.created == cached.created
+                        && instance.game_version == cached.game_version
+                        && instance.loader == cached.loader
+                })
+        });
+        let cached = key
+            .as_ref()
+            .and_then(|key| self.cached_instance_content.remove(key));
+        if let Some(mut cached) = cached {
+            cached.swap(self);
+        } else if key.is_some() {
+            let client = crate::net::HttpClient::new();
+            for state in [
+                &mut self.mods_state,
+                &mut self.resource_packs_state,
+                &mut self.shaders_state,
+                &mut self.world_datapacks_state,
+            ] {
+                state.enable_provider_icons(self.instance_manager.meta_dir.clone(), client.clone());
+            }
+            let font_size = self.picker.font_size();
+            self.screenshots_state.font_size = (font_size.width, font_size.height);
+        }
+        self.content_for = key;
+        self.provider_conflict = None;
+        if let Some(instance) = self.instances_state.selected_instance() {
+            let minecraft = crate::storage::InstancePaths::new(
+                self.instance_manager.instances_dir.join(&instance.name),
+            )
+            .minecraft();
+            let empty = crate::instance::ContentManifest::default();
+            let manifest = self
+                .content_manifest
+                .as_ref()
+                .map_or(&empty, |(_, manifest)| manifest);
+            for discovery in [
+                &mut self.mods_discovery_state,
+                &mut self.resource_packs_discovery_state,
+                &mut self.shaders_discovery_state,
+                &mut self.datapacks_discovery_state,
+            ] {
+                discovery.refresh_installed_manifest(manifest, &minecraft);
+            }
+        }
+        self.apply_cached_content_manifest();
+    }
+
     fn ensure_content_reconciliation(&mut self, changed: bool) {
+        self.sync_instance_content();
         let Some(instance) = self.instances_state.selected_instance().cloned() else {
             self.reconciliation_for = None;
             self.content_manifest = None;
@@ -298,27 +383,6 @@ impl App {
         let instance_id = (instance.name.clone(), instance.created);
         if !changed && self.reconciliation_for.as_ref() == Some(&instance_id) {
             return;
-        }
-        let instance_changed = self.reconciliation_for.as_ref() != Some(&instance_id);
-        if instance_changed {
-            self.provider_conflict = None;
-            self.dismissed_provider_conflicts.clear();
-            self.content_manifest = None;
-            self.content_update_snapshot = None;
-            for discovery in [
-                &mut self.mods_discovery_state,
-                &mut self.resource_packs_discovery_state,
-                &mut self.shaders_discovery_state,
-                &mut self.datapacks_discovery_state,
-            ] {
-                discovery.refresh_installed_manifest(
-                    &crate::instance::ContentManifest::default(),
-                    &crate::storage::InstancePaths::new(
-                        self.instance_manager.instances_dir.join(&instance.name),
-                    )
-                    .minecraft(),
-                );
-            }
         }
         self.reconciliation_for = Some(instance_id);
         if changed {
@@ -436,13 +500,8 @@ impl App {
             cached.map(|snapshot| (result.instance_name.clone(), snapshot));
         self.content_manifest = Some((result.instance_name.clone(), result.manifest.clone()));
         self.apply_content_update_snapshot();
-        if stale && crate::config::SETTINGS.read().general.check_content_updates {
-            crate::instance::content::updates::spawn(
-                selected,
-                result.manifest,
-                paths.content_updates(),
-            );
-        }
+        self.content_update_check_pending =
+            stale && crate::config::SETTINGS.read().general.check_content_updates;
     }
 
     fn apply_cached_content_manifest(&mut self) {
@@ -491,11 +550,10 @@ impl App {
                     .rposition(|pending| {
                         pending.instance_name == selected.name
                             && pending.instance_created == selected.created
+                            && pending.snapshot.applies_to(selected)
                     })
                     .map(|index| pending.remove(index));
-                // every scan also writes its result to disk, so whatever is left
-                // here is recovered on the next reconciliation of that instance
-                pending.clear();
+                pending.retain(|pending| pending.instance_name != selected.name);
                 latest
             }
             Err(_) => return,
@@ -974,7 +1032,7 @@ impl App {
                             );
                         }
                         if outcome.content_updates_enabled {
-                            self.spawn_selected_content_update_check();
+                            self.queue_content_update_checks();
                         }
                         if outcome.restart_required {
                             error_buffer::push_error(error_buffer::ErrorEvent {
@@ -1181,28 +1239,19 @@ impl App {
     }
 
     pub(super) fn forget_instance_content(&mut self, instance_name: &str) {
-        for state in [
-            &mut self.mods_state,
-            &mut self.resource_packs_state,
-            &mut self.shaders_state,
-            &mut self.worlds_state,
-            &mut self.world_datapacks_state,
-        ] {
-            state.forget_instance(instance_name);
+        self.cached_instance_content
+            .retain(|key, _| key.name != instance_name);
+        if self
+            .content_for
+            .as_ref()
+            .is_some_and(|key| key.name != instance_name)
+        {
+            return;
         }
-        if self.logs_state.loaded_for.as_deref() == Some(instance_name) {
-            self.logs_state.loaded_for = None;
-        }
-        if self.screenshots_state.loaded_for.as_deref() == Some(instance_name) {
-            self.screenshots_state.loaded_for = None;
-        }
-        self.reconciliation_for = None;
-        self.content_manifest = None;
-        self.content_update_snapshot = None;
+        super::app::CachedInstanceContent::default().swap(self);
+        self.content_for = None;
         self.content_update_popup = None;
         self.provider_conflict = None;
-        self.dismissed_provider_conflicts.clear();
-        self.apply_content_update_snapshot();
     }
 
     fn drain_pending_last_played(&mut self) {

@@ -4,6 +4,178 @@
 use super::*;
 use crate::tui::tests::harness::UiHarness;
 
+#[test]
+fn instance_switches_keep_scans_empty_lists_selections_and_reconciliation_cached() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("Cached A");
+    ui.add_instance("Cached B");
+    ui.app.instances_state.list_state.selected = Some(0);
+    ui.app.sync_instance_content();
+    let instance = ui.app.instances_state.selected_instance().unwrap().clone();
+    let mods = crate::storage::InstancePaths::new(ui.instance_path(&instance.name))
+        .minecraft()
+        .join("mods");
+    let entry =
+        |name: &str| crate::instance::scan_one_mod(&mods.join(format!("{name}.jar")), name, true);
+    let stream = ui.app.mods_state.start_stream(&instance.name);
+    assert!(stream.send(entry("alpha")));
+    assert!(stream.send(entry("bravo")));
+    ui.app.mods_state.drain_pending();
+    ui.app.mods_state.list_state.selected = Some(1);
+    drop(ui.app.resource_packs_state.start_stream(&instance.name));
+    ui.app.resource_packs_state.drain_pending();
+    ui.app.reconciliation_for = Some((instance.name.clone(), instance.created));
+    ui.app.content_manifest = Some((
+        instance.name.clone(),
+        crate::instance::ContentManifest::default(),
+    ));
+    ui.app.content_update_snapshot = Some((
+        instance.name.clone(),
+        crate::instance::content::updates::UpdateSnapshot {
+            game_version: instance.game_version.clone(),
+            loader: instance.loader,
+            inventory: Vec::new(),
+            checked_at: 123,
+            updates: Vec::new(),
+            failures: Vec::new(),
+        },
+    ));
+    ui.app.content_update_check_pending = true;
+
+    ui.app.instances_state.list_state.selected = Some(1);
+    ui.draw();
+    assert!(ui.app.mods_state.entries.is_empty());
+    assert!(ui.app.content_manifest.is_none());
+    assert!(stream.send(entry("charlie")));
+    ui.app.instances_state.list_state.selected = Some(0);
+    ui.draw();
+    ui.app.ensure_content_reconciliation(false);
+
+    assert_eq!(ui.app.mods_state.entries.len(), 2);
+    assert_eq!(ui.app.mods_state.list_state.selected, Some(1));
+    assert!(ui.app.mods_state.drain_pending());
+    assert_eq!(ui.app.mods_state.entries.len(), 3);
+    assert_eq!(
+        ui.app.resource_packs_state.loaded_for.as_deref(),
+        Some("Cached A")
+    );
+    assert!(ui.app.resource_packs_state.entries.is_empty());
+    assert!(!ui.app.resource_packs_state.is_scanning());
+    assert!(!ui.app.resource_packs_state.loading);
+    assert_eq!(
+        ui.app
+            .content_update_snapshot
+            .as_ref()
+            .unwrap()
+            .1
+            .checked_at,
+        123
+    );
+    assert!(ui.app.content_update_check_pending);
+
+    ui.app.forget_instance_content("Cached B");
+    assert!(stream.send(entry("delta")));
+    assert!(ui.app.content_manifest.is_some());
+    ui.app.instances_state.list_state.selected = Some(1);
+    ui.app.sync_instance_content();
+    ui.app.forget_instance_content("Cached A");
+    assert!(!stream.send(entry("discarded")));
+    ui.app.instances_state.list_state.selected = Some(0);
+    ui.app.sync_instance_content();
+    assert!(ui.app.mods_state.entries.is_empty());
+    assert!(ui.app.mods_state.loaded_for.is_none());
+    assert!(ui.app.reconciliation_for.is_none());
+}
+
+#[test]
+fn content_cache_does_not_survive_a_recreated_instance_or_runtime_change() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("Changed");
+    ui.app.sync_instance_content();
+    for recreate in [true, false] {
+        let stream = ui.app.mods_state.start_stream("Changed");
+        if recreate {
+            ui.app.instances_state.instances[0].created += chrono::TimeDelta::seconds(1);
+        } else {
+            ui.app.instances_state.instances[0].game_version = "1.21.2".to_owned();
+        }
+        ui.app.sync_instance_content();
+        assert!(!stream.send(crate::instance::scan_one_mod(
+            std::path::Path::new("stale.jar"),
+            "stale",
+            true
+        )));
+        assert!(ui.app.mods_state.loaded_for.is_none());
+        assert!(ui.app.cached_instance_content.is_empty());
+    }
+}
+
+#[test]
+fn partial_update_snapshots_label_rows_immediately_and_keep_inactive_results() {
+    use crate::instance::content::updates::{
+        AvailableUpdate, PENDING_UPDATE_SNAPSHOTS, PendingUpdateSnapshot, UpdateSnapshot,
+    };
+    let mut ui = UiHarness::new();
+    for name in ["Streaming A", "Streaming B"] {
+        ui.add_instance(name);
+    }
+    ui.app.instances_state.list_state.selected = Some(0);
+    ui.app.sync_instance_content();
+    let installed = crate::instance::ProviderProject {
+        provider: "modrinth".to_owned(),
+        project_id: "project".to_owned(),
+        version_id: "old".to_owned(),
+    };
+    let mut entry =
+        crate::instance::scan_one_mod(std::path::Path::new("example.jar"), "example", true);
+    entry.provider_project = Some(installed.clone());
+    ui.app.mods_state.set_entries(vec![entry]);
+    let snapshot = UpdateSnapshot {
+        game_version: "1.21.1".to_owned(), loader: crate::instance::ModLoader::Fabric,
+        inventory: vec![installed.clone()], checked_at: 0,
+        updates: vec![AvailableUpdate {
+            installed, current: None, kind: crate::instance::ContentKind::Mod,
+            target: serde_json::from_value(serde_json::json!({
+                "id": "new", "name": "New", "version_number": "2", "game_versions": [], "loaders": [], "files": []
+            })).unwrap(),
+        }], failures: Vec::new(),
+    };
+    {
+        let mut pending = PENDING_UPDATE_SNAPSHOTS.lock().unwrap();
+        pending.clear();
+        for instance in &ui.app.instances_state.instances {
+            pending.push(PendingUpdateSnapshot {
+                instance_name: instance.name.clone(),
+                instance_created: instance.created,
+                snapshot: snapshot.clone(),
+            });
+        }
+    }
+    ui.app.drain_content_update_snapshots();
+    assert_eq!(
+        ui.app.mods_state.entries[0].title_suffix.as_deref(),
+        Some("Update")
+    );
+    assert_eq!(
+        ui.app
+            .content_update_snapshot
+            .as_ref()
+            .unwrap()
+            .1
+            .checked_at,
+        0
+    );
+    assert_eq!(PENDING_UPDATE_SNAPSHOTS.lock().unwrap().len(), 1);
+    ui.app.instances_state.list_state.selected = Some(1);
+    ui.app.sync_instance_content();
+    ui.app.drain_content_update_snapshots();
+    assert_eq!(
+        ui.app.content_update_snapshot.as_ref().unwrap().0,
+        "Streaming B"
+    );
+    assert!(PENDING_UPDATE_SNAPSHOTS.lock().unwrap().is_empty());
+}
+
 fn key_kind(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
     KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind)
 }

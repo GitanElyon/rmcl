@@ -137,5 +137,14 @@ fn legacy_164_arguments_resolve_session_and_virtual_assets() {
     );
     assert!(!args.contains("${"));
     assert!(args.contains("--session token:token:00000000000000000000000000000000"));
-    assert!(args.contains(&fixture.assets.join("virtual/legacy").display().to_string()));
+    assert!(
+        args.contains(
+            &fixture
+                .assets
+                .join("virtual")
+                .join("legacy")
+                .display()
+                .to_string()
+        )
+    );
 }

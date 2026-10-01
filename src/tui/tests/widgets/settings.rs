@@ -18,7 +18,10 @@ fn narrow_settings_shows_the_selected_pane() {
     );
     state.java_key = Some(java_path_key(
         "test-java",
-        &state.instances_dir.join("Test/minecraft"),
+        &state
+            .instances_dir
+            .join("Test")
+            .join(crate::storage::MINECRAFT_DIR_NAME),
         &environment,
     ));
     state.java_label = "jdk17".to_owned();

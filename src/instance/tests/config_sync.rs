@@ -1258,7 +1258,7 @@ fn dangling_payload_links_remain_internal_but_non_payload_referents_stay_anchore
     );
     assert_eq!(
         std::fs::read_link(replay.join("optionsexternal.txt")).unwrap(),
-        source.join("custom.txt")
+        source.canonicalize().unwrap().join("custom.txt")
     );
     assert_eq!(
         std::fs::read(replay.join("optionsdirectory.txt")).unwrap(),

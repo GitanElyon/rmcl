@@ -186,7 +186,7 @@ fn recording_java(temp: &Path) -> String {
         "installer java.sh"
     });
     #[cfg(windows)]
-    std::fs::write(&path, "@echo off\r\n(echo %~1\r\necho %~2\r\necho %~3\r\necho %~4\r\n)>installer-args.txt\r\necho %CD%>installer-cwd.txt\r\n(echo %INSTALLER_CONTEXT%\r\necho %INSTALLER_GLOBAL%\r\n)>installer-env.txt\r\n").unwrap();
+    std::fs::write(&path, "@echo off\r\n(echo %~1\r\necho %~2\r\necho %~3\r\necho(%~4\r\n)>installer-args.txt\r\necho %CD%>installer-cwd.txt\r\n(echo %INSTALLER_CONTEXT%\r\necho %INSTALLER_GLOBAL%\r\n)>installer-env.txt\r\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -249,7 +249,10 @@ async fn installers_use_merged_environment_and_minecraft_cwd(#[case] neoforge: b
     if neoforge {
         assert_eq!(args[3], minecraft.to_string_lossy());
     } else {
-        assert!(args[3..].iter().all(|arg| arg.trim().is_empty()));
+        assert!(
+            args[3..].iter().all(|arg| arg.trim().is_empty()),
+            "{args:?}"
+        );
     }
     let cwd = std::fs::read_to_string(minecraft.join("installer-cwd.txt")).unwrap();
     assert_eq!(

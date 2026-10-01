@@ -3,6 +3,7 @@
 
 use clap::ArgMatches;
 
+use super::utils::required_arg;
 use crate::instance::InstanceManager;
 use crate::instance::import::{ImportInput, parse_import_input};
 use crate::net::modrinth;
@@ -10,7 +11,7 @@ use crate::net::modrinth;
 type CliResult = Result<(), Box<dyn std::error::Error>>;
 
 pub async fn handle_import(matches: &ArgMatches) -> CliResult {
-    let input = matches.get_one::<String>("source").unwrap();
+    let input = required_arg(matches, "source")?;
     let override_name = matches.get_one::<String>("name");
     let override_version = matches.get_one::<String>("version");
 

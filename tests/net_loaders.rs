@@ -7,12 +7,14 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use rmcl::net::HttpClient;
 use rmcl::net::fabric::{
-    fetch_fabric_game_versions_from, fetch_fabric_profile_from, fetch_fabric_versions_from,
+    FabricLibrary, FabricProfile, download_fabric_libraries, fetch_fabric_game_versions_from,
+    fetch_fabric_profile_from, fetch_fabric_versions_from,
 };
 use rmcl::net::forge::{fetch_forge_game_versions_from, fetch_forge_versions_from};
 use rmcl::net::neoforge::{fetch_neoforge_game_versions_from, fetch_neoforge_versions_from};
 use rmcl::net::quilt::{
-    fetch_quilt_game_versions_from, fetch_quilt_profile_from, fetch_quilt_versions_from,
+    QuiltLibrary, QuiltProfile, download_quilt_libraries, fetch_quilt_game_versions_from,
+    fetch_quilt_profile_from, fetch_quilt_versions_from,
 };
 
 #[tokio::test]
@@ -194,6 +196,59 @@ async fn quilt_fetch_profile_parses_libraries() {
         profile.libraries[0].url,
         "https://maven.quiltmc.org/repository/release/"
     );
+}
+
+#[tokio::test]
+async fn fabric_and_quilt_download_libraries_into_the_shared_cache() {
+    let server = MockServer::start().await;
+    let temp = tempfile::tempdir().unwrap();
+    for (name, content) in [("fabric", "fabric jar"), ("quilt", "quilt jar")] {
+        Mock::given(method("GET"))
+            .and(path(format!("/example/{name}/1.0/{name}-1.0.jar")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(content))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let fabric = FabricProfile {
+        id: "fabric".into(),
+        main_class: String::new(),
+        libraries: vec![FabricLibrary {
+            name: "example:fabric:1.0".into(),
+            url: server.uri(),
+        }],
+    };
+    let quilt = QuiltProfile {
+        id: "quilt".into(),
+        main_class: String::new(),
+        libraries: vec![QuiltLibrary {
+            name: "example:quilt:1.0".into(),
+            url: server.uri(),
+        }],
+    };
+
+    let client = HttpClient::new();
+    download_fabric_libraries(&client, &fabric, temp.path())
+        .await
+        .unwrap();
+    download_quilt_libraries(&client, &quilt, temp.path())
+        .await
+        .unwrap();
+    download_fabric_libraries(&client, &fabric, temp.path())
+        .await
+        .unwrap();
+    for (name, content) in [("fabric", "fabric jar"), ("quilt", "quilt jar")] {
+        assert_eq!(
+            std::fs::read(
+                rmcl::storage::MetadataPaths::new(temp.path())
+                    .libraries()
+                    .join(format!("example/{name}/1.0/{name}-1.0.jar"))
+            )
+            .unwrap(),
+            content.as_bytes()
+        );
+    }
 }
 
 #[tokio::test]

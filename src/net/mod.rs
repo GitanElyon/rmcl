@@ -257,6 +257,31 @@ pub async fn download_file(
     result
 }
 
+pub(crate) async fn download_loader_libraries<'a>(
+    client: &HttpClient,
+    libraries: impl IntoIterator<Item = (&'a str, &'a str)>,
+    meta_dir: &Path,
+    loader: &str,
+) -> Result<(), NetError> {
+    let libraries_dir = crate::storage::MetadataPaths::new(meta_dir).libraries();
+    for (name, url) in libraries {
+        let maven_path = crate::instance::loader::maven::maven_coord_to_path(name)
+            .ok_or_else(|| NetError::Parse(format!("Invalid Maven coordinate: {name}")))?;
+        let dest = libraries_dir.join(&maven_path);
+        if dest.exists() {
+            tracing::debug!("{loader} library already exists: {name}");
+            continue;
+        }
+
+        let download_url = format!("{}/{}", url.trim_end_matches('/'), maven_path);
+        crate::feedback::progress::set_sub_action(name);
+        tracing::info!("Downloading {loader} library: {name}");
+        tracing::trace!("{loader} library destination: {}", dest.display());
+        download_file(client, &download_url, &dest, |_, _| {}).await?;
+    }
+    Ok(())
+}
+
 async fn download_file_once(
     client: &HttpClient,
     url: &str,

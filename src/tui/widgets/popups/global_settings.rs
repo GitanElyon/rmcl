@@ -193,26 +193,26 @@ impl State {
             state.editing = Some(settings_text_area(editor.lines().to_vec()));
         };
         match self.selected {
-            3 | 4 if normalize_memory_value(value).is_none() => invalid(
-                self,
-                "Use a positive memory value ending in K, M, or G.".to_owned(),
-            ),
-            3 => {
-                let value = normalize_memory_value(value).unwrap();
-                self.config.defaults.memory_min = value.clone();
-                if memory_kib(&value) > memory_kib(&self.config.defaults.memory_max) {
-                    self.config.defaults.memory_max = value;
+            3 | 4 => match normalize_memory_value(value) {
+                Some(value) => {
+                    if self.selected == 3 {
+                        self.config.defaults.memory_min = value.clone();
+                        if memory_kib(&value) > memory_kib(&self.config.defaults.memory_max) {
+                            self.config.defaults.memory_max = value;
+                        }
+                    } else {
+                        self.config.defaults.memory_max = value.clone();
+                        if memory_kib(&value) < memory_kib(&self.config.defaults.memory_min) {
+                            self.config.defaults.memory_min = value;
+                        }
+                    }
+                    self.save_pending = true;
                 }
-                self.save_pending = true;
-            }
-            4 => {
-                let value = normalize_memory_value(value).unwrap();
-                self.config.defaults.memory_max = value.clone();
-                if memory_kib(&value) < memory_kib(&self.config.defaults.memory_min) {
-                    self.config.defaults.memory_min = value;
-                }
-                self.save_pending = true;
-            }
+                None => invalid(
+                    self,
+                    "Use a positive memory value ending in K, M, or G.".to_owned(),
+                ),
+            },
             5 => {
                 self.config.paths.java_path = (!value.is_empty()).then(|| value.to_owned());
                 self.save_pending = true;

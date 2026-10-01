@@ -353,9 +353,9 @@ fn backup_user_data(
         },
     )?;
     if config_file.exists() {
-        let destination = partial.join("config").join("config.toml");
-        fs::create_dir_all(destination.parent().unwrap())?;
-        let bytes = fs::copy(config_file, destination)?;
+        let config_backup = partial.join("config");
+        fs::create_dir_all(&config_backup)?;
+        let bytes = fs::copy(config_file, config_backup.join("config.toml"))?;
         copied = copied.saturating_add(bytes);
         report(copied, total, config_file);
     }

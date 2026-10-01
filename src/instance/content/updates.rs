@@ -250,10 +250,7 @@ pub(super) async fn scan_with_registry(
         return snapshot;
     }
     let total = projects.len() as u64;
-    let progress = crate::feedback::progress::ProgressTask::start(format!(
-        "Checking content updates for {}",
-        instance.name
-    ));
+    let progress = crate::feedback::progress::ProgressTask::start("Checking content updates");
     progress.set_progress(0, total);
     let mut completed = 0;
     let mut projects = projects.into_iter();

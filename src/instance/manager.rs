@@ -315,10 +315,7 @@ impl InstanceManager {
             &minecraft_dir,
             &environment,
         );
-        let task = crate::feedback::progress::ProgressTask::start(format!(
-            "Rebuilding runtime for '{}'",
-            config.name
-        ));
+        let task = crate::feedback::progress::ProgressTask::start("Rebuilding runtime");
         task.set_sub_action(format!("Minecraft {}", config.game_version));
         let metadata_paths = crate::storage::MetadataPaths::new(&self.meta_dir);
         for directory in [

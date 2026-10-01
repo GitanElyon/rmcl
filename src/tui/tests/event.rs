@@ -665,6 +665,8 @@ fn gui_editor_saves_reload_after_handoff_and_atomic_replacement_only_when_bytes_
 #[cfg(unix)]
 #[test]
 fn launcher_config_save_process() {
+    use std::os::unix::fs::PermissionsExt;
+
     if std::env::var_os("RMCL_EDITOR_CONFIG_TEST").is_none() {
         return;
     }
@@ -678,14 +680,70 @@ fn launcher_config_save_process() {
     assert!(!ui.app.drain_edited_configs());
 
     let mut config = crate::config::SETTINGS.read().clone();
+    ui.add_instance("Inherited Java");
+    std::fs::create_dir_all(ui.instance_path("Inherited Java").join("minecraft")).unwrap();
+    let java = ui
+        .app
+        .instance_manager
+        .instances_dir
+        .parent()
+        .unwrap()
+        .join("selected-java");
+    std::fs::write(
+        &java,
+        b"#!/bin/sh\nprintf 'java.version = %s\\n' \"$RMCL_TEST_JAVA_VERSION\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o755)).unwrap();
+    config.paths.java_path = Some(java.to_string_lossy().into_owned());
+    config
+        .defaults
+        .environment
+        .insert("RMCL_TEST_JAVA_VERSION".to_owned(), "21".to_owned());
+    config.defaults.memory_max = "6G".to_owned();
+    crate::config::SETTINGS
+        .save_launcher_settings(config.clone())
+        .unwrap();
+    ui.app.settings_state.pane = widgets::settings::SettingsPane::Info;
+    fn wait_for_java(ui: &mut UiHarness, java: &str, memory: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            ui.draw();
+            let screen = ui.screen();
+            if screen.contains(java) {
+                assert!(screen.contains(memory), "{screen}");
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "{screen}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    wait_for_java(&mut ui, "jdk21", "6G");
+    wait_for_edited_config(&mut ui, true);
+
     config.ui.error_auto_dismiss_ms += 1;
     let timeout = config.ui.error_auto_dismiss_ms;
+    config
+        .defaults
+        .environment
+        .insert("RMCL_TEST_JAVA_VERSION".to_owned(), "25".to_owned());
+    config.defaults.memory_max = "10G".to_owned();
     std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
     wait_for_edited_config(&mut ui, true);
     assert_eq!(
         crate::config::SETTINGS.read().ui.error_auto_dismiss_ms,
         timeout
     );
+    wait_for_java(&mut ui, "jdk25", "10G");
+
+    let other_java = java.with_file_name("other-java");
+    std::fs::write(&other_java, b"#!/bin/sh\nprintf 'java.version = 17\\n'\n").unwrap();
+    std::fs::set_permissions(&other_java, std::fs::Permissions::from_mode(0o755)).unwrap();
+    config.paths.java_path = Some(other_java.to_string_lossy().into_owned());
+    crate::config::SETTINGS
+        .save_launcher_settings(config)
+        .unwrap();
+    wait_for_java(&mut ui, "jdk17", "10G");
 
     theme.theme = "dracula".to_owned();
     theme.border_style = crate::config::theme::BorderStyle::Thick;

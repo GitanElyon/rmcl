@@ -145,7 +145,7 @@ async fn reconcile(job: ReconcileJob, task: &ProgressTask) -> ReconcileResult {
     } = job;
     let instance_name = instance.name;
     let instance_created = instance.created;
-    task.set_action(format!("Checking content for {instance_name}"));
+    task.set_action("Checking content");
     task.set_sub_action("Reading saved content index");
     task.set_progress(0, 1);
     let paths = InstancePaths::new(instances_dir.join(&instance_name));
@@ -178,7 +178,7 @@ async fn reconcile(job: ReconcileJob, task: &ProgressTask) -> ReconcileResult {
                 Ok(())
             } else {
                 let registry = ProviderRegistry::configured(client);
-                task.set_action(format!("Identifying content for {instance_name}"));
+                task.set_action("Identifying content");
                 resolve_queries(
                     &registry,
                     &inventory.queries,
@@ -187,7 +187,7 @@ async fn reconcile(job: ReconcileJob, task: &ProgressTask) -> ReconcileResult {
                 )
                 .await
             };
-            task.set_action(format!("Saving content index for {instance_name}"));
+            task.set_action("Saving content index");
             task.set_sub_action("Validating content files");
             task.set_progress(0, inventory.manifest.files.len() as u64);
             let save_progress = task.handle();

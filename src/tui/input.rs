@@ -339,6 +339,7 @@ impl App {
                             match crate::storage::clear_disposable_caches(&meta_dir) {
                                 Ok(()) => {
                                     self.reset_discovery_states();
+                                    self.settings_state.invalidate_java_cache(None);
                                     if let Some(state) = self.global_settings.as_mut() {
                                         state.invalidate_java_cache();
                                     }
@@ -1303,8 +1304,7 @@ impl App {
                 widgets::popups::modpack_update::Action::Reinstall => "reinstall",
             };
             let progress = crate::feedback::progress::ProgressTask::start(format!(
-                "Preparing modpack {action} for {}",
-                instance.name
+                "Preparing modpack {action}"
             ));
             let manager = crate::instance::InstanceManager::new(instances_dir, meta_dir);
             let result =

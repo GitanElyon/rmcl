@@ -793,7 +793,7 @@ impl App {
         let pending_instances = PENDING_INSTANCES.clone();
 
         tokio::spawn(async move {
-            progress::set_action(format!("Creating instance '{}'...", params.name));
+            progress::set_action("Creating instance...");
             progress::set_sub_action(format!("{} {}", params.game_version, params.loader));
 
             let manager = InstanceManager::new(instances_dir, meta_dir);
@@ -836,7 +836,7 @@ impl App {
         let completed_updates = COMPLETED_INSTANCE_SETTINGS_UPDATES.clone();
 
         tokio::spawn(async move {
-            progress::set_action(format!("Updating instance '{}'...", updated.name));
+            progress::set_action("Updating instance...");
             progress::set_sub_action(format!("{} {}", updated.game_version, updated.loader));
             let manager = InstanceManager::new(&instances_dir, &meta_dir);
             updated = match apply_instance_settings_update(&manager, &previous, updated).await {
@@ -1239,6 +1239,8 @@ impl App {
     }
 
     pub(super) fn forget_instance_content(&mut self, instance_name: &str) {
+        self.settings_state
+            .invalidate_java_cache(Some(instance_name));
         self.cached_instance_content
             .retain(|key, _| key.name != instance_name);
         if self

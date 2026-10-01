@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -47,9 +51,14 @@ pub struct SettingsState {
     instances_dir: PathBuf,
     active_profile: Option<String>,
     instance_name: Option<String>,
-    java_key: Option<String>,
     java_label: String,
-    pending_java: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    java_cache: HashMap<String, CachedJavaLabel>,
+}
+
+#[derive(Default)]
+struct CachedJavaLabel {
+    key: Option<(chrono::DateTime<chrono::Utc>, String)>,
+    result: Arc<Mutex<Option<String>>>,
 }
 
 impl SettingsState {
@@ -67,9 +76,8 @@ impl SettingsState {
             instances_dir,
             active_profile: None,
             instance_name: None,
-            java_key: None,
             java_label: "unknown".to_string(),
-            pending_java: Default::default(),
+            java_cache: HashMap::new(),
         };
         state.select_active();
         state
@@ -108,6 +116,14 @@ impl SettingsState {
         self.list_state.selected = Some(self.list_state.selected.unwrap_or(0).min(last));
     }
 
+    pub fn invalidate_java_cache(&mut self, instance_name: Option<&str>) {
+        if let Some(name) = instance_name {
+            self.java_cache.remove(name);
+        } else {
+            self.java_cache.clear();
+        }
+    }
+
     fn update_for_instance(&mut self, instance: Option<&InstanceConfig>) {
         let instance_name = instance.map(|inst| inst.name.clone());
         let active_profile = instance.and_then(|inst| inst.config_sync_profile.clone());
@@ -120,7 +136,7 @@ impl SettingsState {
             self.select_active();
         }
 
-        let context = instance.map(|instance| {
+        self.java_label = if let Some(instance) = instance {
             let settings = SETTINGS.read();
             let cwd = self
                 .instances_dir
@@ -139,16 +155,12 @@ impl SettingsState {
                 &cwd,
                 &environment,
             );
-            (java, cwd, environment)
-        });
-        let java_key = context
-            .as_ref()
-            .map(|(java, cwd, environment)| java_path_key(java, cwd, environment));
-        if self.java_key != java_key {
-            self.pending_java = Default::default();
-            self.java_label = "unknown".to_owned();
-            if let Some((java, cwd, environment)) = context {
-                let pending = self.pending_java.clone();
+            let key = (instance.created, java_path_key(&java, &cwd, &environment));
+            let cached = self.java_cache.entry(instance.name.clone()).or_default();
+            if cached.key.as_ref() != Some(&key) {
+                cached.key = Some(key);
+                cached.result = Default::default();
+                let pending = cached.result.clone();
                 std::thread::spawn(move || {
                     let label = java_version_label(&java, &cwd, &environment);
                     *pending
@@ -157,16 +169,15 @@ impl SettingsState {
                     crate::feedback::request_redraw();
                 });
             }
-            self.java_key = java_key;
-        }
-        if let Some(label) = self
-            .pending_java
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            self.java_label = label;
-        }
+            cached
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned())
+        } else {
+            "unknown".to_owned()
+        };
     }
 }
 
@@ -184,9 +195,19 @@ fn java_path_key(
     cwd: &Path,
     environment: &std::collections::BTreeMap<String, String>,
 ) -> String {
+    let path = cwd.join(java);
+    let metadata = std::fs::metadata(&path).ok().map(|metadata| {
+        (
+            metadata.len(),
+            metadata.modified().ok(),
+            metadata.created().ok(),
+            metadata.permissions(),
+        )
+    });
     format!(
-        "{java}:{}",
-        crate::instance::java::probe_context_key(cwd, environment)
+        "{java}:{}:{:?}:{metadata:?}",
+        crate::instance::java::probe_context_key(cwd, environment),
+        std::fs::canonicalize(path).ok(),
     )
 }
 

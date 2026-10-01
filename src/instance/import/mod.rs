@@ -178,7 +178,7 @@ pub async fn execute_import(
     );
     let name = unique_instance_name(&summary.name, &manager.instances_dir)
         .inspect_err(|_| crate::feedback::progress::clear())?;
-    crate::feedback::progress::set_action(format!("Importing '{name}'..."));
+    crate::feedback::progress::set_action("Importing instance...");
     crate::feedback::progress::set_sub_action(format!(
         "{} {}",
         summary.game_version, summary.loader

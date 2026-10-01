@@ -556,6 +556,8 @@ fn update_checks_prioritize_list_rows_and_publish_before_the_rest_finish() {
             let overview = terminal.backend().to_string();
             assert!(overview.contains("8%"));
             assert!(overview.contains("1/12 item(s) checked"));
+            assert!(overview.contains("Checking content updates"));
+            assert!(!overview.contains(&instance().name));
             for pause in pauses.values() {
                 pause.add_permits(1);
             }

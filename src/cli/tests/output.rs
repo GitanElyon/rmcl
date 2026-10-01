@@ -44,3 +44,19 @@ fn formats_datetime_consistently() {
     let dt = Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
     assert_eq!(format_datetime(&dt), "2024-01-02 03:04:05 UTC");
 }
+
+#[test]
+fn table_padding_uses_cells_for_wide_and_combining_names() {
+    let table = render_table(
+        &["Name", "State"],
+        &[
+            vec!["界界界".to_owned(), "first".to_owned()],
+            vec!["e\u{301}".to_owned(), "second".to_owned()],
+        ],
+    );
+    let rows = table.lines().skip(2).collect::<Vec<_>>();
+    for row in rows {
+        let start = row.find(['f', 's']).unwrap();
+        assert_eq!(ratatui::text::Span::raw(&row[..start]).width(), 8);
+    }
+}

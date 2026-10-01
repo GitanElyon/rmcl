@@ -44,26 +44,40 @@ async fn show_log(matches: &ArgMatches) -> CliResult {
     require_instance(&instances_dir, instance)?;
     let path = resolve_log_path(&instances_dir, instance, file)?;
 
-    let lines = crate::instance::logs::files::read_log_file(&path);
-    for line in &lines {
-        println!("{}", line);
-    }
-
-    // ghetto tail -f: re-read the whole file and print new lines.
-    // not efficient, but log files are small and this is simple.
     if follow {
-        let mut last_len = lines.len();
-        loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let new_lines = crate::instance::logs::files::read_log_file(&path);
-            for line in new_lines.iter().skip(last_len) {
-                println!("{}", line);
-            }
-            last_len = new_lines.len();
+        use std::io::Write;
+        if path.extension().is_some_and(|extension| extension == "gz") {
+            return Err(io::Error::other("Cannot follow a compressed log").into());
         }
+        let mut offset = 0;
+        loop {
+            {
+                let bytes = read_new_log_bytes(&path, &mut offset)?;
+                let mut output = io::stdout().lock();
+                output.write_all(&bytes)?;
+                output.flush()?;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    for line in crate::instance::logs::files::read_log_file(&path) {
+        println!("{line}");
     }
 
     Ok(())
+}
+
+fn read_new_log_bytes(path: &Path, offset: &mut u64) -> io::Result<Vec<u8>> {
+    use std::io::{Read, Seek};
+    let mut file = std::fs::File::open(path)?;
+    if file.metadata()?.len() < *offset {
+        *offset = 0;
+    }
+    file.seek(io::SeekFrom::Start(*offset))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    *offset += bytes.len() as u64;
+    Ok(bytes)
 }
 
 pub(crate) fn resolve_log_path(

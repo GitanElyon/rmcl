@@ -1,6 +1,29 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
+#[test]
+fn following_log_bytes_keeps_partial_lines_and_handles_truncation() {
+    use super::read_new_log_bytes;
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("latest.log");
+    std::fs::write(&path, b"abc").unwrap();
+    let mut offset = 0;
+    assert_eq!(read_new_log_bytes(&path, &mut offset).unwrap(), b"abc");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(b"def\nnext\n").unwrap();
+    assert_eq!(
+        read_new_log_bytes(&path, &mut offset).unwrap(),
+        b"def\nnext\n"
+    );
+    assert!(read_new_log_bytes(&path, &mut offset).unwrap().is_empty());
+    std::fs::write(&path, b"new\n").unwrap();
+    assert_eq!(read_new_log_bytes(&path, &mut offset).unwrap(), b"new\n");
+}
+
 use super::resolve_log_path;
 
 #[test]

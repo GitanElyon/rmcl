@@ -50,29 +50,12 @@ async fn fetch_supported_versions(
     client: &HttpClient,
     loader: ModLoader,
 ) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
-    let versions: HashSet<String> = match loader {
-        ModLoader::Vanilla => HashSet::new(),
-        ModLoader::Fabric => crate::net::fabric::fetch_fabric_game_versions(client)
-            .await?
-            .into_iter()
-            .map(|version| version.id)
-            .collect::<HashSet<_>>(),
-        ModLoader::Forge => crate::net::forge::fetch_forge_game_versions(client)
-            .await?
-            .into_iter()
-            .map(|version| version.id)
-            .collect::<HashSet<_>>(),
-        ModLoader::NeoForge => crate::net::neoforge::fetch_neoforge_game_versions(client)
-            .await?
-            .into_iter()
-            .map(|version| version.id)
-            .collect::<HashSet<_>>(),
-        ModLoader::Quilt => crate::net::quilt::fetch_quilt_game_versions(client)
-            .await?
-            .into_iter()
-            .map(|version| version.id)
-            .collect::<HashSet<_>>(),
-    };
+    let versions = crate::instance::loader::get_installer(loader)
+        .get_game_versions(client)
+        .await?
+        .into_iter()
+        .map(|version| version.id)
+        .collect();
 
     Ok(versions)
 }

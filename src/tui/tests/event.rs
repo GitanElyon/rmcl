@@ -4,6 +4,555 @@
 use super::*;
 use crate::tui::tests::harness::UiHarness;
 
+fn key_kind(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
+    KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind)
+}
+
+#[test]
+fn dispatch_repeats_navigation_but_not_launch_delete_or_confirmation() {
+    let mut ui = UiHarness::new();
+    for name in ["First", "Second", "Third"] {
+        ui.add_instance(name);
+    }
+    ui.app.instances_state.list_state.selected = Some(0);
+    ui.draw();
+
+    assert!(ui.key_event(key_kind(KeyCode::Down, KeyEventKind::Press)));
+    assert_eq!(ui.app.instances_state.list_state.selected, Some(1));
+    assert!(ui.key_event(key_kind(KeyCode::Down, KeyEventKind::Repeat)));
+    assert_eq!(ui.app.instances_state.list_state.selected, Some(2));
+    assert!(!ui.key_event(key_kind(KeyCode::Up, KeyEventKind::Release)));
+    assert_eq!(ui.app.instances_state.list_state.selected, Some(2));
+
+    for code in [
+        KeyCode::Char('l'),
+        KeyCode::Char('d'),
+        KeyCode::Char('u'),
+        KeyCode::Enter,
+    ] {
+        assert!(!ui.key_event(key_kind(code, KeyEventKind::Repeat)));
+    }
+    assert_eq!(ui.app.focused, FocusedArea::Instances);
+    assert!(crate::instance::runtime::get("Third").is_none());
+    assert!(widgets::popups::confirm::pending_target().is_none());
+
+    ui.key(KeyCode::Char('d'));
+    assert_eq!(ui.app.focused, FocusedArea::ConfirmDelete);
+    // A search behind the confirmation cannot turn its 'y' into repeatable text.
+    ui.app.instances_state.search.active = true;
+    for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+        for code in [KeyCode::Enter, KeyCode::Char('y'), KeyCode::Char('n')] {
+            assert!(!ui.key_event(key_kind(code, kind)));
+        }
+    }
+    assert!(ui.instance_path("Third").exists());
+    assert_eq!(ui.app.focused, FocusedArea::ConfirmDelete);
+    ui.app.instances_state.search.active = false;
+    ui.key(KeyCode::Char('y'));
+    assert!(!ui.instance_path("Third").exists());
+    assert!(!ui.key_event(key_kind(KeyCode::Char('y'), KeyEventKind::Repeat)));
+    assert_eq!(ui.app.instances_state.instances.len(), 2);
+}
+
+#[test]
+fn dispatch_repeats_text_and_backspace_in_search_rename_account_and_profile_inputs() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("Text Fields");
+
+    ui.app.instances_state.search.activate();
+    ui.key_event(key_kind(KeyCode::Char('d'), KeyEventKind::Press));
+    ui.key_event(key_kind(KeyCode::Char('d'), KeyEventKind::Repeat));
+    assert!(!ui.key_event(key_kind(KeyCode::Char('d'), KeyEventKind::Release)));
+    assert_eq!(ui.app.instances_state.search.query, "dd");
+    assert!(ui.key_event(key_kind(KeyCode::Backspace, KeyEventKind::Repeat)));
+    assert_eq!(ui.app.instances_state.search.query, "d");
+    assert!(!ui.key_event(key_kind(KeyCode::Enter, KeyEventKind::Repeat)));
+    assert!(ui.app.instances_state.search.active);
+    ui.app.instances_state.search.deactivate();
+
+    ui.app.instances_state.renaming = Some(String::new());
+    assert!(ui.key_event(key_kind(KeyCode::Char('l'), KeyEventKind::Repeat)));
+    assert_eq!(ui.app.instances_state.renaming.as_deref(), Some("l"));
+    assert!(!ui.key_event(key_kind(KeyCode::Enter, KeyEventKind::Repeat)));
+    assert!(ui.instance_path("Text Fields").exists());
+    ui.app.instances_state.renaming = None;
+
+    ui.app.focused = FocusedArea::Account;
+    ui.app.account_state.add_mode = widgets::account::AddMode::OfflineNameInput(String::new());
+    assert!(ui.key_event(key_kind(KeyCode::Char('d'), KeyEventKind::Repeat)));
+    assert!(
+        matches!(&ui.app.account_state.add_mode, widgets::account::AddMode::OfflineNameInput(name) if name == "d")
+    );
+    assert!(!ui.key_event(key_kind(KeyCode::Enter, KeyEventKind::Repeat)));
+    assert_eq!(ui.app.focused, FocusedArea::Account);
+
+    ui.app.focused = FocusedArea::Settings;
+    ui.app.settings_state.add_mode = widgets::settings::AddMode::ProfileName(String::new());
+    assert!(ui.key_event(key_kind(KeyCode::Char('q'), KeyEventKind::Repeat)));
+    assert!(
+        matches!(&ui.app.settings_state.add_mode, widgets::settings::AddMode::ProfileName(name) if name == "q")
+    );
+    assert!(!ui.key_event(key_kind(KeyCode::Enter, KeyEventKind::Repeat)));
+    assert!(!ui.app.exit);
+}
+
+#[test]
+fn dispatch_does_not_repeat_content_toggles_or_install_confirmation() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("One Shot Content");
+    let path = ui
+        .instance_path("One Shot Content")
+        .join(crate::storage::MINECRAFT_DIR_NAME)
+        .join("mods/test.jar");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"mod").unwrap();
+    ui.app.focused = FocusedArea::Content;
+    ui.app
+        .mods_state
+        .set_entries(vec![crate::instance::content::entry::ContentEntry {
+            file_stem: "test".to_owned(),
+            name: "Test Mod".to_owned(),
+            source_slug: None,
+            installed_path: None,
+            provider_project: None,
+            world_details: None,
+            title_suffix: None,
+            footer_label: None,
+            footer_change: None,
+            description: String::new(),
+            enabled: true,
+            icon_bytes: None,
+            provider_icon: false,
+            provider_description: false,
+            path: path.clone(),
+            icon_lines: None,
+        }]);
+    ui.app.mods_state.list_state.selected = Some(0);
+    assert!(!ui.key_event(key_kind(KeyCode::Enter, KeyEventKind::Repeat)));
+    assert!(path.exists());
+    ui.key(KeyCode::Enter);
+    assert!(!path.exists());
+    assert!(path.with_extension("jar.disabled").exists());
+    assert!(!ui.key_event(key_kind(KeyCode::Enter, KeyEventKind::Repeat)));
+    assert!(!path.exists());
+
+    ui.app
+        .mods_discovery_state
+        .begin_managed_modpack_versions(
+            "Install",
+            crate::instance::ProviderProject {
+                provider: "modrinth".to_owned(),
+                project_id: "test".to_owned(),
+                version_id: "installed".to_owned(),
+            },
+        )
+        .unwrap();
+    let popup = ui.app.mods_discovery_state.version_popup.as_mut().unwrap();
+    popup.loading = false;
+    popup.confirming = true;
+    ui.app.mods_discovery_state.search.activate();
+    for code in [KeyCode::Enter, KeyCode::Char('s'), KeyCode::Tab] {
+        assert!(!ui.key_event(key_kind(code, KeyEventKind::Repeat)));
+    }
+    let popup = ui.app.mods_discovery_state.version_popup.as_ref().unwrap();
+    assert!(!popup.installing);
+    assert!(!popup.skip_dependencies);
+
+    let popup = ui.app.mods_discovery_state.version_popup.as_mut().unwrap();
+    popup.confirming = false;
+    popup.selecting_world = true;
+    popup.worlds.search.activate();
+    assert!(ui.key_event(key_kind(KeyCode::Char('d'), KeyEventKind::Repeat)));
+    assert_eq!(
+        ui.app
+            .mods_discovery_state
+            .version_popup
+            .as_ref()
+            .unwrap()
+            .worlds
+            .search
+            .query,
+        "d"
+    );
+    assert!(!ui.key_event(key_kind(KeyCode::Enter, KeyEventKind::Repeat)));
+}
+
+#[test]
+fn dispatch_repeats_only_the_visible_content_search() {
+    use widgets::content::{ContentMode, ContentTab};
+
+    let mut ui = UiHarness::new();
+    ui.app.focused = FocusedArea::Content;
+    for tab in [
+        ContentTab::Mods,
+        ContentTab::ResourcePacks,
+        ContentTab::Shaders,
+        ContentTab::Worlds,
+        ContentTab::Screenshots,
+        ContentTab::Logs,
+    ] {
+        ui.app.content_tab = tab;
+        ui.key(KeyCode::Char('/'));
+        assert!(
+            ui.key_event(key_kind(KeyCode::Char('d'), KeyEventKind::Repeat)),
+            "{tab:?}"
+        );
+        let query = match tab {
+            ContentTab::Mods => &ui.app.mods_state.search.query,
+            ContentTab::ResourcePacks => &ui.app.resource_packs_state.search.query,
+            ContentTab::Shaders => &ui.app.shaders_state.search.query,
+            ContentTab::Worlds => &ui.app.worlds_state.search.query,
+            ContentTab::Screenshots => &ui.app.screenshots_state.search.query,
+            ContentTab::Logs => &ui.app.logs_state.search.query,
+            _ => unreachable!(),
+        };
+        assert_eq!(query, "d");
+        assert!(!ui.key_event(key_kind(KeyCode::Tab, KeyEventKind::Repeat)));
+        ui.key(KeyCode::Esc);
+    }
+    ui.app.content_tab = ContentTab::Worlds;
+    ui.app.open_world_datapacks = Some(("World".to_owned(), std::path::PathBuf::from("World")));
+    ui.app.world_datapacks_state.search.activate();
+    assert!(ui.key_event(key_kind(KeyCode::Char('u'), KeyEventKind::Repeat)));
+    assert_eq!(ui.app.world_datapacks_state.search.query, "u");
+    ui.app.open_world_datapacks = None;
+
+    ui.app.content_tab = ContentTab::Logs;
+    ui.app.logs_state.viewer_focused = true;
+    ui.app.logs_state.viewer_search.activate();
+    assert!(ui.key_event(key_kind(KeyCode::Char('G'), KeyEventKind::Repeat)));
+    assert_eq!(ui.app.logs_state.viewer_search.query, "G");
+
+    ui.app.content_tab = ContentTab::Mods;
+    ui.app.content_mode = ContentMode::Discover;
+    ui.app.mods_discovery_state.search.activate();
+    assert!(ui.key_event(key_kind(KeyCode::Char('v'), KeyEventKind::Repeat)));
+    assert_eq!(ui.app.mods_discovery_state.search.query, "v");
+    assert!(ui.app.mods_discovery_state.version_popup.is_none());
+    ui.app.mods_discovery_state.search.deactivate();
+    ui.app.mods_discovery_state.sort_panel_open = true;
+    ui.app.mods_discovery_state.sort_panel_focused = true;
+    ui.app.mods_discovery_state.filter_version_picker_open = true;
+    ui.app.mods_discovery_state.filter_version_search.activate();
+    assert!(ui.key_event(key_kind(KeyCode::Char('s'), KeyEventKind::Repeat)));
+    assert_eq!(ui.app.mods_discovery_state.filter_version_search.query, "s");
+    assert!(!ui.app.mods_discovery_state.filter_show_snapshots);
+}
+
+#[test]
+fn dispatch_repeats_instance_setting_text_but_not_picker_selection_or_toggles() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("Settings Text");
+    ui.key(KeyCode::Char('E'));
+    for _ in 0..4 {
+        ui.key_event(key_kind(KeyCode::Down, KeyEventKind::Repeat));
+    }
+    ui.key(KeyCode::Char('c'));
+    assert!(
+        ui.app
+            .instance_settings
+            .as_ref()
+            .unwrap()
+            .text_input_active()
+    );
+    ui.key(KeyCode::Char('d'));
+    assert!(ui.key_event(key_kind(KeyCode::Char('d'), KeyEventKind::Repeat)));
+    assert!(!ui.key_event(key_kind(KeyCode::Char('d'), KeyEventKind::Release)));
+    assert!(!ui.key_event(key_kind(KeyCode::Enter, KeyEventKind::Repeat)));
+    ui.key(KeyCode::Enter);
+    assert_eq!(
+        ui.app
+            .instances_state
+            .selected_instance()
+            .unwrap()
+            .java_path
+            .as_deref(),
+        Some("dd")
+    );
+    assert!(!ui.key_event(key_kind(KeyCode::Right, KeyEventKind::Repeat)));
+    assert!(!ui.key_event(key_kind(KeyCode::Char('a'), KeyEventKind::Repeat)));
+
+    ui.key(KeyCode::Esc);
+    ui.key(KeyCode::Char('E'));
+    ui.key(KeyCode::Down);
+    ui.key(KeyCode::Enter);
+    let loader = ui.app.instance_settings.as_ref().unwrap().draft.loader;
+    assert!(!ui.key_event(key_kind(KeyCode::Right, KeyEventKind::Repeat)));
+    assert_eq!(
+        ui.app.instance_settings.as_ref().unwrap().draft.loader,
+        loader
+    );
+}
+
+#[test]
+fn dispatch_repeats_wizard_name_import_input_and_discovery_search() {
+    let mut ui = UiHarness::new();
+    ui.key(KeyCode::Char('a'));
+    ui.key(KeyCode::Char('q'));
+    assert!(ui.key_event(key_kind(KeyCode::Char('q'), KeyEventKind::Repeat)));
+    assert!(!ui.key_event(key_kind(KeyCode::Char('q'), KeyEventKind::Release)));
+    assert!(!ui.key_event(key_kind(KeyCode::Enter, KeyEventKind::Repeat)));
+    ui.draw();
+    assert!(ui.screen().contains("qq"));
+    assert!(!ui.app.exit);
+    ui.key(KeyCode::Esc);
+
+    ui.key(KeyCode::Char('m'));
+    ui.key(KeyCode::Char('i'));
+    ui.key(KeyCode::Char('q'));
+    assert!(ui.key_event(key_kind(KeyCode::Char('q'), KeyEventKind::Repeat)));
+    assert!(!ui.key_event(key_kind(KeyCode::Enter, KeyEventKind::Repeat)));
+    ui.draw();
+    assert!(ui.screen().contains("qq"));
+    ui.key(KeyCode::Esc);
+    ui.key(KeyCode::Char('/'));
+    assert!(ui.key_event(key_kind(KeyCode::Char('v'), KeyEventKind::Repeat)));
+    assert!(!ui.key_event(key_kind(KeyCode::Enter, KeyEventKind::Repeat)));
+    ui.draw();
+    assert!(ui.screen().contains("/ v"));
+}
+
+#[test]
+fn gui_editor_handoff_process() {}
+
+#[test]
+fn unrelated_directory_events_do_not_postpone_an_edited_file_save() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("instance.json");
+    std::fs::write(&path, b"old").unwrap();
+    let mut watch = EditedConfigWatch::new(path.clone()).unwrap();
+    let (sender, events) = std::sync::mpsc::channel();
+    watch.events = events;
+    watch.pending = Some(std::time::Instant::now() - Duration::from_secs(1));
+    std::fs::write(path, b"new").unwrap();
+    sender
+        .send(Ok(notify::Event::new(notify::EventKind::Modify(
+            notify::event::ModifyKind::Any,
+        ))
+        .add_path(temp.path().join("other.json"))))
+        .unwrap();
+    assert!(watch.changed());
+    std::fs::write(temp.path().join("instance.json"), b"changed again").unwrap();
+    sender
+        .send(Ok(notify::Event::new(notify::EventKind::Modify(
+            notify::event::ModifyKind::Any,
+        ))
+        .add_path(temp.path().join("INSTANCE.JSON"))))
+        .unwrap();
+    assert!(!watch.changed());
+    assert!(watch.pending.is_some());
+    watch.pending = Some(std::time::Instant::now() - Duration::from_secs(1));
+    assert!(watch.changed());
+}
+
+fn wait_for_edited_config(ui: &mut UiHarness, changed: bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut observed = false;
+    loop {
+        let reloaded = ui.app.drain_edited_configs();
+        observed |= ui
+            .app
+            .edited_config_watches
+            .iter()
+            .any(|watch| watch.pending.is_some());
+        if changed && reloaded {
+            return;
+        }
+        assert!(!reloaded, "unchanged bytes must not reload");
+        if !changed
+            && observed
+            && ui
+                .app
+                .edited_config_watches
+                .iter()
+                .all(|watch| watch.pending.is_none())
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "edited file notification timed out"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn gui_editor_saves_reload_after_handoff_and_atomic_replacement_only_when_bytes_change() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("GUI Edited");
+    let path = ui.instance_path("GUI Edited").join("instance.json");
+    let mut config = ui.app.instances_state.selected_instance().unwrap().clone();
+    config.memory_max = Some("4G".to_owned());
+    ui.app.instance_manager.save(&config).unwrap();
+    let original = std::fs::read(&path).unwrap();
+
+    let reaper = ui
+        .app
+        .launch_gui_editor(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tui::event::tests::gui_editor_handoff_process"]),
+            &path,
+        )
+        .unwrap();
+    assert!(!ui.app.drain_edited_configs());
+    reaper.join().unwrap();
+    assert!(!ui.app.drain_edited_configs());
+    assert_eq!(
+        ui.app
+            .instances_state
+            .selected_instance()
+            .unwrap()
+            .memory_max,
+        None
+    );
+    ui.app.watch_edited_config(&path).unwrap();
+    assert_eq!(ui.app.edited_config_watches.len(), 1);
+
+    std::fs::write(&path, &original).unwrap();
+    wait_for_edited_config(&mut ui, false);
+    assert_eq!(
+        ui.app
+            .instances_state
+            .selected_instance()
+            .unwrap()
+            .memory_max,
+        None
+    );
+
+    config.memory_max = Some("8G".to_owned());
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    wait_for_edited_config(&mut ui, true);
+    assert_eq!(
+        ui.app
+            .instances_state
+            .selected_instance()
+            .unwrap()
+            .memory_max
+            .as_deref(),
+        Some("8G")
+    );
+
+    config.memory_max = Some("12G".to_owned());
+    crate::storage::write_atomic(&path, &serde_json::to_vec(&config).unwrap()).unwrap();
+    wait_for_edited_config(&mut ui, true);
+    assert_eq!(
+        ui.app
+            .instances_state
+            .selected_instance()
+            .unwrap()
+            .memory_max
+            .as_deref(),
+        Some("12G")
+    );
+
+    config.memory_max = Some("16G".to_owned());
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    wait_for_edited_config(&mut ui, true);
+    assert_eq!(
+        ui.app
+            .instances_state
+            .selected_instance()
+            .unwrap()
+            .memory_max
+            .as_deref(),
+        Some("16G")
+    );
+
+    std::fs::write(&path, b"invalid instance config").unwrap();
+    wait_for_edited_config(&mut ui, true);
+    assert_eq!(
+        ui.app
+            .instances_state
+            .selected_instance()
+            .unwrap()
+            .memory_max
+            .as_deref(),
+        Some("16G")
+    );
+    assert!(
+        error_buffer::peek_error()
+            .unwrap()
+            .message
+            .contains("Failed to reload edited instance")
+    );
+    config.memory_max = Some("20G".to_owned());
+    crate::storage::write_atomic(&path, &serde_json::to_vec(&config).unwrap()).unwrap();
+    wait_for_edited_config(&mut ui, true);
+    assert_eq!(
+        ui.app
+            .instances_state
+            .selected_instance()
+            .unwrap()
+            .memory_max
+            .as_deref(),
+        Some("20G")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn launcher_config_save_process() {
+    if std::env::var_os("RMCL_EDITOR_CONFIG_TEST").is_none() {
+        return;
+    }
+    let mut ui = UiHarness::new();
+    let config_path = crate::config::get_config_path().join("config.toml");
+    let theme_path = crate::config::get_config_path().join("theme.toml");
+    let mut theme = crate::config::theme::ThemeConfig::default();
+    std::fs::write(&theme_path, toml::to_string(&theme).unwrap()).unwrap();
+    ui.app.watch_edited_config(&config_path).unwrap();
+    ui.app.watch_edited_config(&theme_path).unwrap();
+    assert!(!ui.app.drain_edited_configs());
+
+    let mut config = crate::config::SETTINGS.read().clone();
+    config.ui.error_auto_dismiss_ms += 1;
+    let timeout = config.ui.error_auto_dismiss_ms;
+    std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+    wait_for_edited_config(&mut ui, true);
+    assert_eq!(
+        crate::config::SETTINGS.read().ui.error_auto_dismiss_ms,
+        timeout
+    );
+
+    theme.theme = "dracula".to_owned();
+    theme.border_style = crate::config::theme::BorderStyle::Thick;
+    crate::storage::write_atomic(&theme_path, toml::to_string(&theme).unwrap().as_bytes()).unwrap();
+    wait_for_edited_config(&mut ui, true);
+    assert_eq!(
+        crate::config::theme::current_theme_config().theme,
+        "dracula"
+    );
+    assert_eq!(
+        crate::config::theme::BORDER_STYLE.current(),
+        crate::config::theme::BorderStyle::Thick
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn watched_launcher_config_and_theme_saves_update_cached_settings() {
+    let ui = UiHarness::new();
+    let root = ui.app.instance_manager.instances_dir.parent().unwrap();
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tui::event::tests::launcher_config_save_process",
+            "--nocapture",
+        ])
+        .env("RMCL_EDITOR_CONFIG_TEST", "1")
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
 #[test]
 fn edited_instance_config_reloads_into_the_ui() {
     let mut ui = UiHarness::new();
@@ -363,7 +912,37 @@ fn editor_kind_is_detected_from_the_executable_name() {
     assert!(editor_runs_in_terminal("/usr/bin/nvim"));
     assert!(editor_runs_in_terminal("nano"));
     assert!(!editor_runs_in_terminal("/usr/bin/code"));
-    assert_eq!(editor_parts("nvim -u NONE"), ["nvim", "-u", "NONE"]);
+    assert_eq!(
+        editor_parts("nvim -u NONE").unwrap(),
+        ["nvim", "-u", "NONE"]
+    );
+}
+
+#[test]
+fn editor_commands_preserve_quoted_paths_arguments_and_empty_arguments() {
+    assert_eq!(
+        editor_parts(r#""/path with spaces/editor" --wait "two words" """#).unwrap(),
+        ["/path with spaces/editor", "--wait", "two words", ""]
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("editor with spaces");
+    std::fs::write(&executable, b"executable").unwrap();
+    assert_eq!(
+        editor_parts(executable.to_str().unwrap()).unwrap(),
+        [executable.to_string_lossy().into_owned()]
+    );
+    #[cfg(unix)]
+    assert!(editor_parts("editor 'unterminated").is_err());
+    #[cfg(windows)]
+    assert_eq!(
+        editor_parts(r#""C:\Program Files\editor.exe" --wait "C:\folder with spaces\file.txt""#)
+            .unwrap(),
+        [
+            r"C:\Program Files\editor.exe",
+            "--wait",
+            r"C:\folder with spaces\file.txt"
+        ]
+    );
 }
 
 #[test]

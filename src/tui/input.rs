@@ -50,10 +50,11 @@ impl App {
         let link = self
             .active_discovery_state_mut()
             .and_then(|state| state.project_link_at(event.column, event.row));
-        if let Some(link) = link
-            && let Err(error) = open::that_detached(link)
-        {
-            tracing::warn!("Failed to open project link {link}: {error}");
+        if let Some(link) = link {
+            let result = project_link_url(link).and_then(|url| open::that_detached(url.as_str()));
+            if let Err(error) = result {
+                tracing::warn!("Failed to open project link: {error}");
+            }
         }
     }
 
@@ -105,14 +106,29 @@ impl App {
                         .map(|(_, candidate)| candidate.clone())
                         .collect::<Vec<_>>();
                     if let Some(project) = project
-                        && let Some((instance_name, _)) = &self.content_manifest
+                        && let Some((instance_name, cached)) = &self.content_manifest
                     {
-                        let manifest_path = crate::storage::InstancePaths::new(
+                        let paths = crate::storage::InstancePaths::new(
                             self.instance_manager.instances_dir.join(instance_name),
-                        )
-                        .content_manifest();
-                        let updated =
-                            crate::instance::ContentManifest::update(&manifest_path, |manifest| {
+                        );
+                        let manifest_path = paths.content_manifest();
+                        let expected = cached.record(&relative_path).cloned();
+                        let updated = crate::instance::ContentManifest::update(
+                            &manifest_path,
+                            |manifest| {
+                                if expected.is_none()
+                                    || manifest.record(&relative_path) != expected.as_ref()
+                                {
+                                    return Err(crate::instance::content::manifest::ManifestError::InvalidPath(
+                                        format!("Ownership of '{}' changed; refresh before selecting a provider", relative_path.display()),
+                                    ));
+                                }
+                                if let Some(record) = &expected {
+                                    crate::instance::content::local::validate_record(
+                                        &paths.minecraft(),
+                                        record,
+                                    )?;
+                                }
                                 if let Some(record) = manifest
                                     .files
                                     .iter_mut()
@@ -123,10 +139,18 @@ impl App {
                                     record.provider_aliases = aliases;
                                 }
                                 Ok(manifest.clone())
-                            })?;
-                        self.content_manifest = Some((instance_name.clone(), updated));
-                        self.provider_conflict = None;
-                        self.reconciliation_for = None;
+                            },
+                        );
+                        match updated {
+                            Ok(updated) => {
+                                self.content_manifest = Some((instance_name.clone(), updated));
+                                self.provider_conflict = None;
+                                self.reconciliation_for = None;
+                            }
+                            Err(error) => {
+                                tracing::error!("Could not save provider selection: {error}")
+                            }
+                        }
                     }
                 }
                 KeyCode::Esc => {
@@ -270,11 +294,9 @@ impl App {
                             FocusedArea::Settings
                         }
                         Some(confirm_popup::ConfirmTarget::Content { name, path, .. }) => {
-                            let orphaned = self.orphan_dependencies_after_removing(&path);
-                            match delete_content_path(&path) {
-                                Ok(()) => {
+                            match self.delete_content_path(&path, false) {
+                                Ok(orphaned) => {
                                     self.remove_content_path_from_states(&path);
-                                    self.remove_content_path_from_manifest(&path);
                                     if !orphaned.is_empty() {
                                         confirm_popup::set_pending_orphan_dependencies(orphaned);
                                         return Ok(());
@@ -288,10 +310,9 @@ impl App {
                         }
                         Some(confirm_popup::ConfirmTarget::OrphanDependencies { paths }) => {
                             for path in paths {
-                                match delete_content_path(&path) {
-                                    Ok(()) => {
+                                match self.delete_content_path(&path, true) {
+                                    Ok(_) => {
                                         self.remove_content_path_from_states(&path);
-                                        self.remove_content_path_from_manifest(&path);
                                     }
                                     Err(error) => tracing::error!(
                                         "Failed to remove unused dependency '{}': {}",
@@ -534,16 +555,8 @@ impl App {
                         if let Some(state) = self.active_discovery_state_mut() {
                             state.begin_world_selection(worlds);
                         }
-                    } else if matches!(
-                        kind,
-                        Some(
-                            crate::instance::ContentKind::Mod
-                                | crate::instance::ContentKind::DataPack
-                        )
-                    ) {
+                    } else {
                         self.spawn_active_discovery_dependencies();
-                    } else if let Some(state) = self.active_discovery_state_mut() {
-                        state.begin_confirmation();
                     }
                 }
                 return Ok(());
@@ -632,7 +645,10 @@ impl App {
                     }
                     return Ok(());
                 }
-                if key_event.code == KeyCode::Enter && !self.worlds_state.search.active {
+                if key_event.code == KeyCode::Enter
+                    && !key_event.modifiers.contains(KeyModifiers::SHIFT)
+                    && !self.worlds_state.search.active
+                {
                     self.open_world_datapacks = self
                         .worlds_state
                         .selected_entry()
@@ -1422,7 +1438,9 @@ impl App {
         }
     }
 
-    fn active_discovery_state(&self) -> Option<&widgets::content::discovery::DiscoveryState> {
+    pub(super) fn active_discovery_state(
+        &self,
+    ) -> Option<&widgets::content::discovery::DiscoveryState> {
         match self.content_tab {
             widgets::content::ContentTab::Mods => Some(&self.mods_discovery_state),
             widgets::content::ContentTab::ResourcePacks => {
@@ -1917,96 +1935,25 @@ impl App {
                         "Invalid datapack target world".to_owned(),
                     ));
                 }
-                tokio::fs::create_dir_all(&destination)
-                    .await
-                    .map_err(crate::net::NetError::from)?;
                 let registry =
                     crate::instance::content::provider::ProviderRegistry::configured(client);
-                if let Some(plan) = &request.dependency_plan {
-                    let installed = crate::instance::content::dependencies::install(
-                        &registry,
-                        &manifest_path,
-                        &minecraft_dir,
-                        plan,
+                let plan = request.dependency_plan.as_ref().ok_or_else(|| {
+                    crate::net::NetError::Parse(
+                        "Installation has no resolved dependency plan".to_owned(),
                     )
-                    .await?;
-                    return Ok::<_, crate::net::NetError>(
-                        widgets::content::discovery::InstallCompletion {
-                            path: installed.root_path,
-                            replaced: installed.replaced,
-                            skipped: installed.skipped,
-                            orphaned_dependencies: installed.orphaned_dependencies,
-                        },
-                    );
-                }
-                let provider = registry.get(&request.provider).ok_or_else(|| {
-                    crate::net::NetError::Parse(format!(
-                        "{} content provider is unavailable",
-                        request.provider
-                    ))
                 })?;
-                let outcome = provider
-                    .download_version(
-                        &request.version,
-                        &destination,
-                        request.installed_path.as_deref(),
-                    )
-                    .await?;
-                let (path, skipped) = match outcome {
-                    crate::net::modrinth::DownloadOutcome::Downloaded(path) => (path, false),
-                    crate::net::modrinth::DownloadOutcome::SkippedExisting(path) => (path, true),
-                };
-                let replaced = request.installed_path.is_some() && !skipped;
-                let relative_path = path
-                    .strip_prefix(&minecraft_dir)
-                    .map_err(|error| crate::net::NetError::Parse(error.to_string()))?
-                    .to_path_buf();
-                let fingerprint = crate::instance::content::manifest::fingerprint(&path)?;
-                let record = crate::instance::ContentFileRecord {
-                    relative_path,
-                    kind,
-                    enabled: !path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.ends_with(".disabled")),
-                    fingerprint,
-                    resolution: crate::instance::Resolution::Resolved {
-                        project: crate::instance::ProviderProject {
-                            provider: request.provider.clone(),
-                            project_id: request.project_id.clone(),
-                            version_id: request.version.id.clone(),
-                        },
-                    },
-                    provider_aliases: Vec::new(),
-                    provider_checks: vec![request.provider.clone()],
-                    required_dependencies: Vec::new(),
-                    automatic_dependency: false,
-                    cleanup_eligible: false,
-                };
-                crate::instance::ContentManifest::update(&manifest_path, |manifest| {
-                    if let Some(old_path) = request.installed_path.as_ref()
-                        && let Ok(relative) = old_path.strip_prefix(&minecraft_dir)
-                        && old_path != &path
-                    {
-                        manifest.remove(relative);
-                    }
-                    manifest.upsert(record);
-                    Ok(())
-                })
-                .map_err(|error| crate::net::NetError::Parse(error.to_string()))?;
-                if !skipped
-                    && let Some(old_path) = request
-                        .installed_path
-                        .as_ref()
-                        .filter(|old_path| old_path.as_path() != path.as_path())
-                {
-                    delete_content_path(old_path).map_err(crate::net::NetError::from)?;
-                }
+                let installed = crate::instance::content::dependencies::install(
+                    &registry,
+                    &manifest_path,
+                    &minecraft_dir,
+                    plan,
+                )
+                .await?;
                 Ok::<_, crate::net::NetError>(widgets::content::discovery::InstallCompletion {
-                    path,
-                    replaced,
-                    skipped,
-                    orphaned_dependencies: Vec::new(),
+                    path: installed.root_path,
+                    replaced: installed.replaced,
+                    skipped: installed.skipped,
+                    orphaned_dependencies: installed.orphaned_dependencies,
                 })
             }
             .await
@@ -2184,19 +2131,44 @@ impl App {
         self.focused = FocusedArea::ConfirmDelete;
     }
 
-    fn orphan_dependencies_after_removing(
-        &self,
+    fn delete_content_path(
+        &mut self,
         path: &std::path::Path,
-    ) -> Vec<std::path::PathBuf> {
-        self.content_manifest_for_path(path)
-            .map(|(manifest, relative_path, minecraft_dir)| {
-                manifest
-                    .orphaned_dependencies_after_removing(&relative_path)
-                    .into_iter()
-                    .map(|relative| minecraft_dir.join(relative))
-                    .collect()
-            })
-            .unwrap_or_default()
+        orphan_only: bool,
+    ) -> std::io::Result<Vec<std::path::PathBuf>> {
+        let instance = self
+            .instances_state
+            .selected_instance()
+            .ok_or_else(|| std::io::Error::other("No instance is selected"))?;
+        let name = instance.name.clone();
+        let paths =
+            crate::storage::InstancePaths::new(self.instance_manager.instances_dir.join(&name));
+        let minecraft_dir = paths.minecraft();
+        let relative = crate::instance::content::local::relative_path(&minecraft_dir, path)?;
+        let manifest = match self
+            .content_manifest
+            .as_ref()
+            .filter(|(cached_name, _)| cached_name == &name)
+        {
+            Some((_, manifest)) => manifest.clone(),
+            None => crate::instance::ContentManifest::load(&paths.content_manifest())
+                .map_err(std::io::Error::other)?,
+        };
+        let expected = manifest
+            .files
+            .iter()
+            .filter(|record| record.relative_path.starts_with(&relative))
+            .cloned()
+            .collect::<Vec<_>>();
+        let (manifest, orphaned) = crate::instance::content::local::remove(
+            &paths.content_manifest(),
+            &minecraft_dir,
+            path,
+            &expected,
+            orphan_only,
+        )?;
+        self.content_manifest = Some((name, manifest));
+        Ok(orphaned)
     }
 
     fn content_manifest_for_path(
@@ -2246,37 +2218,6 @@ impl App {
         }
     }
 
-    fn remove_content_path_from_manifest(&mut self, path: &std::path::Path) {
-        let Some(instance) = self.instances_state.selected_instance() else {
-            return;
-        };
-        let instance_paths = crate::storage::InstancePaths::new(
-            self.instance_manager.instances_dir.join(&instance.name),
-        );
-        let minecraft_dir = instance_paths.minecraft();
-        let Ok(relative_path) = path.strip_prefix(&minecraft_dir) else {
-            return;
-        };
-        if let Some((instance_name, manifest)) = self.content_manifest.as_mut()
-            && *instance_name == instance.name
-        {
-            manifest.remove(relative_path);
-        }
-        if let Err(error) = crate::instance::ContentManifest::update(
-            &instance_paths.content_manifest(),
-            |manifest| {
-                manifest.remove(relative_path);
-                Ok(())
-            },
-        ) {
-            tracing::warn!(
-                "Failed to remove '{}' from the content manifest: {}",
-                relative_path.display(),
-                error
-            );
-        }
-    }
-
     fn open_instance_settings(&mut self, return_focus: FocusedArea) {
         let Some(instance) = self.instances_state.selected_instance().cloned() else {
             return;
@@ -2284,6 +2225,10 @@ impl App {
         let mut state = widgets::popups::instance_settings::State::with_accounts(
             &instance,
             &self.instance_manager.meta_dir,
+            &crate::storage::InstancePaths::new(
+                self.instance_manager.instances_dir.join(&instance.name),
+            )
+            .minecraft(),
             self.account_state.store.accounts.clone(),
         );
         if self
@@ -2440,11 +2385,14 @@ impl App {
     }
 }
 
-fn delete_content_path(path: &std::path::Path) -> std::io::Result<()> {
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path),
-        Ok(_) => std::fs::remove_file(path),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+pub(super) fn project_link_url(link: &str) -> std::io::Result<reqwest::Url> {
+    let url = reqwest::Url::parse(link)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Project links must use HTTP or HTTPS",
+        ));
     }
+    Ok(url)
 }

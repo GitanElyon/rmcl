@@ -578,7 +578,7 @@ impl ContentListState {
                 && !self
                     .version_metadata
                     .contains_key(&(project.provider.clone(), project.version_id.clone()));
-            if !self.requested_provider_icons.insert(key) && !missing_version {
+            if !self.requested_provider_icons.insert(key) {
                 continue;
             }
             let pending = self.pending_provider_icons.clone();
@@ -875,8 +875,6 @@ impl ContentListState {
         }
     }
 
-    // drain streaming entries from the initial load. each entry arrives
-    // individually and is inserted in sorted position for a smooth fill-in
     pub fn drain_pending(&mut self) -> bool {
         let Some(rx) = &self.stream_rx else {
             return false;
@@ -1808,8 +1806,6 @@ impl ContentListState {
             .collect();
     }
 
-    // enable/disable by renaming the file with/without .disabled extension.
-    // this is how most minecraft launchers handle it
     pub fn toggle_selected(&mut self) {
         let Some(index) = self.list_state.selected else {
             return;
@@ -2694,9 +2690,6 @@ fn preserve_visual_metadata(entry: &mut ContentEntry, previous: &mut ContentEntr
     }
 }
 
-// renders one row of a mod icon using half-block characters (U+2584).
-// each cell packs two vertical pixels via fg/bg colors, giving
-// double the vertical resolution out of the terminal
 fn icon_spans(
     icon_pixels: Option<&Vec<Vec<IconCell>>>,
     row: usize,

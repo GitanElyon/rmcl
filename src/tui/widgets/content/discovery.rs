@@ -1364,11 +1364,8 @@ impl DiscoveryState {
 
     pub(crate) fn set_filter_loader(&mut self, loader: ModLoader) {
         if self.filter_loader != loader {
-            *self
-                .filter_game_versions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                crate::tui::widgets::popups::LoadState::Idle;
+            self.filter_game_versions =
+                Arc::new(Mutex::new(crate::tui::widgets::popups::LoadState::Idle));
         }
         self.filter_loader = loader;
     }
@@ -2643,6 +2640,21 @@ impl DiscoveryState {
 
     pub fn take_orphan_cleanup(&mut self) -> Option<Vec<PathBuf>> {
         self.pending_orphan_cleanup.take()
+    }
+
+    pub(in crate::tui) fn text_input_active(&self) -> bool {
+        if let Some(popup) = &self.version_popup {
+            return popup.selecting_world && !popup.confirming && popup.worlds.search.active;
+        }
+        if self.project_page_open() {
+            return false;
+        }
+        if self.sort_panel_open && !self.search.active {
+            return self.sort_panel_focused
+                && self.filter_version_picker_open
+                && self.filter_version_search.active;
+        }
+        self.search.active
     }
 
     fn should_load_more(&self) -> bool {

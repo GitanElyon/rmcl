@@ -5,6 +5,7 @@ mod render;
 mod state;
 
 pub use render::{popup_rect, render};
+pub(in crate::tui) use state::text_input_active;
 pub use state::{WizardParams, WizardState, WizardStep, handle_key, take_result};
 
 #[cfg(test)]

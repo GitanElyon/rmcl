@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use super::harness::UiHarness;
 use crate::instance::content::entry::ContentEntry;
 use crate::instance::{
-    ContentFileRecord, ContentKind, ContentManifest, FileFingerprint, ProviderProject, Resolution,
+    ContentFileRecord, ContentKind, ContentManifest, ProviderProject, Resolution,
 };
 use crate::net::modrinth::DiscoveryProject;
 use crate::tui::{
@@ -17,6 +17,22 @@ use crate::tui::{
         popups::confirm,
     },
 };
+
+#[test]
+fn remote_project_links_use_http_urls_and_encode_shell_metacharacters() {
+    let url =
+        crate::tui::input::project_link_url(r#"https://example.com/"&%USERNAME%?q=a b"#).unwrap();
+    assert_eq!(url.as_str(), "https://example.com/%22&%USERNAME%?q=a%20b");
+    for link in [
+        "file:///C:/Windows/notepad.exe",
+        "javascript:alert(1)",
+        "shell:AppsFolder",
+        r"C:\folder\file",
+        "not a url",
+    ] {
+        assert!(crate::tui::input::project_link_url(link).is_err(), "{link}");
+    }
+}
 
 #[test]
 fn global_navigation_returns_from_log_overlay() {
@@ -72,13 +88,13 @@ fn installed_version_action_requires_selected_provider_match() {
     ui.add_instance("Unmatched");
     ui.app.focused = FocusedArea::Content;
     ui.app.content_tab = ContentTab::Mods;
-    let path = ui
-        .instance_path("Unmatched")
-        .join(crate::storage::MINECRAFT_DIR_NAME)
-        .join("mods/unknown.jar");
+    let minecraft = crate::storage::InstancePaths::new(ui.instance_path("Unmatched")).minecraft();
+    let path = minecraft.join("mods/unknown.jar");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"unknown").unwrap();
     ui.app.mods_state.entries = vec![content_entry("Unknown mod", path)];
     ui.app.mods_state.list_state.selected = Some(0);
-    let record = managed_mod_record("mods/unknown.jar", "known", false, Vec::new());
+    let record = managed_mod_record(&minecraft, "mods/unknown.jar", "known", false, Vec::new());
     let project = record.resolved_project().unwrap().clone();
     ui.app.content_manifest = Some((
         "Unmatched".to_owned(),
@@ -102,13 +118,13 @@ fn installed_popup_navigation_preserves_local_filters() {
     ui.add_instance("Popup");
     ui.app.focused = FocusedArea::Content;
     ui.app.content_tab = ContentTab::Mods;
-    let path = ui
-        .instance_path("Popup")
-        .join(crate::storage::MINECRAFT_DIR_NAME)
-        .join("mods/known.jar");
+    let minecraft = crate::storage::InstancePaths::new(ui.instance_path("Popup")).minecraft();
+    let path = minecraft.join("mods/known.jar");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"known").unwrap();
     ui.app.mods_state.entries = vec![content_entry("Known mod", path)];
     ui.app.mods_state.list_state.selected = Some(0);
-    let record = managed_mod_record("mods/known.jar", "known", false, Vec::new());
+    let record = managed_mod_record(&minecraft, "mods/known.jar", "known", false, Vec::new());
     let project = record.resolved_project().unwrap().clone();
     ui.app.content_manifest = Some((
         "Popup".to_owned(),
@@ -282,15 +298,16 @@ fn world_datapack_version_action_requires_selected_provider_match() {
     ui.add_instance("Datapacks");
     ui.app.focused = FocusedArea::Content;
     ui.app.content_tab = ContentTab::Worlds;
-    let world = ui
-        .instance_path("Datapacks")
-        .join(crate::storage::MINECRAFT_DIR_NAME)
-        .join("saves/World");
+    let minecraft = crate::storage::InstancePaths::new(ui.instance_path("Datapacks")).minecraft();
+    let world = minecraft.join("saves/World");
     let path = world.join("datapacks/unknown.zip");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"pack").unwrap();
     ui.app.world_datapacks_state.entries = vec![content_entry("Unknown datapack", path)];
     ui.app.world_datapacks_state.list_state.selected = Some(0);
     ui.app.open_world_datapacks = Some(("World".to_owned(), world));
     let mut record = managed_mod_record(
+        &minecraft,
         "saves/World/datapacks/unknown.zip",
         "known",
         false,
@@ -482,6 +499,7 @@ fn confirmed_screenshot_delete_removes_state_and_file() {
 }
 
 fn managed_mod_record(
+    minecraft: &Path,
     path: &str,
     project_id: &str,
     automatic_dependency: bool,
@@ -491,11 +509,8 @@ fn managed_mod_record(
         relative_path: PathBuf::from(path),
         kind: ContentKind::Mod,
         enabled: true,
-        fingerprint: FileFingerprint {
-            size: 1,
-            modified_ns: 1,
-            hashes: Default::default(),
-        },
+        fingerprint: crate::instance::content::manifest::fingerprint(&minecraft.join(path))
+            .unwrap(),
         resolution: Resolution::Resolved {
             project: ProviderProject {
                 provider: "modrinth".to_owned(),
@@ -552,8 +567,8 @@ fn deleting_a_mod_offers_its_unused_dependency_chain() {
     ContentManifest {
         version: 1,
         files: vec![
-            managed_mod_record("mods/root.jar", "root", false, vec![dependency]),
-            managed_mod_record("mods/library.jar", "library", true, Vec::new()),
+            managed_mod_record(&minecraft, "mods/root.jar", "root", false, vec![dependency]),
+            managed_mod_record(&minecraft, "mods/library.jar", "library", true, Vec::new()),
         ],
     }
     .save(&crate::storage::InstancePaths::new(ui.instance_path("Dependencies")).content_manifest())
@@ -596,10 +611,12 @@ fn deleting_a_required_library_warns_but_can_continue() {
     let library_path = minecraft.join("mods/library.jar");
     std::fs::create_dir_all(library_path.parent().unwrap()).unwrap();
     std::fs::write(&library_path, b"l").unwrap();
+    std::fs::write(minecraft.join("mods/root.jar"), b"r").unwrap();
     ContentManifest {
         version: 1,
         files: vec![
             managed_mod_record(
+                &minecraft,
                 "mods/root.jar",
                 "root",
                 false,
@@ -609,7 +626,7 @@ fn deleting_a_required_library_warns_but_can_continue() {
                     version_id: "library-version".to_owned(),
                 }],
             ),
-            managed_mod_record("mods/library.jar", "library", true, Vec::new()),
+            managed_mod_record(&minecraft, "mods/library.jar", "library", true, Vec::new()),
         ],
     }
     .save(&crate::storage::InstancePaths::new(ui.instance_path("Required")).content_manifest())
@@ -628,6 +645,58 @@ fn deleting_a_required_library_warns_but_can_continue() {
     ));
     ui.key(KeyCode::Enter);
     assert!(!Path::new(&library_path).exists());
+}
+
+#[test]
+fn content_delete_rejects_ownership_changed_after_confirmation_opened() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("ChangedOwner");
+    let paths = crate::storage::InstancePaths::new(ui.instance_path("ChangedOwner"));
+    let minecraft = paths.minecraft();
+    let path = minecraft.join("mods/root.jar");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"original").unwrap();
+    let manifest = ContentManifest {
+        version: 1,
+        files: vec![managed_mod_record(
+            &minecraft,
+            "mods/root.jar",
+            "root",
+            false,
+            Vec::new(),
+        )],
+    };
+    manifest.save(&paths.content_manifest()).unwrap();
+    ui.app.content_manifest = Some(("ChangedOwner".to_owned(), manifest));
+    ui.app.mods_state.entries = vec![content_entry("Root", path.clone())];
+    ui.app.mods_state.list_state.selected = Some(0);
+    ui.app.focused = FocusedArea::Content;
+    ui.app.content_tab = ContentTab::Mods;
+    ui.key(KeyCode::Char('d'));
+
+    let new_owner = ProviderProject {
+        provider: "curseforge".to_owned(),
+        project_id: "new-owner".to_owned(),
+        version_id: "new".to_owned(),
+    };
+    ContentManifest::update(&paths.content_manifest(), |manifest| {
+        manifest.files[0].resolution = Resolution::Resolved {
+            project: new_owner.clone(),
+        };
+        Ok(())
+    })
+    .unwrap();
+    ui.key(KeyCode::Enter);
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"original");
+    assert_eq!(ui.app.mods_state.entries[0].path, path);
+    assert_eq!(
+        ContentManifest::load(&paths.content_manifest())
+            .unwrap()
+            .files[0]
+            .resolved_project(),
+        Some(&new_owner)
+    );
 }
 
 #[test]
@@ -1164,6 +1233,7 @@ fn instance_launch_options_autosave_through_the_editor() {
 fn settings_panel_keeps_direct_profile_management() {
     let mut ui = UiHarness::new();
     ui.add_instance("profile-test");
+    std::fs::create_dir_all(ui.instance_path("profile-test").join("minecraft")).unwrap();
     ui.app.focused = FocusedArea::Settings;
 
     ui.key(KeyCode::Char('a'));
@@ -1249,6 +1319,11 @@ fn provider_conflict_selection_is_persisted() {
     let mut ui = UiHarness::new();
     ui.add_instance("Conflict");
     let relative_path = std::path::PathBuf::from("mods/example.jar");
+    let file = crate::storage::InstancePaths::new(ui.instance_path("Conflict"))
+        .minecraft()
+        .join(&relative_path);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"example").unwrap();
     let candidates = vec![
         ProviderProject {
             provider: "modrinth".to_owned(),
@@ -1267,11 +1342,7 @@ fn provider_conflict_selection_is_persisted() {
             relative_path: relative_path.clone(),
             kind: crate::instance::ContentKind::Mod,
             enabled: true,
-            fingerprint: crate::instance::FileFingerprint {
-                size: 1,
-                modified_ns: 0,
-                hashes: Default::default(),
-            },
+            fingerprint: crate::instance::content::manifest::fingerprint(&file).unwrap(),
             resolution: crate::instance::Resolution::Ambiguous {
                 candidates: candidates.clone(),
             },
@@ -1293,6 +1364,16 @@ fn provider_conflict_selection_is_persisted() {
     });
 
     ui.key(KeyCode::Down);
+    std::fs::write(&manifest_path, b"invalid").unwrap();
+    ui.key(KeyCode::Enter);
+    assert_eq!(ui.app.provider_conflict.as_ref().unwrap().selected, 1);
+    ui.app
+        .content_manifest
+        .as_ref()
+        .unwrap()
+        .1
+        .save(&manifest_path)
+        .unwrap();
     ui.key(KeyCode::Enter);
 
     assert!(ui.app.provider_conflict.is_none());

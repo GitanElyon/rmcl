@@ -76,6 +76,7 @@ impl LogsState {
         self.viewer_scroll = 0;
         self.viewer_focused = false;
         self.selected_path = None;
+        self.was_live = false;
         self.last_rescan = std::time::Instant::now();
 
         let dir = instances_dir.to_path_buf();
@@ -99,33 +100,38 @@ impl LogsState {
 
     pub fn drain_pending(&mut self) {
         let live_now = self.has_live();
-        self.was_live = live_now;
+        let live_changed = live_now != self.was_live;
+        let selected_live =
+            self.was_live && self.selected_path.is_none() && self.list_state.selected.is_some();
 
         let taken = match self.pending.lock() {
             Ok(mut slot) => slot.take(),
             _ => None,
         };
 
-        if let Some((instance_name, entries)) = taken
+        let updated = if let Some((instance_name, entries)) = taken
             && self.loaded_for.as_deref() == Some(&instance_name)
         {
-            let prev_selected = self.list_state.selected;
             self.entries = entries;
             self.loading = false;
-
-            let display_count = self.display_count();
-
-            if display_count > 0 && prev_selected.is_none() {
-                self.list_state.selected = Some(0);
-                self.load_selected_content();
-            } else if let Some(sel) = prev_selected
-                && sel >= display_count
-                && display_count > 0
-            {
-                self.list_state.selected = Some(display_count - 1);
-            }
+            true
+        } else {
+            false
+        };
+        if updated || live_changed {
+            let previous = self.list_state.selected.unwrap_or(0);
+            let indices = self.display_indices();
+            self.list_state.selected = indices
+                .iter()
+                .position(|index| match index {
+                    None => selected_live,
+                    Some(index) => self.selected_path.as_ref() == Some(&self.entries[*index].path),
+                })
+                .or_else(|| (!indices.is_empty()).then(|| previous.min(indices.len() - 1)));
             self.update_scrollbar();
+            self.load_selected_content();
         }
+        self.was_live = live_now;
     }
 
     pub fn try_rescan(&mut self) {
@@ -448,7 +454,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut LogsState, is_focused: 
         return;
     }
 
-    let has_live = state.has_live();
     let display_count = state.display_count();
 
     if display_count == 0 {
@@ -468,7 +473,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut LogsState, is_focused: 
         Layout::horizontal([Constraint::Length(30), Constraint::Min(0)]).areas(area);
 
     render_list(frame, list_area, state, is_focused);
-    render_viewer(frame, viewer_area, state, is_focused, has_live);
+    render_viewer(frame, viewer_area, state);
 }
 
 fn render_list(frame: &mut Frame, area: Rect, state: &mut LogsState, is_focused: bool) {
@@ -558,15 +563,9 @@ fn render_list(frame: &mut Frame, area: Rect, state: &mut LogsState, is_focused:
     );
 }
 
-fn render_viewer(
-    frame: &mut Frame,
-    area: Rect,
-    state: &mut LogsState,
-    _is_focused: bool,
-    has_live: bool,
-) {
+fn render_viewer(frame: &mut Frame, area: Rect, state: &mut LogsState) {
     let theme = THEME.as_ref();
-    let is_live = has_live && state.list_state.selected == Some(0);
+    let is_live = state.is_live_selected();
 
     let all_lines: Vec<ViewerLine> = if is_live {
         let name = state.loaded_for.as_deref().unwrap_or("");

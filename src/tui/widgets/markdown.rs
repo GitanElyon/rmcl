@@ -335,6 +335,12 @@ fn normalize_html(source: &str) -> NormalizedDocument {
 }
 
 fn convert_html_fragment(html: &str) -> Result<NormalizedDocument, String> {
+    // A closing emphasis delimiter after punctuation needs a word boundary.
+    static EMPHASIS_BOUNDARY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)(</(?:strong|b|em|i)>)([\p{L}\p{N}])")
+            .expect("valid emphasis boundary regex")
+    });
+    let html = EMPHASIS_BOUNDARY.replace_all(html, "$1 $2");
     let image_alignments = Arc::new(Mutex::new(HashMap::new()));
     let visitor: VisitorHandle = Arc::new(Mutex::new(ImageAlignmentVisitor {
         centered: Vec::new(),
@@ -617,17 +623,13 @@ fn external_markdown_text(source: &str, width: u16) -> (Text<'static>, Vec<LinkT
         line.style = line_style;
         line.spans.retain(|span| {
             let content = span.content.as_ref();
-            content != "*"
-                && !(span.style.add_modifier.contains(Modifier::UNDERLINED)
-                    && content.starts_with("(http")
-                    && content.ends_with(')'))
+            !(span.style.add_modifier.contains(Modifier::UNDERLINED)
+                && content.starts_with("(http")
+                && content.ends_with(')'))
         });
         remove_link_destination(line);
         for span in &mut line.spans {
             span.style = line_style.patch(span.style);
-            if span.content.contains("**") {
-                span.content = span.content.replace("**", "").into();
-            }
         }
     }
     text.lines = wrap_tables(text.lines, width, table_separator_style)

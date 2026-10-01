@@ -12,6 +12,61 @@ fn key(code: KeyCode) -> KeyEvent {
 }
 
 #[test]
+fn dispatch_repeats_version_search_but_not_snapshot_toggle_or_creation() {
+    use crate::tui::{app::FocusedArea, tests::harness::UiHarness};
+    use crossterm::event::KeyEventKind;
+
+    let mut ui = UiHarness::new();
+    ui.app.focused = FocusedArea::Popup;
+    ui.app.instances_state.show_popup = true;
+    {
+        let mut state = WIZARD_STATE.lock().unwrap();
+        state.step = WizardStep::Version;
+        state.versions = LoadState::Loaded(vec![GameVersion {
+            id: "1.21.1".to_owned(),
+            stable: true,
+        }]);
+        state.version_search.activate();
+    }
+    assert!(ui.key_event(KeyEvent::new_with_kind(
+        KeyCode::Char('s'),
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat
+    )));
+    {
+        let state = WIZARD_STATE.lock().unwrap();
+        assert_eq!(state.version_search.query, "s");
+        assert!(!state.show_snapshots);
+    }
+    assert!(!ui.key_event(KeyEvent::new_with_kind(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat
+    )));
+    {
+        let mut state = WIZARD_STATE.lock().unwrap();
+        state.step = WizardStep::Confirm;
+        state.name_state = TextState::new().with_value("Held Confirm");
+        state.version_search.deactivate();
+    }
+    assert!(!ui.key_event(KeyEvent::new_with_kind(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat
+    )));
+    assert!(take_result().is_none());
+    assert!(ui.app.instances_state.show_popup);
+    ui.key(KeyCode::Enter);
+    assert_eq!(take_result().unwrap().name, "Held Confirm");
+    assert!(!ui.key_event(KeyEvent::new_with_kind(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat
+    )));
+    assert_eq!(ui.app.focused, FocusedArea::Instances);
+}
+
+#[test]
 fn filtered_vanilla_wizard_returns_the_displayed_version() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let mut instances = instances::State {

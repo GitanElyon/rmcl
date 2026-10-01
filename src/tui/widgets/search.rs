@@ -57,12 +57,21 @@ impl SearchState {
 
         let query_lower = self.query.to_lowercase();
         let text_lower = text.to_lowercase();
+        let mut original_ranges = Vec::with_capacity(text_lower.len());
+        for (start, character) in text.char_indices() {
+            let lowercase_bytes = character.to_lowercase().map(char::len_utf8).sum::<usize>();
+            original_ranges.extend(std::iter::repeat_n(
+                (start, start + character.len_utf8()),
+                lowercase_bytes,
+            ));
+        }
         let mut spans = Vec::new();
         let mut last = 0;
 
-        for (start, _) in text_lower.match_indices(&query_lower) {
-            let end = start + query_lower.len();
-            if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        for (lower_start, _) in text_lower.match_indices(&query_lower) {
+            let start = original_ranges[lower_start].0;
+            let end = original_ranges[lower_start + query_lower.len() - 1].1;
+            if start < last {
                 continue;
             }
             if start > last {

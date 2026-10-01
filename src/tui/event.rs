@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use color_eyre::eyre::Context;
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::{Buffer, CellDiffOption},
     crossterm::event::KeyEventKind,
@@ -29,6 +29,7 @@ impl App {
         let mut image_redraw_marker = false;
         while !self.exit {
             let redraw_requested = crate::feedback::take_redraw_request();
+            let edited_config_changed = self.drain_edited_configs();
             if let Some(params) = new_instance::take_result() {
                 self.spawn_create(params);
             }
@@ -179,6 +180,7 @@ impl App {
             let continuously_animated = spinner_active || error_buffer::has_errors();
             let safety_refresh = last_draw.elapsed() >= Duration::from_secs(1);
             if input_changed
+                || edited_config_changed
                 || continuously_animated
                 || safety_refresh
                 || redraw_requested
@@ -198,10 +200,8 @@ impl App {
                 drawn_image_skips = image_skips;
             }
 
-            if let Some(path) = self.pending_editor.take()
-                && Self::run_editor(terminal, &path)
-            {
-                self.reload_edited_config(&path);
+            if let Some(path) = self.pending_editor.take() {
+                self.run_editor(terminal, &path);
             }
         }
         Ok(())
@@ -259,15 +259,13 @@ impl App {
             crate::instance::ContentManifest::update(&paths.content_manifest(), |manifest| {
                 let mut complete = true;
                 for toggle in toggles {
-                    let Ok(old_path) = toggle.old_path.strip_prefix(&minecraft_dir) else {
-                        complete = false;
-                        continue;
-                    };
-                    let Ok(new_path) = toggle.new_path.strip_prefix(&minecraft_dir) else {
-                        complete = false;
-                        continue;
-                    };
-                    complete &= manifest.rename_record(old_path, new_path, toggle.enabled);
+                    complete &= crate::instance::content::local::record_toggle(
+                        manifest,
+                        &minecraft_dir,
+                        &toggle.old_path,
+                        &toggle.new_path,
+                        toggle.enabled,
+                    )?;
                 }
                 Ok((manifest.clone(), complete))
             });
@@ -358,16 +356,33 @@ impl App {
             }
             Err(_) => return,
         };
-        let Some(result) = result else {
+        let Some(mut result) = result else {
             return;
         };
         self.reconciliation_for = Some((result.instance_name.clone(), result.instance_created));
-        if let Some(error) = result.error {
+        if let Some(error) = &result.error {
             tracing::warn!(
                 "Content reconciliation for {} was incomplete: {}",
                 result.instance_name,
                 error
             );
+            let path = crate::storage::InstancePaths::new(
+                self.instance_manager.instances_dir.join(&selected.name),
+            )
+            .content_manifest();
+            result.manifest = match crate::instance::ContentManifest::load(&path) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    tracing::error!("Could not reload content inventory: {error}");
+                    let Some((name, manifest)) = &self.content_manifest else {
+                        return;
+                    };
+                    if name != &selected.name {
+                        return;
+                    }
+                    manifest.clone()
+                }
+            };
         }
         let minecraft_dir = crate::storage::InstancePaths::new(
             self.instance_manager.instances_dir.join(&selected.name),
@@ -551,16 +566,7 @@ impl App {
     fn handle_events(&mut self) -> color_eyre::Result<bool> {
         match crossterm::event::poll(Duration::from_millis(16)) {
             Ok(true) => match event::read() {
-                Ok(Event::Key(key_event)) if key_event.kind == KeyEventKind::Press => {
-                    self.handle_key_event(key_event)
-                        .wrap_err_with(|| format!("handling key event failed:\n{key_event:#?}"))?;
-                    Ok(true)
-                }
-                Ok(Event::Mouse(mouse_event)) => {
-                    self.handle_mouse_event(mouse_event);
-                    Ok(true)
-                }
-                Ok(_) => Ok(true),
+                Ok(event) => self.dispatch_event(event),
                 Err(e) => {
                     tracing::error!("Event read error: {}", e);
                     Ok(false)
@@ -571,6 +577,155 @@ impl App {
                 tracing::error!("Event poll error: {}", e);
                 Ok(false)
             }
+        }
+    }
+
+    pub(super) fn dispatch_event(&mut self, event: Event) -> color_eyre::Result<bool> {
+        match event {
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    || (key.kind == KeyEventKind::Repeat && self.key_repeat_allowed(&key)) =>
+            {
+                self.handle_key_event(key)
+                    .wrap_err_with(|| format!("handling key event failed:\n{key:#?}"))?;
+                Ok(true)
+            }
+            Event::Key(_) => Ok(false),
+            Event::Mouse(mouse) => {
+                self.handle_mouse_event(mouse);
+                Ok(true)
+            }
+            _ => Ok(true),
+        }
+    }
+
+    fn key_repeat_allowed(&self, key: &KeyEvent) -> bool {
+        let vertical_navigation = matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k')
+        );
+        // These overlays take input before the focused area underneath them.
+        if self
+            .content_update_popup
+            .as_ref()
+            .is_some_and(widgets::content::update::State::visible)
+            || self.modpack_update_popup.is_some()
+            || self.provider_conflict.is_some()
+        {
+            return vertical_navigation;
+        }
+        if let Some(state) = &self.modpack_versions_state {
+            return vertical_navigation || (state.text_input_active() && repeatable_text_key(key));
+        }
+        if self.focused == FocusedArea::ConfirmDelete {
+            return false;
+        }
+
+        let text_input_active = match self.focused {
+            FocusedArea::Instances => {
+                self.instances_state.renaming.is_some() || self.instances_state.search.active
+            }
+            FocusedArea::Popup => new_instance::text_input_active(),
+            FocusedArea::ImportPopup => import_modpack::text_input_active(),
+            FocusedArea::Account => matches!(
+                self.account_state.add_mode,
+                widgets::account::AddMode::OfflineNameInput(_)
+            ),
+            FocusedArea::Settings => matches!(
+                self.settings_state.add_mode,
+                widgets::settings::AddMode::ProfileName(_)
+            ),
+            FocusedArea::InstanceSettings => self
+                .instance_settings
+                .as_ref()
+                .is_some_and(widgets::popups::instance_settings::State::text_input_active),
+            FocusedArea::GlobalSettings => self
+                .global_settings
+                .as_ref()
+                .is_some_and(widgets::popups::global_settings::State::text_input_active),
+            FocusedArea::OverviewExpanded => self.log_overlay_search.active,
+            FocusedArea::Content => {
+                let discovery = self.active_discovery_state();
+                if let Some(state) = discovery
+                    && (self.content_mode == widgets::content::ContentMode::Discover
+                        || state.version_popup.is_some()
+                        || state.project_page_open()
+                        || state.sort_panel_open)
+                {
+                    state.text_input_active()
+                } else {
+                    match self.content_tab {
+                        widgets::content::ContentTab::Mods => self.mods_state.search.active,
+                        widgets::content::ContentTab::ResourcePacks => {
+                            self.resource_packs_state.search.active
+                        }
+                        widgets::content::ContentTab::Shaders => self.shaders_state.search.active,
+                        widgets::content::ContentTab::Worlds
+                            if self.open_world_datapacks.is_some() =>
+                        {
+                            self.world_datapacks_state.search.active
+                        }
+                        widgets::content::ContentTab::Worlds => self.worlds_state.search.active,
+                        widgets::content::ContentTab::Screenshots => {
+                            self.screenshots_state.search.active
+                        }
+                        widgets::content::ContentTab::Logs if self.logs_state.viewer_focused => {
+                            self.logs_state.viewer_search.active
+                        }
+                        widgets::content::ContentTab::Logs => self.logs_state.search.active,
+                        _ => false,
+                    }
+                }
+            }
+            _ => false,
+        };
+        if text_input_active {
+            return repeatable_text_key(key);
+        }
+        if vertical_navigation {
+            return true;
+        }
+        match self.focused {
+            FocusedArea::OverviewExpanded => matches!(key.code, KeyCode::Char('g' | 'G')),
+            FocusedArea::Settings => matches!(
+                key.code,
+                KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l')
+            ),
+            FocusedArea::Content => {
+                if let Some(state) = self.active_discovery_state() {
+                    if state.project_page_open() {
+                        return matches!(
+                            key.code,
+                            KeyCode::PageUp
+                                | KeyCode::PageDown
+                                | KeyCode::Home
+                                | KeyCode::End
+                                | KeyCode::Char('g' | 'G' | 'd' | 'u')
+                        );
+                    }
+                    if state.version_popup.is_some() || state.sort_panel_open {
+                        return false;
+                    }
+                    if self.content_mode == widgets::content::ContentMode::Discover
+                        && widgets::content::discovery::page_key_direction(key).is_some()
+                    {
+                        return true;
+                    }
+                }
+                if self.content_tab == widgets::content::ContentTab::Logs
+                    && self.logs_state.viewer_focused
+                    && matches!(key.code, KeyCode::Char('g' | 'G'))
+                {
+                    return true;
+                }
+                matches!(
+                    key.code,
+                    KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l')
+                ) || (self.content_tab == widgets::content::ContentTab::Screenshots
+                    && key.modifiers.contains(KeyModifiers::SHIFT)
+                    && matches!(key.code, KeyCode::Char('H' | 'J' | 'K' | 'L')))
+            }
+            _ => false,
         }
     }
 
@@ -693,10 +848,8 @@ impl App {
         });
     }
 
-    // spawns $EDITOR/$VISUAL to edit a file. for terminal editors (vim, nano, etc)
-    // gotta leave the alternate screen and restore it after, otherwise the
-    // editor fights with ratatui for the terminal. GUI editors just get spawned detached.
-    fn run_editor(terminal: &mut ratatui::DefaultTerminal, path: &std::path::Path) -> bool {
+    // Terminal editors need the normal screen and input mode while they run.
+    fn run_editor(&mut self, terminal: &mut ratatui::DefaultTerminal, path: &std::path::Path) {
         use ratatui::crossterm::{
             ExecutableCommand,
             event::{DisableMouseCapture, EnableMouseCapture},
@@ -710,15 +863,28 @@ impl App {
         let editor = std::env::var("EDITOR")
             .or_else(|_| std::env::var("VISUAL"))
             .unwrap_or_else(|_| default_editor.to_owned());
-        let parts = editor_parts(&editor);
+        let parts = match editor_parts(&editor) {
+            Ok(parts) => parts,
+            Err(error) => {
+                tracing::error!("Cannot parse editor command: {error}");
+                return;
+            }
+        };
         let Some((program, args)) = parts.split_first() else {
             tracing::error!("Editor command is empty");
-            return false;
+            return;
         };
 
         let is_tui_editor = editor_runs_in_terminal(program);
 
         if is_tui_editor {
+            if let Err(error) = self.watch_edited_config(path) {
+                error_buffer::push_message(
+                    tracing::Level::ERROR,
+                    format!("Cannot watch edited file {}: {error}", path.display()),
+                );
+                return;
+            }
             let _ = stdout().execute(DisableMouseCapture);
             let _ = stdout().execute(LeaveAlternateScreen);
             let _ = disable_raw_mode();
@@ -738,22 +904,60 @@ impl App {
 
             if let Err(e) = result {
                 tracing::error!("Failed to open editor: {}", e);
-                return false;
             }
-            true
         } else {
-            if let Err(e) = std::process::Command::new(program)
-                .args(args)
-                .arg(path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
+            if let Err(e) = self.launch_gui_editor(
+                std::process::Command::new(program).args(args).arg(path),
+                path,
+            ) {
                 tracing::error!("Failed to open editor: {}", e);
-                return false;
             }
-            false
         }
+    }
+
+    fn watch_edited_config(&mut self, path: &std::path::Path) -> color_eyre::Result<()> {
+        let path = std::path::absolute(path)?;
+        if !self
+            .edited_config_watches
+            .iter()
+            .any(|watch| watch.path == path)
+        {
+            self.edited_config_watches
+                .push(EditedConfigWatch::new(path)?);
+        }
+        Ok(())
+    }
+
+    fn launch_gui_editor(
+        &mut self,
+        command: &mut std::process::Command,
+        path: &std::path::Path,
+    ) -> color_eyre::Result<std::thread::JoinHandle<()>> {
+        self.watch_edited_config(path)?;
+        let mut child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        // A GUI launcher can exit after handing the file to an existing editor.
+        // Reap it without tying the file watch or Tokio shutdown to its lifetime.
+        Ok(std::thread::spawn(move || match child.wait() {
+            Ok(status) if !status.success() => tracing::warn!("Editor exited with {status}"),
+            Err(error) => tracing::error!("Failed to wait for editor: {error}"),
+            _ => {}
+        }))
+    }
+
+    fn drain_edited_configs(&mut self) -> bool {
+        let changed = self
+            .edited_config_watches
+            .iter_mut()
+            .filter_map(|watch| watch.changed().then(|| watch.path.clone()))
+            .collect::<Vec<_>>();
+        for path in &changed {
+            self.reload_edited_config(path);
+        }
+        !changed.is_empty()
     }
 
     fn reload_edited_config(&mut self, path: &std::path::Path) {
@@ -1021,6 +1225,120 @@ impl App {
     }
 }
 
+pub(super) struct EditedConfigWatch {
+    path: std::path::PathBuf,
+    contents: Option<Vec<u8>>,
+    events: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    pending: Option<std::time::Instant>,
+    read_error: Option<std::io::ErrorKind>,
+    _watcher: notify::RecommendedWatcher,
+}
+
+impl EditedConfigWatch {
+    fn new(path: std::path::PathBuf) -> color_eyre::Result<Self> {
+        use notify::Watcher;
+
+        let (tx, events) = std::sync::mpsc::channel();
+        let mut watcher = notify::recommended_watcher(move |event| {
+            let _ = tx.send(event);
+        })?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| color_eyre::eyre::eyre!("File has no parent directory"))?;
+        watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
+        let contents = match std::fs::read(&path) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Self {
+            path,
+            contents,
+            events,
+            pending: None,
+            read_error: None,
+            _watcher: watcher,
+        })
+    }
+
+    fn changed(&mut self) -> bool {
+        for result in self.events.try_iter() {
+            match result {
+                Ok(event)
+                    if matches!(event.kind, notify::EventKind::Access(_))
+                        && !matches!(
+                            event.kind,
+                            notify::EventKind::Access(notify::event::AccessKind::Close(
+                                notify::event::AccessMode::Write
+                            ))
+                        ) => {}
+                Ok(event)
+                    if event.need_rescan()
+                        || event.paths.is_empty()
+                        || event.paths.iter().any(|path| {
+                            path.file_name().zip(self.path.file_name()).is_some_and(
+                                |(changed, watched)| changed.eq_ignore_ascii_case(watched),
+                            ) || Some(path.as_path()) == self.path.parent()
+                        }) =>
+                {
+                    self.pending = Some(std::time::Instant::now());
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(
+                        "Edited file watch for {} failed: {error}",
+                        self.path.display()
+                    );
+                    self.pending = Some(std::time::Instant::now());
+                }
+            }
+        }
+        if self
+            .pending
+            .is_none_or(|pending| pending.elapsed() < Duration::from_millis(100))
+        {
+            return false;
+        }
+        let contents = match std::fs::read(&self.path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound
+                    && self.read_error != Some(error.kind())
+                {
+                    tracing::warn!("Cannot read edited file {}: {error}", self.path.display());
+                }
+                self.read_error = Some(error.kind());
+                self.pending = Some(std::time::Instant::now());
+                return false;
+            }
+        };
+        self.pending = None;
+        self.read_error = None;
+        if self.contents.as_ref() == Some(&contents) {
+            return false;
+        }
+        self.contents = Some(contents);
+        true
+    }
+}
+
+fn repeatable_text_key(key: &KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Char(_)
+            | KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+    )
+}
+
 async fn apply_instance_settings_update(
     manager: &InstanceManager,
     previous: &crate::instance::InstanceConfig,
@@ -1123,12 +1441,62 @@ fn editor_runs_in_terminal(editor: &str) -> bool {
     )
 }
 
-fn editor_parts(editor: &str) -> Vec<&str> {
+fn editor_parts(editor: &str) -> std::io::Result<Vec<String>> {
     if std::path::Path::new(editor).is_file() {
-        vec![editor]
+        Ok(vec![editor.to_owned()])
     } else {
-        editor.split_whitespace().collect()
+        split_editor_command(editor)
     }
+}
+
+#[cfg(unix)]
+fn split_editor_command(editor: &str) -> std::io::Result<Vec<String>> {
+    shlex::split(editor).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Unterminated editor quote or escape",
+        )
+    })
+}
+
+#[cfg(windows)]
+fn split_editor_command(editor: &str) -> std::io::Result<Vec<String>> {
+    use windows_sys::Win32::{Foundation::LocalFree, UI::Shell::CommandLineToArgvW};
+    if editor.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    if editor.contains('\0') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Editor command contains a NUL",
+        ));
+    }
+    let command = editor
+        .trim()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut count = 0;
+    // The OS allocates the complete argument array; it remains valid until LocalFree below.
+    let args = unsafe { CommandLineToArgvW(command.as_ptr(), &mut count) };
+    if args.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut parts = Vec::new();
+    for index in 0..count as usize {
+        let arg = unsafe { *args.add(index) };
+        let mut length = 0;
+        while unsafe { *arg.add(length) } != 0 {
+            length += 1;
+        }
+        parts.push(String::from_utf16_lossy(unsafe {
+            std::slice::from_raw_parts(arg, length)
+        }));
+    }
+    unsafe {
+        LocalFree(args.cast());
+    }
+    Ok(parts)
 }
 
 #[cfg(test)]

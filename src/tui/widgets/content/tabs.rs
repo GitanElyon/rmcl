@@ -597,7 +597,6 @@ pub fn render(
         return;
     }
 
-    // lazy-load: only scan when switching to an instance that hasn't been loaded yet
     match tab {
         ContentTab::Mods
         | ContentTab::ResourcePacks
@@ -643,8 +642,8 @@ pub fn render(
         }
         ContentTab::Worlds => {
             if let Some(instance) = instance {
-                if let Some((world_name, world_path)) = open_world_datapacks {
-                    let cache_key = format!("{}:{world_name}", instance.name);
+                if let Some((_, world_path)) = open_world_datapacks {
+                    let cache_key = format!("{}:{world_path:?}", instance.name);
                     let content_dir = world_path.join("datapacks");
                     if world_datapacks_state.loaded_for.as_deref() != Some(cache_key.as_str()) {
                         world_datapacks_state.start_load(

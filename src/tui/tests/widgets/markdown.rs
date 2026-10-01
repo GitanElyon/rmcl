@@ -436,6 +436,18 @@ fn emphasis_next_to_html_tag_boundaries_does_not_leak_markers() {
 }
 
 #[test]
+fn literal_stars_and_code_operators_are_preserved() {
+    let text = formatted_text("`*` and `2 ** 3` and \\*", 80);
+    assert_eq!(
+        text.lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<String>(),
+        "* and 2 ** 3 and *"
+    );
+}
+
+#[test]
 fn fenced_code_blocks_are_rendered_without_fences() {
     let text = formatted_text("```json5\n{\n  \"enabled\": true\n}\n```", 24);
     let rendered = text

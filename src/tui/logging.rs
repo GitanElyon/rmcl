@@ -15,7 +15,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use std::sync::LazyLock;
 
-use crate::feedback::errors::{self as error_buffer, ErrorEvent};
+use crate::feedback::errors as error_buffer;
 
 const MINECRAFT_LOG_TARGET: &str = "mc_instance";
 const DEFAULT_FILE_FILTER: &str = "warn,rmcl=trace";
@@ -79,11 +79,9 @@ pub fn init() -> WorkerGuard {
                 should_record_app_log(metadata.target(), *metadata.level())
             })),
         )
-        .with(
-            StatusLayer::new(error_buffer::ERROR_EVENTS.clone()).with_filter(filter_fn(
-                |metadata| should_record_app_log(metadata.target(), *metadata.level()),
-            )),
-        )
+        .with(StatusLayer.with_filter(filter_fn(|metadata| {
+            should_record_app_log(metadata.target(), *metadata.level())
+        })))
         .init();
 
     guard
@@ -113,12 +111,6 @@ fn open_log_writer(log_dir: &Path) -> (NonBlocking, WorkerGuard) {
 
 struct StatusLayer;
 
-impl StatusLayer {
-    fn new(_events: Arc<Mutex<std::collections::VecDeque<ErrorEvent>>>) -> Self {
-        Self
-    }
-}
-
 impl<S: Subscriber> Layer<S> for StatusLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
         let level = *event.metadata().level();
@@ -140,12 +132,7 @@ impl<S: Subscriber> Layer<S> for StatusLayer {
         }
 
         if level <= Level::WARN && should_record_app_log(target, level) {
-            error_buffer::push_error(ErrorEvent {
-                id: 0,
-                level,
-                message: visitor.message,
-                pushed_at: std::time::Instant::now(),
-            });
+            error_buffer::push_message(level, visitor.message);
         }
     }
 }

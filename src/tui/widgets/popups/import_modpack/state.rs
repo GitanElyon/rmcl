@@ -120,6 +120,23 @@ pub fn has_version_popup() -> bool {
         .is_ok_and(|state| state.version_popup.is_some())
 }
 
+pub(in crate::tui) fn text_input_active() -> bool {
+    let Ok(state) = IMPORT_STATE.lock() else {
+        return false;
+    };
+    match state.step {
+        ImportStep::Input => true,
+        ImportStep::Version => state.version_search.active,
+        ImportStep::Discover => {
+            drop(state);
+            DISCOVERY_STATE
+                .lock()
+                .is_ok_and(|discovery| discovery.text_input_active())
+        }
+        _ => false,
+    }
+}
+
 pub fn discovery_activity() -> Option<&'static str> {
     let wizard = IMPORT_STATE.lock().ok()?;
     let step = wizard.step.clone();

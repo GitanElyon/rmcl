@@ -8,6 +8,30 @@ use std::{
 };
 
 use crate::instance::content::entry::{ContentEntry, WorldDetails, WorldGameMode};
+
+#[tokio::test]
+async fn pending_version_metadata_does_not_queue_another_request_each_redraw() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = ContentListState {
+        provider_icon_meta_dir: Some(temp.path().to_owned()),
+        provider_icon_client: Some(crate::net::HttpClient::new()),
+        local_game_version: "1.21".to_owned(),
+        ..ContentListState::default()
+    };
+    let mut entry = entry("project");
+    entry.provider_project = Some(crate::instance::ProviderProject {
+        provider: "modrinth".to_owned(),
+        project_id: "project".to_owned(),
+        version_id: "version".to_owned(),
+    });
+    state.entries.push(entry);
+    state.request_visible_provider_icons(&[0], 10);
+    let pending = Arc::strong_count(&state.pending_provider_icons);
+    for _ in 0..10 {
+        state.request_visible_provider_icons(&[0], 10);
+    }
+    assert_eq!(Arc::strong_count(&state.pending_provider_icons), pending);
+}
 use ratatui::{
     buffer::Buffer,
     layout::Rect,

@@ -20,8 +20,6 @@ pub mod search;
 pub mod settings;
 pub mod status;
 
-// highlight the first character of a title with the accent color,
-// gives the UI that "keyboard shortcut hint" look
 pub fn styled_title(title: &str, highlight: bool) -> Line<'_> {
     let theme = THEME.as_ref();
     if !highlight || title.is_empty() {

@@ -116,6 +116,13 @@ pub fn take_result() -> Option<WizardParams> {
     }
 }
 
+pub(in crate::tui) fn text_input_active() -> bool {
+    WIZARD_STATE.lock().is_ok_and(|state| {
+        state.step == WizardStep::Name
+            || (state.step == WizardStep::Version && state.version_search.active)
+    })
+}
+
 fn handle_name_key(
     state: &mut WizardState,
     key_event: &KeyEvent,

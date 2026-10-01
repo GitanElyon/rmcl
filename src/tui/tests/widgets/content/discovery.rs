@@ -2,6 +2,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::*;
+
+#[test]
+fn changing_loader_isolates_pending_filter_versions() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    let previous = state.filter_game_versions.clone();
+    state.set_filter_loader(ModLoader::Fabric);
+    *previous.lock().unwrap() = crate::tui::widgets::popups::LoadState::Error("stale".to_owned());
+    assert!(matches!(
+        *state.filter_game_versions.lock().unwrap(),
+        crate::tui::widgets::popups::LoadState::Idle
+    ));
+}
 use crate::tests::TEST_LOCK;
 use chrono::Utc;
 use crossterm::event::KeyModifiers;
@@ -1332,6 +1344,7 @@ fn dependency_resolution_opens_the_existing_confirmation() {
                     title: "Project".to_owned(),
                     version: root_version,
                     installed_path: None,
+                    expected_record: None,
                     kind: crate::instance::ContentKind::Mod,
                     destination: std::path::PathBuf::from("mods"),
                     provider_aliases: Vec::new(),
@@ -1389,6 +1402,7 @@ fn confirming_state_with_plan() -> DiscoveryState {
             title: title.to_owned(),
             version,
             installed_path: None,
+            expected_record: None,
             kind: crate::instance::ContentKind::Mod,
             destination: std::path::PathBuf::from("mods"),
             provider_aliases: Vec::new(),

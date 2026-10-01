@@ -7,6 +7,7 @@ mod state;
 #[cfg(test)]
 pub use render::render;
 pub use render::{popup_rect, render_with_picker};
+pub(in crate::tui) use state::text_input_active;
 pub use state::{
     ImportResult, ImportStep, ImportWizardState, discovery_activity, drain, handle_discovery_click,
     handle_key, has_version_popup, open, take_result,

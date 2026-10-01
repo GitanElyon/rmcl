@@ -54,6 +54,7 @@ pub struct App {
     pub(super) throbber_tick: u8,
     pub(super) error_effects: HashMap<u64, ErrorEffectState>,
     pub(super) pending_editor: Option<std::path::PathBuf>,
+    pub(super) edited_config_watches: Vec<super::event::EditedConfigWatch>,
     pub(super) reconciliation_for: Option<(String, chrono::DateTime<chrono::Utc>)>,
     pub(super) content_manifest: Option<(String, crate::instance::ContentManifest)>,
     pub(super) content_update_snapshot:
@@ -129,7 +130,10 @@ impl App {
         crate::instance::import::refresh::recover_interrupted(&instances_dir);
 
         let manager = InstanceManager::new(instances_dir, meta_dir);
-        let settings_state = widgets::settings::SettingsState::new(manager.meta_dir.clone());
+        let settings_state = widgets::settings::SettingsState::new(
+            manager.meta_dir.clone(),
+            manager.instances_dir.clone(),
+        );
         let instances = manager.load_all();
         instances::spawn_modpack_update_checks(&instances);
         let instances_state = instances::State::with_instances(instances);
@@ -197,6 +201,7 @@ impl App {
             throbber_tick: 0,
             error_effects: HashMap::new(),
             pending_editor: None,
+            edited_config_watches: Vec::new(),
             reconciliation_for: None,
             content_manifest: None,
             content_update_snapshot: None,

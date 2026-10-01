@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
 
 use crate::auth::{Account, AccountStore, AccountType};
@@ -94,7 +94,10 @@ impl UiHarness {
             },
             logs_state: widgets::logs_viewer::LogsState::default(),
             account_state,
-            settings_state: widgets::settings::SettingsState::new(meta_dir),
+            settings_state: widgets::settings::SettingsState::new(
+                meta_dir,
+                instance_manager.instances_dir.clone(),
+            ),
             instance_settings: None,
             pending_instance_settings_updates: Default::default(),
             global_settings: None,
@@ -109,6 +112,7 @@ impl UiHarness {
             throbber_tick: 0,
             error_effects: HashMap::new(),
             pending_editor: None,
+            edited_config_watches: Vec::new(),
             reconciliation_for: None,
             content_manifest: None,
             content_update_snapshot: None,
@@ -164,15 +168,19 @@ impl UiHarness {
     }
 
     pub fn add_account(&mut self, username: &str) {
-        self.app.account_state.store.accounts.push(Account {
-            uuid: username.to_owned(),
-            username: username.to_owned(),
-            account_type: AccountType::Microsoft,
-            active: true,
-            refresh_token: Some("refresh".to_owned()),
-            cached_mc_token: None,
-            cached_mc_token_expires_at: None,
-        });
+        self.app
+            .account_state
+            .store
+            .add(Account {
+                uuid: username.to_owned(),
+                username: username.to_owned(),
+                account_type: AccountType::Microsoft,
+                active: true,
+                refresh_token: Some("refresh".to_owned()),
+                cached_mc_token: None,
+                cached_mc_token_expires_at: None,
+            })
+            .expect("persist test account");
         self.app.account_state.list_state.selected = Some(0);
     }
 
@@ -185,10 +193,14 @@ impl UiHarness {
     }
 
     pub fn key_with(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        self.key_event(KeyEvent::new(code, modifiers));
+    }
+
+    pub fn key_event(&mut self, key: KeyEvent) -> bool {
         let _runtime = self.runtime.enter();
         self.app
-            .handle_key_event(KeyEvent::new(code, modifiers))
-            .expect("handle key");
+            .dispatch_event(Event::Key(key))
+            .expect("handle key")
     }
 
     pub fn mouse(&mut self, kind: MouseEventKind) {

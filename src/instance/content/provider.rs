@@ -61,6 +61,10 @@ pub struct ResolvedFile {
     pub project: ProviderProject,
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds #[must_use] to generated futures"
+)]
 #[async_trait]
 pub trait ContentProvider: Send + Sync {
     fn id(&self) -> &'static str;

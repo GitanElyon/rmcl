@@ -42,6 +42,10 @@ pub struct GameVersion {
     pub stable: bool,
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds #[must_use] to generated futures"
+)]
 #[async_trait]
 pub trait ModLoaderInstaller: Send + Sync {
     fn loader_type(&self) -> ModLoader;

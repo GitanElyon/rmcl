@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
+mod archive;
 pub mod curseforge;
 pub mod mmc;
 pub mod mrpack;
@@ -8,21 +9,7 @@ pub mod refresh;
 
 use std::path::{Path, PathBuf};
 
-const MAX_PACK_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
-
-fn read_pack_manifest(reader: impl std::io::Read) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-
-    let mut bytes = Vec::new();
-    reader
-        .take(MAX_PACK_MANIFEST_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
-    if bytes.len() as u64 > MAX_PACK_MANIFEST_BYTES {
-        return Err("Pack manifest exceeds 8 MiB".to_owned());
-    }
-    Ok(bytes)
-}
+use archive::{override_files, read_pack_manifest};
 
 use crate::instance::manager::InstanceManager;
 use crate::instance::models::ModLoader;
@@ -152,7 +139,8 @@ pub fn unique_instance_name(base: &str, instances_dir: &Path) -> String {
         tracing::trace!("Import instance name '{}' is available", candidate);
         return candidate;
     }
-    for n in 2..100 {
+    let mut n = 2;
+    loop {
         let candidate = format!("{base} ({n})");
         if !instances_dir.join(&candidate).exists() {
             tracing::debug!(
@@ -162,12 +150,8 @@ pub fn unique_instance_name(base: &str, instances_dir: &Path) -> String {
             );
             return candidate;
         }
+        n += 1;
     }
-    tracing::warn!(
-        "Import instance name '{}' had many collisions; using fallback suffix",
-        base
-    );
-    format!("{base} (import)")
 }
 
 pub async fn execute_import(
@@ -284,34 +268,6 @@ async fn owned_files(summary: &ImportSummary) -> Result<Vec<PathBuf>, String> {
         PackFormat::CurseForge => curseforge::owned_files(&summary.archive_path).await,
         PackFormat::Mmc => Err("Managed updates are unavailable for MultiMC packs".to_owned()),
     }
-}
-
-fn override_files(path: &Path, roots: &[&str]) -> Result<Vec<PathBuf>, String> {
-    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
-    let mut files = Vec::new();
-    for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(|error| error.to_string())?;
-        if entry.is_dir() {
-            continue;
-        }
-        let Some(root) = roots
-            .iter()
-            .find(|root| entry.name().starts_with(&format!("{root}/")))
-        else {
-            continue;
-        };
-        let relative = entry
-            .enclosed_name()
-            .ok_or_else(|| format!("Unsafe override path: {}", entry.name()))?
-            .strip_prefix(root)
-            .map_err(|error| error.to_string())?
-            .to_owned();
-        if !relative.as_os_str().is_empty() {
-            files.push(relative);
-        }
-    }
-    Ok(files)
 }
 
 fn cleanup_failed_import(manager: &InstanceManager, name: &str) {

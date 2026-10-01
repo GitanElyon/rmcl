@@ -75,7 +75,12 @@ pub async fn prepare(
         .map_err(|error| error.to_string())?;
     let live = manager.instances_dir.join(&instance.name);
     let needed = directory_size(&live)
-        .saturating_add(target.files.iter().map(|file| file.size).sum::<u64>())
+        .saturating_add(
+            target
+                .files
+                .iter()
+                .fold(0u64, |size, file| size.saturating_add(file.size)),
+        )
         .saturating_add(64 * 1024 * 1024);
     let available = fs2::available_space(&manager.instances_dir).map_err(|e| e.to_string())?;
     if available < needed {
@@ -156,6 +161,9 @@ pub fn apply(
     plan: RefreshPlan,
     replace_conflicts: &HashSet<PathBuf>,
 ) -> Result<InstanceConfig, String> {
+    if crate::instance::runtime::is_active(&plan.instance.name) {
+        return Err("Stop the instance before changing its modpack".to_owned());
+    }
     let live = plan
         .stage_root
         .parent()
@@ -188,7 +196,13 @@ pub fn apply(
     }
     std::fs::rename(&live, &backup).map_err(|error| error.to_string())?;
     if let Err(error) = std::fs::rename(&plan.staged_instance, &live) {
-        let _ = std::fs::rename(&backup, &live);
+        if let Err(rollback) = std::fs::rename(&backup, &live) {
+            return Err(format!(
+                "Could not activate the staged update: {error}; could not restore '{}' from '{}': {rollback}",
+                live.display(),
+                backup.display()
+            ));
+        }
         return Err(format!("Could not activate the staged update: {error}"));
     }
     if let Err(error) = std::fs::remove_dir_all(&backup) {
@@ -284,7 +298,7 @@ fn preserve_refresh_state(
         let path = &record.relative_path;
         if !old_owned.contains(path)
             && !(new_owned.contains(path) && replace_conflicts.contains(path))
-            && old.minecraft().join(path).exists()
+            && std::fs::symlink_metadata(old.minecraft().join(path)).is_ok()
         {
             new_manifest.upsert(record.clone());
         }
@@ -292,7 +306,7 @@ fn preserve_refresh_state(
     for path in new_owned {
         if !replace_conflicts.contains(path)
             && !old_owned.contains(path)
-            && old.minecraft().join(path).exists()
+            && std::fs::symlink_metadata(old.minecraft().join(path)).is_ok()
             && old_manifest.record(path).is_none()
         {
             new_manifest.remove(path);
@@ -300,7 +314,15 @@ fn preserve_refresh_state(
     }
     new_manifest
         .save(&new.content_manifest())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let mut state = PackState::load(&new)
+        .ok_or_else(|| "The staged pack did not record its owned files".to_owned())?;
+    state.files.retain(|path| {
+        old_owned.contains(path)
+            || replace_conflicts.contains(path)
+            || std::fs::symlink_metadata(old.minecraft().join(path)).is_err()
+    });
+    state.save(&new)
 }
 
 fn preserve_user_files(
@@ -332,17 +354,7 @@ fn preserve_user_files(
                 }
                 std::fs::remove_file(&target).map_err(|error| error.to_string())?;
             }
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(
-                std::fs::read_link(&path).map_err(|error| error.to_string())?,
-                &target,
-            )
-            .map_err(|error| error.to_string())?;
-            #[cfg(not(unix))]
-            return Err(format!(
-                "Cannot preserve symbolic link '{}' on this platform",
-                path.display()
-            ));
+            crate::storage::copy_symlink(&path, &target).map_err(|error| error.to_string())?;
         } else if metadata.is_dir() {
             let target = destination.join(entry.file_name());
             std::fs::create_dir_all(&target).map_err(|error| error.to_string())?;
@@ -387,9 +399,13 @@ fn collect_files(
 }
 
 fn directory_size(path: &Path) -> u64 {
-    let mut size = 0;
+    let mut size = 0u64;
     let _ = collect_files(path, path, &mut |_, file| {
-        size += file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        size = size.saturating_add(
+            std::fs::symlink_metadata(file)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        );
         Ok(())
     });
     size
@@ -408,6 +424,50 @@ mod tests {
     use super::*;
 
     use crate::instance::content::manifest::{ContentFileRecord, ContentKind, FileFingerprint};
+
+    #[test]
+    fn refresh_rechecks_whether_the_instance_started_after_preparation() {
+        let temp = tempfile::tempdir().unwrap();
+        let name = "refresh-became-active";
+        let stage_root = temp.path().join(".rmcl-refresh-test");
+        let live = temp.path().join(name);
+        let staged_instance = stage_root.join(name);
+        std::fs::create_dir_all(live.join("minecraft")).unwrap();
+        std::fs::create_dir_all(staged_instance.join("minecraft")).unwrap();
+        let instance = serde_json::from_value(serde_json::json!({
+            "name": name, "game_version": "1.21", "loader": "vanilla",
+            "loader_version": null, "created": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let plan = RefreshPlan {
+            instance,
+            summary: ImportSummary {
+                name: name.to_owned(),
+                pack_version: "2".to_owned(),
+                game_version: "1.21".to_owned(),
+                loader: crate::instance::ModLoader::Vanilla,
+                loader_version: None,
+                mod_count: 0,
+                override_count: 0,
+                format: super::super::PackFormat::Mrpack,
+                archive_path: stage_root.join("pack.mrpack"),
+                source: None,
+            },
+            current_version: "1".to_owned(),
+            target_version: "2".to_owned(),
+            conflicts: Vec::new(),
+            stage_root,
+            staged_instance,
+            old_owned: HashSet::new(),
+            new_owned: HashSet::new(),
+        };
+        crate::instance::runtime::set_state(name, crate::instance::runtime::RunState::Running);
+        let result = apply(plan, &HashSet::new());
+        crate::instance::runtime::remove(name);
+
+        assert!(result.unwrap_err().contains("Stop the instance"));
+        assert!(live.join("minecraft").is_dir());
+    }
 
     fn record(path: &str) -> ContentFileRecord {
         ContentFileRecord {
@@ -446,6 +506,20 @@ mod tests {
         let mut staged = ContentManifest::default();
         staged.upsert(record("mods/pack.jar"));
         staged.save(&new.content_manifest()).unwrap();
+        PackState {
+            source: ProviderProject {
+                provider: "modrinth".to_owned(),
+                project_id: "pack".to_owned(),
+                version_id: "2".to_owned(),
+            },
+            files: vec![
+                "mods/pack.jar".into(),
+                "mods/user.jar".into(),
+                "mods/replace.jar".into(),
+            ],
+        }
+        .save(&new)
+        .unwrap();
 
         preserve_refresh_state(
             old.root(),
@@ -453,6 +527,7 @@ mod tests {
             &HashSet::new(),
             &HashSet::from([
                 PathBuf::from("mods/pack.jar"),
+                PathBuf::from("mods/user.jar"),
                 PathBuf::from("mods/replace.jar"),
             ]),
             &HashSet::from([PathBuf::from("mods/replace.jar")]),
@@ -467,6 +542,13 @@ mod tests {
         assert!(manifest.record(Path::new("mods/user.jar")).is_some());
         assert!(manifest.record(Path::new("mods/pack.jar")).is_some());
         assert!(manifest.record(Path::new("mods/replace.jar")).is_none());
+        assert_eq!(
+            PackState::load(&new).unwrap().files,
+            vec![
+                PathBuf::from("mods/pack.jar"),
+                PathBuf::from("mods/replace.jar")
+            ]
+        );
     }
 
     #[cfg(unix)]

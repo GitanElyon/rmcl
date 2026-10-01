@@ -436,7 +436,7 @@ fn mirror_options(src: &Path, dst: &Path) -> Result<(), ConfigSyncError> {
                     && (file_type.is_file() || file_type.is_symlink())
                 {
                     if file_type.is_symlink() {
-                        copy_link(&entry.path(), &staging.join(&name))?;
+                        crate::storage::copy_symlink(&entry.path(), &staging.join(&name))?;
                     } else {
                         std::fs::copy(entry.path(), staging.join(&name))?;
                     }
@@ -446,7 +446,7 @@ fn mirror_options(src: &Path, dst: &Path) -> Result<(), ConfigSyncError> {
         }
         for entry in std::fs::read_dir(&staging)? {
             let entry = entry?;
-            crate::storage::replace_file(&entry.path(), &dst.join(entry.file_name()))?;
+            std::fs::rename(entry.path(), dst.join(entry.file_name()))?;
         }
         remove_options(dst, &copied)?;
         Ok(())
@@ -506,27 +506,11 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> Result<(), ConfigSyncError> {
         } else if file_type.is_file() {
             std::fs::copy(&source, &target)?;
         } else if file_type.is_symlink() {
-            copy_link(&source, &target)?;
+            crate::storage::copy_symlink(&source, &target)?;
         }
     }
 
     Ok(())
-}
-
-#[cfg(unix)]
-fn copy_link(source: &Path, target: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(std::fs::read_link(source)?, target)
-}
-
-#[cfg(not(unix))]
-fn copy_link(source: &Path, _target: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        format!(
-            "Cannot copy config symlink '{}' on this platform",
-            source.display()
-        ),
-    ))
 }
 
 #[cfg(test)]

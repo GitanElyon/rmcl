@@ -4,6 +4,32 @@
 use super::*;
 
 #[test]
+fn minecraft_prefix_comes_from_the_manifest_used_for_import() {
+    use std::io::Write;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let archive_path = tmp.path().join("pack.zip");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive_path).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    zip.start_file("Decoy/mmc-pack.json", options).unwrap();
+    zip.write_all(b"{}").unwrap();
+    zip.start_file("mmc-pack.json", options).unwrap();
+    zip.write_all(br#"{"components":[{"uid":"net.minecraft","version":"1.21"}]}"#)
+        .unwrap();
+    zip.start_file(".minecraft/options.txt", options).unwrap();
+    zip.write_all(b"correct").unwrap();
+    zip.finish().unwrap();
+
+    let destination = tmp.path().join("minecraft");
+    assert_eq!(build_summary(&archive_path).unwrap().override_count, 1);
+    extract_mmc_archive(&archive_path, &destination).unwrap();
+    assert_eq!(
+        std::fs::read(destination.join("options.txt")).unwrap(),
+        b"correct"
+    );
+}
+
+#[test]
 fn parse_mmc_pack_json() {
     let json = r#"{
             "formatVersion": 1,

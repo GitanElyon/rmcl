@@ -233,12 +233,9 @@ fn instance_name_from_cfg(path: &Path) -> Option<String> {
 }
 
 fn find_archive_prefix(archive: &zip::ZipArchive<std::fs::File>) -> String {
-    for name in archive.file_names() {
-        if name.ends_with("mmc-pack.json") {
-            return name.strip_suffix("mmc-pack.json").unwrap_or("").to_string();
-        }
-    }
-    String::new()
+    find_entry(archive, "mmc-pack.json")
+        .and_then(|name| name.strip_suffix("mmc-pack.json").map(str::to_owned))
+        .unwrap_or_default()
 }
 
 // looks for a file at root or one level deep (some archives nest everything

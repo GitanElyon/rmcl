@@ -123,3 +123,25 @@ fn copy_dir_recursive_copies_nested_tree() {
         b"inner"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn cross_device_copy_preserves_links_without_following_directory_cycles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("old");
+    let destination = tmp.path().join("new");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("data.txt"), b"data").unwrap();
+    std::os::unix::fs::symlink("data.txt", source.join("linked.txt")).unwrap();
+    std::os::unix::fs::symlink(".", source.join("cycle")).unwrap();
+
+    copy_dir_recursive(&source, &destination).unwrap();
+    assert_eq!(
+        fs::read_link(destination.join("linked.txt")).unwrap(),
+        Path::new("data.txt")
+    );
+    assert_eq!(
+        fs::read_link(destination.join("cycle")).unwrap(),
+        Path::new(".")
+    );
+}

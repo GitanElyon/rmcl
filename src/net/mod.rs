@@ -333,7 +333,7 @@ async fn download_file_once(
         }
         file.flush().await?;
         drop(file);
-        crate::storage::replace_file(&temporary, dest)?;
+        tokio::fs::rename(&temporary, dest).await?;
         Ok(())
     }
     .await;

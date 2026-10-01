@@ -36,8 +36,6 @@ fn detect_format_recognises_mrpack() {
 
 #[test]
 fn detect_format_recognises_mmc_flat() {
-    // mmc-pack.json at the zip root - the flat layout that some mmc
-    // archives use.
     let tmp = tempfile::tempdir().unwrap();
     let path = make_pack_zip(tmp.path(), "pack.zip", &[("mmc-pack.json", b"{}")]);
     assert_eq!(detect_format(&path), Ok(PackFormat::Mmc));
@@ -45,8 +43,6 @@ fn detect_format_recognises_mmc_flat() {
 
 #[test]
 fn detect_format_recognises_mmc_nested() {
-    // mmc-pack.json one directory deep - the more common layout where
-    // the archive wraps everything in a named directory.
     let tmp = tempfile::tempdir().unwrap();
     let path = make_pack_zip(tmp.path(), "pack.zip", &[("MyPack/mmc-pack.json", b"{}")]);
     assert_eq!(detect_format(&path), Ok(PackFormat::Mmc));
@@ -54,8 +50,6 @@ fn detect_format_recognises_mmc_nested() {
 
 #[test]
 fn detect_format_prefers_mrpack_when_both_markers_present() {
-    // a zip with both markers should resolve to Mrpack since the
-    // detector checks modrinth.index.json first.
     let tmp = tempfile::tempdir().unwrap();
     let path = make_pack_zip(
         tmp.path(),
@@ -119,6 +113,17 @@ fn unique_name_multiple_collisions() {
     }
     let name = unique_instance_name("TestPack", tmp.path());
     assert_eq!(name, "TestPack (4)");
+}
+
+#[test]
+fn unique_name_keeps_searching_after_ninety_nine_collisions() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("Pack")).unwrap();
+    for suffix in 2..=100 {
+        std::fs::create_dir(tmp.path().join(format!("Pack ({suffix})"))).unwrap();
+    }
+    std::fs::create_dir(tmp.path().join("Pack (import)")).unwrap();
+    assert_eq!(unique_instance_name("Pack", tmp.path()), "Pack (101)");
 }
 
 #[test]

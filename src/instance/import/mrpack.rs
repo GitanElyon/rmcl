@@ -35,9 +35,21 @@ pub struct MrpackFile {
     pub path: String,
     #[serde(default)]
     pub hashes: HashMap<String, String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
     pub downloads: Vec<String>,
     #[serde(rename = "fileSize")]
     pub file_size: u64,
+}
+
+impl MrpackIndex {
+    fn client_files(&self) -> impl Iterator<Item = &MrpackFile> {
+        self.files.iter().filter(|file| {
+            file.env
+                .get("client")
+                .is_none_or(|support| support != "unsupported")
+        })
+    }
 }
 
 pub fn parse_mrpack(path: &Path) -> Result<MrpackIndex, String> {
@@ -50,6 +62,12 @@ pub fn parse_mrpack(path: &Path) -> Result<MrpackIndex, String> {
     let raw = super::read_pack_manifest(entry)?;
     let index: MrpackIndex =
         serde_json::from_slice(&raw).map_err(|e| format!("Invalid manifest JSON: {e}"))?;
+    if index.format_version != 1 || index.game != "minecraft" {
+        return Err(format!(
+            "Unsupported .mrpack format {} for game '{}'",
+            index.format_version, index.game
+        ));
+    }
     tracing::debug!(
         "Parsed .mrpack '{}' version_id={} files={} deps={}",
         index.name,
@@ -104,7 +122,7 @@ pub fn build_summary(path: &Path) -> Result<ImportSummary, String> {
     let (loader_opt, loader_version) = loader_from_dependencies(&index.dependencies);
     let loader = loader_opt.unwrap_or(ModLoader::Vanilla);
 
-    let override_count = count_overrides(path).unwrap_or(0);
+    let override_count = super::override_files(path, &["overrides", "client-overrides"])?.len();
     tracing::trace!(
         ".mrpack summary: game_version={} loader={:?} loader_version={:?} overrides={}",
         game_version,
@@ -119,25 +137,12 @@ pub fn build_summary(path: &Path) -> Result<ImportSummary, String> {
         game_version,
         loader,
         loader_version,
-        mod_count: index.files.len(),
+        mod_count: index.client_files().count(),
         override_count,
         format: PackFormat::Mrpack,
         archive_path: path.to_path_buf(),
         source: None,
     })
-}
-
-fn count_overrides(mrpack_path: &Path) -> Result<usize, String> {
-    let file = std::fs::File::open(mrpack_path).map_err(|e| e.to_string())?;
-    let archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-    let count = archive
-        .file_names()
-        .filter(|name| {
-            (name.starts_with("overrides/") || name.starts_with("client-overrides/"))
-                && !name.ends_with('/')
-        })
-        .count();
-    Ok(count)
 }
 
 pub async fn execute_import(
@@ -173,8 +178,6 @@ pub async fn execute_import(
     Ok(())
 }
 
-// downloads all mod files listed in the mrpack index, capped at 10 concurrent
-// downloads to avoid getting rate-limited into oblivion
 async fn download_mod_files(
     index: &MrpackIndex,
     minecraft_dir: &Path,
@@ -183,7 +186,7 @@ async fn download_mod_files(
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let client = crate::net::HttpClient::new();
-    let total = index.files.len();
+    let total = index.client_files().count();
     let completed = Arc::new(AtomicUsize::new(0));
     tracing::debug!(
         "Downloading {} file(s) from .mrpack '{}' into {}",
@@ -194,60 +197,14 @@ async fn download_mod_files(
 
     progress::set_action(format!("Downloading mods... 0/{total}"));
 
-    // bounded concurrency via manual JoinSet draining: seed with max_concurrent
-    // tasks, then spawn a new one each time one finishes
     let mut tasks = tokio::task::JoinSet::new();
-    let max_concurrent = 10;
-    let mut file_iter = index.files.iter();
 
-    for _ in 0..max_concurrent {
-        if let Some(file) = file_iter.next() {
-            let client = client.clone();
-            let relative = safe_mrpack_path(&file.path)?;
-            let dest = minecraft_dir.join(relative);
-            let url = file.downloads.first().cloned().ok_or_else(|| {
-                crate::net::NetError::Parse(format!(
-                    ".mrpack file '{}' has no download URL",
-                    file.path
-                ))
-            })?;
-            let filename = file
-                .path
-                .rsplit('/')
-                .next()
-                .unwrap_or(&file.path)
-                .to_string();
-            let hashes = file.hashes.clone();
-            let file_size = file.file_size;
-            let completed = completed.clone();
-            tasks.spawn(async move {
-                if let Some(parent) = dest.parent()
-                    && let Err(error) = tokio::fs::create_dir_all(parent).await
-                {
-                    return Err(crate::net::NetError::from(error));
-                }
-                progress::set_sub_action(filename);
-                tracing::trace!("Downloading .mrpack file to {}", dest.display());
-                crate::net::download_file(&client, &url, &dest, |_, _| {}).await?;
-                if !verify_mrpack_file(&dest, file_size, &hashes)? {
-                    let _ = tokio::fs::remove_file(&dest).await;
-                    return Err(crate::net::NetError::Parse(format!(
-                        "Downloaded .mrpack file '{}' failed its size or hash verification",
-                        dest.display()
-                    )));
-                }
-                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                progress::set_action(format!("Downloading mods... {done}/{total}"));
-                Ok::<(), crate::net::NetError>(())
-            });
-        }
-    }
-
-    for file in file_iter {
-        if let Some(result) = tasks.join_next().await {
-            result
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+    for file in index.client_files() {
+        // Keep at most ten downloads in flight to avoid provider rate limits.
+        if tasks.len() == 10
+            && let Some(result) = tasks.join_next().await
+        {
+            result??;
         }
         let client = client.clone();
         let relative = safe_mrpack_path(&file.path)?;
@@ -287,9 +244,7 @@ async fn download_mod_files(
     }
 
     while let Some(result) = tasks.join_next().await {
-        result
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+        result??;
     }
 
     Ok(())
@@ -297,11 +252,7 @@ async fn download_mod_files(
 
 fn safe_mrpack_path(path: &str) -> Result<PathBuf, crate::net::NetError> {
     let path = Path::new(path);
-    if path.as_os_str().is_empty()
-        || path
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
+    if !crate::storage::safe_relative_path(path) {
         return Err(crate::net::NetError::Parse(format!(
             "Unsafe .mrpack file path '{}'",
             path.display()
@@ -311,9 +262,9 @@ fn safe_mrpack_path(path: &str) -> Result<PathBuf, crate::net::NetError> {
 }
 
 pub(super) fn owned_files(path: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut files: Vec<_> = parse_mrpack(path)?
-        .files
-        .into_iter()
+    let index = parse_mrpack(path)?;
+    let mut files: Vec<_> = index
+        .client_files()
         .map(|file| safe_mrpack_path(&file.path).map_err(|error| error.to_string()))
         .collect::<Result<_, _>>()?;
     files.extend(super::override_files(
@@ -346,7 +297,7 @@ fn seed_content_manifest(
     paths: &InstancePaths,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut manifest = ContentManifest::default();
-    for file in &index.files {
+    for file in index.client_files() {
         let relative_path = Path::new(&file.path);
         let Some(kind) = mrpack_content_kind(relative_path) else {
             continue;
@@ -429,65 +380,11 @@ fn extract_overrides(
     progress::set_action("Extracting overrides...".to_string());
     progress::set_sub_action(String::new());
 
-    let file = std::fs::File::open(mrpack_path)?;
-    let mut archive = zip::ZipArchive::new(file)?;
-    let mut extracted = 0usize;
-    let mut dirs = 0usize;
-
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        let entry_name = entry.name().to_string();
-
-        let root = if entry_name.starts_with("overrides/") {
-            "overrides"
-        } else if entry_name.starts_with("client-overrides/") {
-            "client-overrides"
-        } else {
-            continue;
-        };
-        let enclosed = entry.enclosed_name().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Unsafe override path: {entry_name}"),
-            )
-        })?;
-        let relative = enclosed.strip_prefix(root).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Invalid override path: {entry_name}"),
-            )
-        })?;
-
-        if relative.as_os_str().is_empty() || entry_name.ends_with('/') {
-            let dir = minecraft_dir.join(relative);
-            std::fs::create_dir_all(dir)?;
-            dirs += 1;
-            continue;
-        }
-
-        let dest = minecraft_dir.join(relative);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let mut destination = std::fs::File::create(&dest)?;
-        let size = std::io::copy(&mut entry, &mut destination)?;
-        tracing::trace!(
-            "Extracting .mrpack override {} to {} ({} bytes)",
-            entry_name,
-            dest.display(),
-            size
-        );
-        extracted += 1;
-    }
-
-    tracing::debug!(
-        "Extracted {} override files and {} directories from {}",
-        extracted,
-        dirs,
-        mrpack_path.display()
-    );
-    Ok(())
+    super::archive::extract_overrides(
+        mrpack_path,
+        minecraft_dir,
+        &["overrides", "client-overrides"],
+    )
 }
 
 #[cfg(test)]

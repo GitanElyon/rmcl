@@ -93,7 +93,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
         let entry = entry?;
         let ty = entry.file_type()?;
         let dst_path = dst.join(entry.file_name());
-        if ty.is_dir() {
+        if ty.is_symlink() {
+            crate::storage::copy_symlink(&entry.path(), &dst_path)?;
+        } else if ty.is_dir() {
             copy_dir_recursive(&entry.path(), &dst_path)?;
         } else {
             fs::copy(entry.path(), &dst_path)?;

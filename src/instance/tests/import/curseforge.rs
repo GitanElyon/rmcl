@@ -87,4 +87,7 @@ async fn override_only_pack_tracks_files_under_its_configured_root() {
         owned_files(&path).await.unwrap(),
         vec![std::path::PathBuf::from("config/pack.toml")]
     );
+    download_files(&parse(&path).unwrap(), &temp.path().join("minecraft"))
+        .await
+        .unwrap();
 }

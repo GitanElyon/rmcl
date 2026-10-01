@@ -108,6 +108,7 @@ fn extraction_merges_both_override_roots() {
         &[
             ("overrides/config/test.toml", b"config"),
             ("client-overrides/options.txt", b"options"),
+            ("overrides/options.txt", b"generic"),
         ],
     );
     let minecraft = tmp.path().join("minecraft");
@@ -122,6 +123,63 @@ fn extraction_merges_both_override_roots() {
         std::fs::read(minecraft.join("options.txt")).unwrap(),
         b"options"
     );
+}
+
+#[test]
+fn server_only_files_are_excluded_from_client_imports() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("server-only.mrpack");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    zip.start_file(
+        "modrinth.index.json",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.write_all(br#"{
+        "formatVersion": 1, "game": "minecraft", "versionId": "1", "name": "Pack",
+        "dependencies": {"minecraft": "1.21"},
+        "files": [
+            {"path": "mods/server.jar", "env": {"client": "unsupported"}, "downloads": [], "fileSize": 0},
+            {"path": "mods/client.jar", "downloads": [], "fileSize": 0}
+        ]
+    }"#).unwrap();
+    zip.finish().unwrap();
+
+    assert_eq!(build_summary(&path).unwrap().mod_count, 1);
+    assert_eq!(
+        owned_files(&path).unwrap(),
+        vec![PathBuf::from("mods/client.jar")]
+    );
+}
+
+#[test]
+fn unsupported_pack_format_or_game_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("unsupported.mrpack");
+    for (from, to) in [
+        ("\"formatVersion\": 1", "\"formatVersion\": 2"),
+        ("\"game\": \"minecraft\"", "\"game\": \"other\""),
+    ] {
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        zip.start_file(
+            "modrinth.index.json",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(
+            std::str::from_utf8(INDEX)
+                .unwrap()
+                .replace(from, to)
+                .as_bytes(),
+        )
+        .unwrap();
+        zip.finish().unwrap();
+        assert!(
+            parse_mrpack(&path)
+                .unwrap_err()
+                .contains("Unsupported .mrpack")
+        );
+    }
 }
 
 #[test]
@@ -150,7 +208,7 @@ fn mod_files_download_to_their_manifest_paths() {
         Mock::given(method("GET"))
             .and(path("/first.jar"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(b"first".to_vec()))
-            .expect(1)
+            .expect(11)
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -159,7 +217,7 @@ fn mod_files_download_to_their_manifest_paths() {
             .expect(1)
             .mount(&server)
             .await;
-        let index = MrpackIndex {
+        let mut index = MrpackIndex {
             format_version: 1,
             game: "minecraft".to_owned(),
             version_id: "1".to_owned(),
@@ -168,18 +226,27 @@ fn mod_files_download_to_their_manifest_paths() {
             files: vec![
                 MrpackFile {
                     path: "mods/first.jar".to_owned(),
+                    env: Default::default(),
                     hashes: Default::default(),
                     downloads: vec![format!("{}/first.jar", server.uri())],
                     file_size: 5,
                 },
                 MrpackFile {
                     path: "resourcepacks/second.jar".to_owned(),
+                    env: Default::default(),
                     hashes: Default::default(),
                     downloads: vec![format!("{}/second.jar", server.uri())],
                     file_size: 6,
                 },
             ],
         };
+        index.files.extend((2..12).map(|number| MrpackFile {
+            path: format!("mods/extra-{number}.jar"),
+            env: Default::default(),
+            hashes: Default::default(),
+            downloads: vec![format!("{}/first.jar", server.uri())],
+            file_size: 5,
+        }));
         let tmp = tempfile::tempdir().unwrap();
 
         download_mod_files(&index, tmp.path()).await.unwrap();
@@ -192,6 +259,12 @@ fn mod_files_download_to_their_manifest_paths() {
             std::fs::read(tmp.path().join("resourcepacks/second.jar")).unwrap(),
             b"second"
         );
+        for number in 2..12 {
+            assert_eq!(
+                std::fs::read(tmp.path().join(format!("mods/extra-{number}.jar"))).unwrap(),
+                b"first"
+            );
+        }
         crate::feedback::progress::clear();
     });
 }
@@ -206,7 +279,7 @@ fn mod_file_without_a_download_url_fails_without_creating_a_file() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let index = MrpackIndex {
+        let mut index = MrpackIndex {
             format_version: 1,
             game: "minecraft".to_owned(),
             version_id: "1".to_owned(),
@@ -214,6 +287,7 @@ fn mod_file_without_a_download_url_fails_without_creating_a_file() {
             dependencies: Default::default(),
             files: vec![MrpackFile {
                 path: "mods/missing.jar".to_owned(),
+                env: Default::default(),
                 hashes: Default::default(),
                 downloads: Vec::new(),
                 file_size: 0,
@@ -222,6 +296,11 @@ fn mod_file_without_a_download_url_fails_without_creating_a_file() {
         let tmp = tempfile::tempdir().unwrap();
 
         assert!(download_mod_files(&index, tmp.path()).await.is_err());
+        assert!(!tmp.path().join("mods/missing.jar").exists());
+        index.files[0]
+            .env
+            .insert("client".to_owned(), "unsupported".to_owned());
+        download_mod_files(&index, tmp.path()).await.unwrap();
         assert!(!tmp.path().join("mods/missing.jar").exists());
         crate::feedback::progress::clear();
     });
@@ -247,6 +326,7 @@ fn mod_file_rejects_paths_outside_the_instance() {
             dependencies: Default::default(),
             files: vec![MrpackFile {
                 path: "../escape.jar".to_owned(),
+                env: Default::default(),
                 hashes: Default::default(),
                 downloads: vec!["https://example.invalid/escape.jar".to_owned()],
                 file_size: 1,
@@ -286,6 +366,7 @@ fn mod_file_removes_downloads_with_invalid_metadata() {
             dependencies: Default::default(),
             files: vec![MrpackFile {
                 path: "mods/corrupt.jar".to_owned(),
+                env: Default::default(),
                 hashes: Default::default(),
                 downloads: vec![format!("{}/corrupt.jar", server.uri())],
                 file_size: 1,
@@ -320,6 +401,7 @@ fn import_seeds_exact_modrinth_content_identity() {
         dependencies: Default::default(),
         files: vec![MrpackFile {
             path: relative_path.to_string_lossy().into_owned(),
+            env: Default::default(),
             hashes: HashMap::from([("sha512".to_owned(), sha512)]),
             downloads: vec![
                 "https://cdn.modrinth.com/data/project/versions/version/example.zip".to_owned(),

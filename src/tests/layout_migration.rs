@@ -50,6 +50,44 @@ fn migrated_layout_detects_newly_copied_shared_data() {
 }
 
 #[test]
+fn incomplete_migration_is_not_skipped_after_legacy_directories_were_renamed() {
+    let temp = tempfile::tempdir().unwrap();
+    let instances = temp.path().join("instances");
+    let meta = temp.path().join("meta");
+    let config = temp.path().join("config.toml");
+    let state = instances.join("Copied/.rmcl");
+    fs::create_dir_all(state.join("config-sync/local-config")).unwrap();
+    fs::create_dir_all(state.join("content/config")).unwrap();
+    fs::write(state.join("config-sync/local-config/options.txt"), b"old").unwrap();
+    fs::write(state.join("content/config/options.txt"), b"current").unwrap();
+    initialize_new_layout(&meta).unwrap();
+
+    assert!(run(&instances, &meta, &config, |_| {}).is_err());
+    assert!(!state.exists());
+    assert!(MetadataPaths::new(&meta).migration_journal().exists());
+    assert!(run(&instances, &meta, &config, |_| {}).is_err());
+    assert_eq!(
+        fs::read(instances.join("Copied/rmcl/content/config/options.txt")).unwrap(),
+        b"current"
+    );
+}
+
+#[test]
+fn repeated_migrations_create_separate_backups() {
+    let temp = tempfile::tempdir().unwrap();
+    let instances = temp.path().join("instances");
+    let meta = temp.path().join("meta");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(instances.join("First/.minecraft")).unwrap();
+    let first = run(&instances, &meta, &config, |_| {}).unwrap();
+    fs::create_dir_all(instances.join("Second/.minecraft")).unwrap();
+    let second = run(&instances, &meta, &config, |_| {}).unwrap();
+
+    assert_ne!(first, second);
+    assert!(second.join("instances/Second/.minecraft").is_dir());
+}
+
+#[test]
 fn migration_backs_up_and_renames_instance_directories() {
     let temp = tempfile::tempdir().unwrap();
     let instances = temp.path().join("instances");

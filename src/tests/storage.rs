@@ -68,3 +68,15 @@ fn atomic_write_replaces_existing_file() {
     write_atomic(&path, b"new").unwrap();
     assert_eq!(std::fs::read(path).unwrap(), b"new");
 }
+
+#[test]
+fn failed_atomic_replacement_keeps_the_destination_and_removes_staging() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.json");
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("keep"), b"old").unwrap();
+
+    assert!(write_atomic(&path, b"new").is_err());
+    assert_eq!(std::fs::read(path.join("keep")).unwrap(), b"old");
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+}

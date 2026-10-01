@@ -80,3 +80,18 @@ fn failed_atomic_replacement_keeps_the_destination_and_removes_staging() {
     assert_eq!(std::fs::read(path.join("keep")).unwrap(), b"old");
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn private_atomic_writes_keep_credentials_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("accounts.json");
+    std::fs::write(&path, b"old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    write_atomic_private(&path, b"new").unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}

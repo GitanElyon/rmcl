@@ -12,7 +12,7 @@ pub fn desktop_path(name: &str) -> Option<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        dirs_next::data_dir().map(|d| {
+        dirs::data_dir().map(|d| {
             d.join("applications")
                 .join(format!("rmcl-{sanitized}.desktop"))
         })
@@ -36,7 +36,7 @@ pub fn desktop_path(name: &str) -> Option<PathBuf> {
 }
 
 pub fn icon_path() -> Option<PathBuf> {
-    dirs_next::data_dir().map(|d| d.join("rmcl").join("icon.svg"))
+    dirs::data_dir().map(|d| d.join("rmcl").join("icon.svg"))
 }
 
 fn ensure_icon() -> Option<PathBuf> {

@@ -3,9 +3,6 @@
 
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static TEMP_FILE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomic_with_mode(path, bytes, false)
@@ -16,49 +13,57 @@ pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 fn write_atomic_with_mode(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
+    use std::io::Write;
+
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
     std::fs::create_dir_all(parent)?;
-    let id = TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("data");
-    let temporary = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), id));
-    let result = (|| {
-        use std::io::Write;
-
-        let mut options = std::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        if private {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        #[cfg(not(unix))]
-        let _ = private;
-        let mut file = options.open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".rmcl-write-");
+    #[cfg(unix)]
+    if !private {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
     }
-    result
+    #[cfg(not(unix))]
+    let _ = private;
+    let mut file = builder.tempfile_in(parent)?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map(|_| ()).map_err(|error| error.error)
+}
+
+#[cfg(any(unix, windows))]
+pub(crate) fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
+    copy_symlink_target(source, destination, &std::fs::read_link(source)?)
 }
 
 #[cfg(unix)]
-pub(crate) fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(std::fs::read_link(source)?, destination)
+pub(crate) fn copy_symlink_target(
+    _source: &Path,
+    destination: &Path,
+    target: &Path,
+) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, destination)
 }
 
 #[cfg(windows)]
-pub(crate) fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
-    let target = std::fs::read_link(source)?;
-    if source.is_dir() {
+pub(crate) fn copy_symlink_target(
+    source: &Path,
+    destination: &Path,
+    target: &Path,
+) -> io::Result<()> {
+    use std::os::windows::fs::FileTypeExt;
+    if std::fs::symlink_metadata(source)?
+        .file_type()
+        .is_symlink_dir()
+    {
         std::os::windows::fs::symlink_dir(target, destination)
     } else {
         std::os::windows::fs::symlink_file(target, destination)

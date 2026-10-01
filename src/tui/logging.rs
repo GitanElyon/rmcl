@@ -40,7 +40,7 @@ fn push_app_log(line: String) {
 // returns a WorkerGuard that must be held alive for the duration of the
 // program, otherwise the file logging thread gets dropped immediately.
 pub fn init() -> WorkerGuard {
-    let log_dir = match dirs_next::cache_dir() {
+    let log_dir = match dirs::cache_dir() {
         Some(d) => d.join("rmcl"),
         None => std::path::PathBuf::from("./cache"),
     };

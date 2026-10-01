@@ -12,22 +12,22 @@ const OLD_NAME: &str = "mcl";
 const NEW_NAME: &str = "rmcl";
 
 pub fn run_legacy_rename() {
-    if let Some(dir) = dirs_next::config_dir() {
+    if let Some(dir) = dirs::config_dir() {
         rename_top_level(&dir.join(OLD_NAME), &dir.join(NEW_NAME));
     }
-    if let Some(dir) = dirs_next::data_dir() {
+    if let Some(dir) = dirs::data_dir() {
         let new_data = dir.join(NEW_NAME);
         rename_top_level(&dir.join(OLD_NAME), &new_data);
         cleanup_instance_leftovers(&new_data.join("instances"));
         rewrite_linux_desktop_entries(&dir, &new_data.join("instances"));
     }
-    if let Some(dir) = dirs_next::cache_dir() {
+    if let Some(dir) = dirs::cache_dir() {
         rename_top_level(&dir.join(OLD_NAME), &dir.join(NEW_NAME));
     }
-    if let (Some(desk), Some(data)) = (dirs::desktop_dir(), dirs_next::data_dir()) {
+    if let (Some(desk), Some(data)) = (dirs::desktop_dir(), dirs::data_dir()) {
         rewrite_native_desktop_shortcuts(&desk, &data.join(NEW_NAME).join("instances"));
     }
-    if let (Some(config_dir), Some(data_dir)) = (dirs_next::config_dir(), dirs_next::data_dir())
+    if let (Some(config_dir), Some(data_dir)) = (dirs::config_dir(), dirs::data_dir())
         && !data_dir.join(OLD_NAME).exists()
         && let Err(error) =
             crate::config::migrate_legacy_data_paths(&config_dir.join(NEW_NAME).join("config.toml"))

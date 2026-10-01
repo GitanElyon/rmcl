@@ -273,3 +273,41 @@ fn touch_last_played_updates_field() {
         "last_played should be roughly now, got age {age:?}"
     );
 }
+
+#[test]
+fn instance_names_are_portable_components() {
+    for name in [
+        "C:victim",
+        "C:",
+        "a:b",
+        "CON",
+        "con.txt",
+        "CON .txt",
+        "AUX.jar",
+        "NUL",
+        "PRN",
+        "COM1",
+        "lpt9.log",
+        "COM¹",
+        "LPT².txt",
+        "CLOCK$",
+        "CONIN$",
+        "CONOUT$",
+        "trailing.",
+        "trailing ",
+        "bad?name",
+        "bad*name",
+        "bad\"name",
+        "bad<name",
+        "bad>name",
+        "bad|name",
+        r"path\name",
+        ".",
+        "..",
+    ] {
+        assert!(validate_name(name).is_err(), "{name}");
+    }
+    for name in ["CONifer", "COM0", "COM10", "世界", "%USERNAME%", "My Pack"] {
+        assert!(validate_name(name).is_ok(), "{name}");
+    }
+}

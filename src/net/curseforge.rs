@@ -232,7 +232,8 @@ async fn get<T: serde::de::DeserializeOwned>(
     api_key: &str,
     url: &str,
 ) -> Result<T, NetError> {
-    authenticated_request(url, || client.inner().get(url).header("x-api-key", api_key)).await
+    super::request_json_with_retry(url, || client.inner().get(url).header("x-api-key", api_key))
+        .await
 }
 
 async fn post<B: serde::Serialize + ?Sized, T: serde::de::DeserializeOwned>(
@@ -241,7 +242,7 @@ async fn post<B: serde::Serialize + ?Sized, T: serde::de::DeserializeOwned>(
     url: &str,
     body: &B,
 ) -> Result<T, NetError> {
-    authenticated_request(url, || {
+    super::request_json_with_retry(url, || {
         client
             .inner()
             .post(url)
@@ -249,33 +250,6 @@ async fn post<B: serde::Serialize + ?Sized, T: serde::de::DeserializeOwned>(
             .json(body)
     })
     .await
-}
-
-async fn authenticated_request<T: serde::de::DeserializeOwned>(
-    url: &str,
-    build: impl Fn() -> reqwest::RequestBuilder,
-) -> Result<T, NetError> {
-    for attempt in 0..=super::MAX_RETRIES {
-        let result = async {
-            let response = build().send().await?;
-            if !response.status().is_success() {
-                return Err(NetError::StatusError {
-                    status: response.status().as_u16(),
-                    url: url.to_owned(),
-                });
-            }
-            Ok(response.json().await?)
-        }
-        .await;
-        match result {
-            Ok(value) => return Ok(value),
-            Err(error) if error.is_retryable() && attempt < super::MAX_RETRIES => {
-                super::sleep_before_retry("request", url, attempt, &error).await;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    unreachable!("retry loop returns on success or final error")
 }
 
 #[allow(clippy::too_many_arguments)]

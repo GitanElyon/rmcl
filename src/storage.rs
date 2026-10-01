@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 mod filesystem;
-pub(crate) use filesystem::copy_symlink;
+pub(crate) use filesystem::{copy_symlink, copy_symlink_target};
 pub use filesystem::{write_atomic, write_atomic_private};
 
 pub const MINECRAFT_DIR_NAME: &str = "minecraft";

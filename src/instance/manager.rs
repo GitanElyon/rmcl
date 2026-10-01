@@ -628,7 +628,6 @@ impl InstanceManager {
     }
 }
 
-// guard against path traversal and other filesystem shenanigans
 pub(crate) fn validate_name(name: &str) -> Result<(), InstanceError> {
     if name.is_empty() || name.len() > 64 {
         return Err(InstanceError::InvalidName(format!(
@@ -636,17 +635,41 @@ pub(crate) fn validate_name(name: &str) -> Result<(), InstanceError> {
             name
         )));
     }
-    if name.contains('/')
-        || name.contains('\\')
-        || name.starts_with('.')
-        || name.chars().any(char::is_control)
-    {
+    if name.starts_with('.') || !portable_component(name) {
         return Err(InstanceError::InvalidName(format!(
-            "Name contains invalid characters: {:?}",
+            "Name contains invalid characters or is reserved: {:?}",
             name
         )));
     }
     Ok(())
+}
+
+pub(crate) fn portable_component(name: &str) -> bool {
+    if name.is_empty()
+        || name.ends_with([' ', '.'])
+        || name.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+        })
+    {
+        return false;
+    }
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    !matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
+    ) && !["COM", "LPT"].into_iter().any(|prefix| {
+        stem.strip_prefix(prefix).is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+    })
 }
 
 #[cfg(test)]

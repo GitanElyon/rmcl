@@ -212,7 +212,7 @@ pub struct Paths {
 }
 
 fn default_instances_dir() -> String {
-    dirs_next::data_dir()
+    dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("rmcl")
         .join("instances")
@@ -225,7 +225,7 @@ fn is_default_instances_dir(path: &str) -> bool {
 }
 
 fn default_meta_dir() -> String {
-    dirs_next::data_dir()
+    dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("rmcl")
         .join("meta")
@@ -249,11 +249,11 @@ impl Default for Paths {
 
 pub fn resolve_path(raw: &str) -> PathBuf {
     if let Some(stripped) = raw.strip_prefix("~/") {
-        if let Some(home) = dirs_next::home_dir() {
+        if let Some(home) = dirs::home_dir() {
             return home.join(stripped);
         }
     } else if raw == "~"
-        && let Some(home) = dirs_next::home_dir()
+        && let Some(home) = dirs::home_dir()
     {
         return home;
     }

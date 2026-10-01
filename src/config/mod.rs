@@ -14,7 +14,7 @@ pub use settings::Config;
 
 #[must_use]
 pub fn get_config_path() -> PathBuf {
-    dirs_next::config_dir()
+    dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("rmcl")
 }
@@ -86,7 +86,7 @@ pub(crate) fn upgrade_config_file(path: &std::path::Path) -> io::Result<bool> {
 }
 
 pub(crate) fn migrate_legacy_data_paths(path: &std::path::Path) -> io::Result<bool> {
-    let Some(data_dir) = dirs_next::data_dir() else {
+    let Some(data_dir) = dirs::data_dir() else {
         return Ok(false);
     };
     migrate_legacy_data_paths_from(path, &data_dir)

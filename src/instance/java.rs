@@ -149,7 +149,7 @@ fn java_roots() -> Vec<PathBuf> {
                 roots.push(PathBuf::from(prefix).join(formula));
             }
         }
-        if let Some(home) = dirs_next::home_dir() {
+        if let Some(home) = dirs::home_dir() {
             roots.push(home.join("Library/Java/JavaVirtualMachines"));
             roots.push(home.join(".sdkman/candidates/java"));
             roots.push(home.join(".asdf/installs/java"));
@@ -162,7 +162,7 @@ fn java_roots() -> Vec<PathBuf> {
             PathBuf::from("/opt/java"),
             PathBuf::from("/opt/jdk"),
         ]);
-        if let Some(home) = dirs_next::home_dir() {
+        if let Some(home) = dirs::home_dir() {
             roots.push(home.join(".sdkman/candidates/java"));
             roots.push(home.join(".jdks"));
             roots.push(home.join(".asdf/installs/java"));

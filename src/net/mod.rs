@@ -13,11 +13,9 @@ use reqwest::Client;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 pub const MAX_PROVIDER_ASSET_BYTES: usize = 16 * 1024 * 1024;
-static NEXT_DOWNLOAD_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Error)]
 pub enum NetError {
@@ -61,7 +59,8 @@ impl HttpClient {
         let user_agent = format!("rmcl/{} (Minecraft Launcher)", env!("CARGO_PKG_VERSION"));
         let client = Client::builder()
             .user_agent(user_agent.clone())
-            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(
@@ -138,34 +137,10 @@ impl HttpClient {
         B: Serialize + ?Sized,
         T: DeserializeOwned,
     {
-        for attempt in 0..=MAX_RETRIES {
-            tracing::trace!("HTTP POST {}", url);
-            let result = async {
-                let response = self.inner.post(url).json(body).send().await?;
-                if !response.status().is_success() {
-                    return Err(NetError::StatusError {
-                        status: response.status().as_u16(),
-                        url: url.to_owned(),
-                    });
-                }
-                Ok(response.json().await?)
-            }
-            .await;
-            match result {
-                Ok(value) => return Ok(value),
-                Err(error) if error.is_retryable() && attempt < MAX_RETRIES => {
-                    sleep_before_retry("request", url, attempt, &error).await;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        unreachable!("retry loop returns on success or final error")
+        request_json_with_retry(url, || self.inner.post(url).json(body)).await
     }
 
-    // fetch JSON and also keep the raw bytes. used by install paths that
-    // want both the parsed shape (for downloading libraries from it) and
-    // the original bytes (to write byte-for-byte to the loader-profiles
-    // cache, so any field we don't know about survives).
+    // Cache upstream bytes so fields outside our deserialized types survive.
     pub async fn get_json_with_raw<T: DeserializeOwned>(
         &self,
         url: &str,
@@ -180,33 +155,55 @@ impl HttpClient {
     }
 }
 
+async fn request_json_with_retry<T: DeserializeOwned>(
+    url: &str,
+    build: impl Fn() -> reqwest::RequestBuilder,
+) -> Result<T, NetError> {
+    request_with_retry(
+        url,
+        build,
+        |response| async move { Ok(response.json().await?) },
+    )
+    .await
+}
+
+async fn request_with_retry<T, Fut>(
+    url: &str,
+    build: impl Fn() -> reqwest::RequestBuilder,
+    decode: impl Fn(reqwest::Response) -> Fut,
+) -> Result<T, NetError>
+where
+    Fut: std::future::Future<Output = Result<T, NetError>>,
+{
+    for attempt in 0..=MAX_RETRIES {
+        let result = async {
+            let response = build().send().await?;
+            if !response.status().is_success() {
+                return Err(NetError::StatusError {
+                    status: response.status().as_u16(),
+                    url: url.to_owned(),
+                });
+            }
+            decode(response).await
+        }
+        .await;
+        match result {
+            Ok(value) => return Ok(value),
+            Err(error) if error.is_retryable() && attempt < MAX_RETRIES => {
+                sleep_before_retry("request", url, attempt, &error).await
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("retry loop returns on success or final error")
+}
+
 async fn get_with_retry<T, F, Fut>(client: &HttpClient, url: &str, decode: F) -> Result<T, NetError>
 where
     F: Fn(reqwest::Response) -> Fut,
     Fut: std::future::Future<Output = Result<T, NetError>>,
 {
-    for attempt in 0..=MAX_RETRIES {
-        match client.get(url).await {
-            Ok(resp) => match decode(resp).await {
-                Ok(value) => return Ok(value),
-                Err(e) if e.is_retryable() => {
-                    if attempt == MAX_RETRIES {
-                        return Err(e);
-                    }
-                    sleep_before_retry("request", url, attempt, &e).await;
-                }
-                Err(e) => return Err(e),
-            },
-            Err(e) if e.is_retryable() => {
-                if attempt == MAX_RETRIES {
-                    return Err(e);
-                }
-                sleep_before_retry("request", url, attempt, &e).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    unreachable!("retry loop returns on success or final error")
+    request_with_retry(url, || client.inner.get(url), decode).await
 }
 
 const MAX_RETRIES: u32 = 3;
@@ -305,42 +302,27 @@ async fn download_file_once(
     let total = response.content_length().unwrap_or(0);
     tracing::trace!("Download content length for {}: {}", url, total);
 
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    let temporary = dest.with_file_name(format!(
-        ".{}.{}.{}.download",
-        dest.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("file"),
-        std::process::id(),
-        NEXT_DOWNLOAD_ID.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .await?;
+    let parent = dest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    tokio::fs::create_dir_all(parent).await?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".rmcl-download-")
+        .tempfile_in(parent)?;
+    let mut file = tokio::fs::File::from_std(temporary.reopen()?);
     let mut downloaded: u64 = 0;
     let mut stream = response;
 
-    let result = async {
-        while let Some(chunk) = stream.chunk().await? {
-            file.write_all(&chunk).await?;
-            downloaded += chunk.len() as u64;
-            progress_cb(downloaded, total);
-        }
-        file.flush().await?;
-        drop(file);
-        tokio::fs::rename(&temporary, dest).await?;
-        Ok(())
+    while let Some(chunk) = stream.chunk().await? {
+        file.write_all(&chunk).await?;
+        downloaded += chunk.len() as u64;
+        progress_cb(downloaded, total);
     }
-    .await;
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&temporary).await;
-    }
-    result
+    file.flush().await?;
+    drop(file);
+    temporary.persist(dest).map_err(|error| error.error)?;
+    Ok(())
 }
 
 // body decode errors and timeouts are worth retrying, but a 404 or disk

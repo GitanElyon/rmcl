@@ -11,6 +11,7 @@ pub mod loader;
 pub mod logs;
 pub mod manager;
 pub mod models;
+mod process;
 pub mod runtime;
 pub mod screenshots;
 

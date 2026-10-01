@@ -1,15 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// merge semantics (per the mojang launcher and the major third-party
-// launchers that interoperate with it):
-//   - scalar fields: child wins if Some, else parent.
-//   - libraries and arguments: parent ++ child (parent first). child
-//     entries are appended after parent's.
-//   - merge_into preserves parent's inherits_from so resolve() can keep
-//     walking; resolve() clears the final result's inherits_from after
-//     the loop exits.
-
 use std::path::Path;
 
 use super::model::{Arguments, LaunchProfile};
@@ -111,6 +102,14 @@ pub async fn resolve(
     let mut depth = 0;
 
     while let Some(parent_id) = current.inherits_from.clone() {
+        if !crate::storage::safe_relative_path(Path::new(&parent_id))
+            || Path::new(&parent_id).components().count() != 1
+        {
+            return Err(ResolveError::ParseError(
+                parent_id,
+                "Invalid inherited version ID".to_owned(),
+            ));
+        }
         depth += 1;
         if depth > MAX_INHERITANCE_DEPTH {
             return Err(ResolveError::DepthExceeded(MAX_INHERITANCE_DEPTH));

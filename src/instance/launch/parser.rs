@@ -121,7 +121,10 @@ impl MinecraftLogParser {
 
         // only hard starts split events. this keeps stacktraces and native
         // loader bursts together even when they arrive one line at a time.
-        if should_split(current.kind, analysis.kind) {
+        if should_split(current.kind, analysis.kind)
+            || current.lines.len() >= 128
+            || current.lines.iter().map(String::len).sum::<usize>() >= 64 * 1024
+        {
             let finished = self.current.take().map(finish_event);
             self.current = Some(PendingEvent::new(stream, line, normalized, analysis));
             finished.into_iter().collect()

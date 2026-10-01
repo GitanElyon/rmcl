@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
+mod output;
 pub(crate) mod parser;
 mod patches;
 
@@ -8,12 +9,14 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use super::process;
 use crate::auth::AccountType;
+use crate::instance::java::JavaRuntime;
 use crate::instance::models::{InstanceConfig, LaunchCommand, ModLoader, WindowMode};
 use crate::launch_profile::model::{Argument, LaunchProfile};
 use crate::launch_profile::rules::{self, FeatureSet, RuleAction, RuleContext};
 use crate::launch_profile::templates::TemplateContext;
-use crate::launch_profile::{render, resolve, system};
+use crate::launch_profile::{render, resolve};
 
 #[derive(Debug, Error)]
 pub enum LaunchError {
@@ -33,18 +36,44 @@ pub enum LaunchError {
         required: u32,
         detected: u32,
     },
-    #[error("This instance requires Java {required}, but rmcl could not check {java}: {reason}")]
+    #[error("Could not inspect Java runtime {java}: {reason}")]
     JavaCheckFailed {
         java: String,
         required: u32,
         reason: String,
     },
+    #[error("Download error: {0}")]
+    Download(#[from] crate::net::NetError),
     #[error("{0}")]
     Auth(String),
     #[error("{phase} command failed: {reason}")]
     Command { phase: &'static str, reason: String },
     #[error("Config sync error: {0}")]
     ConfigSync(#[from] crate::instance::config_sync::ConfigSyncError),
+    #[error("Launch cancelled")]
+    Cancelled,
+}
+
+struct LaunchCleanup(String);
+
+impl Drop for LaunchCleanup {
+    fn drop(&mut self) {
+        crate::instance::runtime::cleanup_kill_sender(&self.0);
+        if crate::instance::runtime::is_active(&self.0) {
+            crate::instance::runtime::remove(&self.0);
+        }
+    }
+}
+
+async fn wait_for_kill(receiver: &mut Option<tokio::sync::oneshot::Receiver<()>>) {
+    if let Some(pending) = receiver {
+        let result = pending.await;
+        *receiver = None;
+        if result.is_ok() {
+            return;
+        }
+    }
+    std::future::pending::<()>().await;
 }
 
 fn build_game_args(
@@ -77,49 +106,16 @@ fn apply_window_mode(game_args: &mut Vec<String>, window_mode: WindowMode) {
     }
 }
 
-async fn check_java_version(java: &str, required: Option<u32>) -> Result<(), LaunchError> {
+fn check_java_version(
+    java: &str,
+    runtime: &JavaRuntime,
+    required: Option<u32>,
+) -> Result<(), LaunchError> {
     let Some(required) = required.filter(|major| *major > 0) else {
         return Ok(());
     };
 
-    let mut command = tokio::process::Command::new(java);
-    command.arg("-version").kill_on_drop(true);
-    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
-        .await
-        .map_err(|_| LaunchError::JavaCheckFailed {
-            java: java.to_owned(),
-            required,
-            reason: "version check timed out".to_owned(),
-        })?
-        .map_err(|e| LaunchError::JavaCheckFailed {
-            java: java.to_owned(),
-            required,
-            reason: e.to_string(),
-        })?;
-
-    if !output.status.success() {
-        return Err(LaunchError::JavaCheckFailed {
-            java: java.to_owned(),
-            required,
-            reason: format!("`java -version` exited with {}", output.status),
-        });
-    }
-
-    let version_text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let detected =
-        crate::instance::java::parse_java_major_version(&version_text).ok_or_else(|| {
-            LaunchError::JavaCheckFailed {
-                java: java.to_owned(),
-                required,
-                reason: format!("could not parse `java -version` output: {version_text:?}"),
-            }
-        })?;
-
+    let detected = runtime.major_version;
     if detected < required {
         return Err(LaunchError::JavaTooOld {
             java: java.to_owned(),
@@ -131,11 +127,7 @@ async fn check_java_version(java: &str, required: Option<u32>) -> Result<(), Lau
     Ok(())
 }
 
-// existing installs from rmcl <= 0.3.0 have meta.json files in the
-// stripped legacy format (no `arguments`, no `minecraftArguments`). every
-// real upstream profile has at least one of those fields. on detecting the
-// stripped format, re-fetch the version metadata from mojang's manifest
-// and overwrite the file with the raw upstream bytes.
+// rmcl <= 0.3.0 stripped upstream arguments from cached metadata.
 async fn migrate_legacy_meta_if_needed(
     meta_path: &Path,
     profile: &LaunchProfile,
@@ -193,9 +185,6 @@ async fn migrate_legacy_meta_if_needed(
     Ok(Some(refreshed))
 }
 
-// the forge/neoforge installer writes its version JSON to a path that's
-// loader-specific. encode the naming convention here so migration code
-// can find the original file when it needs to rebuild our cache.
 fn installer_version_dir_name(
     loader: ModLoader,
     game_version: &str,
@@ -208,35 +197,19 @@ fn installer_version_dir_name(
     }
 }
 
-// loader profiles installed by rmcl <= 0.3.0 are in our stripped
-// `{mainClass, libraries[, gameArguments]}` format, which silently drops
-// `inheritsFrom`, `arguments.jvm`, and conditional rules from upstream.
-// detect that shape (no inheritsFrom AND no arguments AND no
-// minecraftArguments - every real upstream profile has at least one) and
-// rebuild from the installer's original JSON if it's still on disk.
+// Recover JVM arguments and rules stripped by rmcl <= 0.3.0 from the installer original.
 async fn migrate_legacy_loader_profile_if_needed(
     profile_path: &Path,
     profile: &LaunchProfile,
     config: &InstanceConfig,
     instance_dir: &Path,
 ) -> Result<Option<LaunchProfile>, LaunchError> {
-    // Fabric and Quilt fetch their profiles from a network endpoint at
-    // install time; there's no installer-written JSON on disk to recover
-    // from. their upstream profiles also happen to match the "legacy
-    // stripped" predicate (no inheritsFrom, no arguments), so without this
-    // early return every Fabric/Quilt launch would incorrectly fail
-    // migration. resolve() handles their lack of inheritsFrom via the
-    // implicit fallback in the launch flow.
+    // Fabric/Quilt profiles can omit these fields and have no installer original.
     if matches!(config.loader, ModLoader::Fabric | ModLoader::Quilt) {
         return Ok(None);
     }
 
-    // tightened predicate per the spec: only treat a profile as "legacy
-    // stripped" when our old `gameArguments` field is present. that field
-    // is unique to rmcl <= 0.3.0's custom shape; no upstream profile
-    // emits it. without this gate, an upstream profile that happens to
-    // omit inheritsFrom/arguments/minecraftArguments would be mistakenly
-    // re-extracted from the installer JSON.
+    // gameArguments identifies rmcl's old shape, avoiding false positives on upstream profiles.
     let is_legacy = profile.inherits_from.is_none()
         && profile.arguments.is_none()
         && profile.minecraft_arguments.is_none()
@@ -256,9 +229,6 @@ async fn migrate_legacy_loader_profile_if_needed(
     let Some(version_dir) =
         installer_version_dir_name(config.loader, &config.game_version, loader_version)
     else {
-        // unreachable today: only Vanilla/Fabric/Quilt return None, and
-        // Vanilla doesn't pass this code path (no loader profile to
-        // migrate) while Fabric/Quilt are filtered above.
         return Err(LaunchError::Parse(format!(
             "Loader profile at {} is in an outdated format. Reinstall {} for this instance.",
             profile_path.display(),
@@ -366,10 +336,32 @@ pub async fn build_launch_invocation(
     auth: &LaunchAuth<'_>,
     quick_play_world: Option<&str>,
 ) -> Result<LaunchInvocation, LaunchError> {
-    let instance_dir = instances_dir.join(&config.name);
+    let settings = crate::config::SETTINGS.read().clone();
+    build_launch_invocation_with_settings(
+        config,
+        instances_dir,
+        meta_dir,
+        auth,
+        quick_play_world,
+        &settings,
+    )
+    .await
+}
+
+pub async fn build_launch_invocation_with_settings(
+    config: &InstanceConfig,
+    instances_dir: &Path,
+    meta_dir: &Path,
+    auth: &LaunchAuth<'_>,
+    quick_play_world: Option<&str>,
+    settings: &crate::config::Config,
+) -> Result<LaunchInvocation, LaunchError> {
+    let meta_dir = std::path::absolute(meta_dir)?;
+    let meta_dir = meta_dir.as_path();
+    let instance_dir = std::path::absolute(instances_dir.join(&config.name))?;
     let minecraft_dir = instance_dir.join(crate::storage::MINECRAFT_DIR_NAME);
     let (window_mode, resolution) = {
-        let defaults = &crate::config::SETTINGS.read().defaults;
+        let defaults = &settings.defaults;
         (
             config.effective_window_mode(defaults.window_mode),
             config.effective_resolution(defaults.resolution),
@@ -399,20 +391,6 @@ pub async fn build_launch_invocation(
         has_custom_resolution: resolution.map(|_| true),
         ..Default::default()
     };
-    let host_os_version = system::mojang_os_version();
-    let rule_ctx = RuleContext {
-        os_name: system::mojang_os_name(),
-        os_version: &host_os_version,
-        arch: system::mojang_arch_name(),
-        features: &current_features,
-    };
-
-    let asset_index_id = meta
-        .asset_index
-        .as_ref()
-        .map(|ai| ai.id.clone())
-        .unwrap_or_default();
-
     let lib_dir = metadata_paths.libraries();
 
     let lv = config.loader_version.as_deref().unwrap_or("unknown");
@@ -423,7 +401,7 @@ pub async fn build_launch_invocation(
     // if needed, and resolve `inheritsFrom` against the vanilla parent (which
     // the vanilla meta migration above ensured is fresh on disk). when no
     // loader is configured we use the already-loaded vanilla meta directly.
-    let merged_profile: LaunchProfile = if let Some(filename) = &profile_filename {
+    let mut merged_profile: LaunchProfile = if let Some(filename) = &profile_filename {
         let profile_path = metadata_paths.loader_profiles().join(filename);
         if !profile_path.exists() {
             return Err(LaunchError::MetaNotFound(
@@ -458,7 +436,7 @@ pub async fn build_launch_invocation(
         meta.clone()
     };
 
-    let main_class = merged_profile
+    let mut main_class = merged_profile
         .main_class
         .clone()
         .ok_or_else(|| LaunchError::Parse("merged profile missing mainClass".into()))?;
@@ -467,18 +445,106 @@ pub async fn build_launch_invocation(
         return Err(LaunchError::NotSupported("Quick Play".to_owned()));
     }
 
-    // rebuild the classpath from the merged profile. vanilla-style libraries
-    // have `downloads.artifact.path` set and live in meta_dir/libraries/.
-    // loader-style libraries only have a maven coordinate; for forge/neoforge,
-    // the installer drops some of them into <instance>/.minecraft/libraries/
-    // so we check there first.
-    let has_local_libs = matches!(config.loader, ModLoader::Forge | ModLoader::NeoForge);
+    let environment = crate::instance::java::merge_environment(
+        &settings.defaults.environment,
+        &config.environment,
+    );
+    let java = crate::instance::java::resolve_java_path_in(
+        config
+            .java_path
+            .as_deref()
+            .or(settings.paths.effective_java_path()),
+        &minecraft_dir,
+        &environment,
+    );
+    let runtime =
+        crate::instance::java::probe_java_in(Path::new(&java), &minecraft_dir, &environment)
+            .await
+            .map_err(|error| LaunchError::JavaCheckFailed {
+                java: java.clone(),
+                required: merged_profile
+                    .java_version
+                    .as_ref()
+                    .map_or(0, |version| version.major_version),
+                reason: error.to_string(),
+            })?;
+    let platform = &runtime.platform;
+    let patches = if config.loader == ModLoader::Forge {
+        patches::load(&minecraft_dir, platform)?
+    } else {
+        None
+    };
+    if let Some(patches) = &patches {
+        merged_profile = resolve::merge_into(patches.profile.clone(), merged_profile);
+        // The embedded version.json is a complete client profile. Appending
+        // the old Forge arguments would run its tweakers a second time.
+        merged_profile.arguments = patches.profile.arguments.clone();
+        merged_profile.inherits_from = None;
+        patches::strip_replaced_libs(&mut merged_profile);
+        main_class = merged_profile
+            .main_class
+            .clone()
+            .expect("validated patch main class");
+    }
+    check_java_version(
+        &java,
+        &runtime,
+        merged_profile
+            .java_version
+            .as_ref()
+            .map(|version| version.major_version),
+    )?;
+    let rule_ctx = RuleContext {
+        os_name: platform.os_name,
+        os_version: &platform.os_version,
+        arch: &platform.arch,
+        features: &current_features,
+    };
+    let asset_index_id = merged_profile
+        .asset_index
+        .as_ref()
+        .map(|index| index.id.clone())
+        .unwrap_or_default();
+    let natives_dir = platform.natives_directory(meta_dir, &config.game_version);
+
+    // Forge installers can place libraries in the instance instead of the shared cache.
+    let has_local_libs =
+        matches!(config.loader, ModLoader::Forge | ModLoader::NeoForge) && patches.is_none();
     let local_lib_dir = minecraft_dir.join("libraries");
     let library_directory = if has_local_libs {
         &local_lib_dir
     } else {
         &lib_dir
     };
+
+    let mut to_download = Vec::new();
+    for library in &merged_profile.libraries {
+        if library
+            .rules
+            .as_ref()
+            .is_some_and(|conditions| !rules::evaluate(conditions, &rule_ctx))
+        {
+            continue;
+        }
+        // Installer-owned artifacts are already in the instance's library directory.
+        let local = has_local_libs
+            && crate::net::mojang::library_artifact_path(library)?
+                .is_some_and(|path| local_lib_dir.join(path).is_file());
+        let mut library = library.clone();
+        if local && let Some(downloads) = &mut library.downloads {
+            downloads.artifact = None;
+        }
+        to_download.push(library);
+    }
+    crate::net::mojang::download_profile_libraries(
+        &crate::net::HttpClient::new(),
+        &to_download,
+        &lib_dir,
+        &natives_dir,
+        platform,
+        &current_features,
+    )
+    .await?;
 
     let mut classpath: Vec<PathBuf> = Vec::new();
     for lib in &merged_profile.libraries {
@@ -488,25 +554,10 @@ pub async fn build_launch_invocation(
             continue;
         }
 
-        // resolve a relative path for this library. prefer downloads.artifact.path
-        // when present (vanilla-style), fall back to maven_coord_to_path(name)
-        // for loader-style entries that only have a coord.
-        let rel: PathBuf = match lib
-            .downloads
-            .as_ref()
-            .and_then(|d| d.artifact.as_ref())
-            .map(|a| PathBuf::from(&a.path))
-            .or_else(|| {
-                crate::instance::loader::maven::maven_coord_to_path(&lib.name).map(PathBuf::from)
-            }) {
-            Some(p) => p,
-            None => continue,
+        let Some(rel) = crate::net::mojang::library_artifact_path(lib)? else {
+            continue;
         };
 
-        // for forge/neoforge, the installer drops some libs (notably the
-        // bootstrap library) into <instance>/.minecraft/libraries/ rather
-        // than the shared meta cache. check there first regardless of
-        // whether the lib has a downloads.artifact entry.
         if has_local_libs {
             let in_local = local_lib_dir.join(&rel);
             if in_local.exists() {
@@ -524,14 +575,10 @@ pub async fn build_launch_invocation(
             .join(format!("{}.jar", config.game_version)),
     );
 
-    // apply loader-specific patches (lwjgl3ify for old forge on java 9+)
-    let (patch_jvm_args, main_class, extra_args) = if matches!(config.loader, ModLoader::Forge) {
-        match patches::apply(&minecraft_dir, &lib_dir, &mut classpath).await {
-            Some(p) => (p.jvm_args, p.main_class, p.extra_args),
-            None => (Vec::new(), main_class, Vec::new()),
-        }
+    let (main_class, extra_args, patch_jvm_args) = if let Some(patches) = patches {
+        patches::apply(patches, &minecraft_dir, &lib_dir, &mut classpath).await?
     } else {
-        (Vec::new(), main_class, Vec::new())
+        (main_class, Vec::new(), Vec::new())
     };
 
     let sep = if cfg!(windows) { ";" } else { ":" };
@@ -541,32 +588,7 @@ pub async fn build_launch_invocation(
         .collect::<Vec<_>>()
         .join(sep);
 
-    let java = config
-        .java_path
-        .clone()
-        .or_else(|| {
-            crate::config::SETTINGS
-                .read()
-                .paths
-                .effective_java_path()
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(crate::instance::java::detect_java_path);
-
-    check_java_version(
-        &java,
-        merged_profile
-            .java_version
-            .as_ref()
-            .map(|version| version.major_version),
-    )
-    .await?;
-
     let assets_root = metadata_paths.assets();
-    let natives_dir = metadata_paths
-        .versions()
-        .join(&config.game_version)
-        .join("natives");
     let version_type = merged_profile.type_.as_deref().unwrap_or("release");
     let resolution_width = resolution.map(|(width, _)| width.to_string());
     let resolution_height = resolution.map(|(_, height)| height.to_string());
@@ -601,8 +623,7 @@ pub async fn build_launch_invocation(
     apply_custom_resolution(&mut game_args, resolution);
     apply_window_mode(&mut game_args, window_mode);
 
-    let (memory_min, memory_max, global_jvm_args, global_environment) = {
-        let settings = crate::config::SETTINGS.read();
+    let (memory_min, memory_max, global_jvm_args) = {
         (
             config
                 .memory_min
@@ -613,10 +634,12 @@ pub async fn build_launch_invocation(
                 .clone()
                 .unwrap_or_else(|| settings.defaults.memory_max.clone()),
             settings.defaults.jvm_args.clone(),
-            settings.defaults.environment.clone(),
         )
     };
     let mut jvm_args: Vec<String> = vec![format!("-Xms{memory_min}"), format!("-Xmx{memory_max}")];
+    if merged_profile.arguments.is_none() {
+        jvm_args.push(format!("-Djava.library.path={}", natives_dir.display()));
+    }
     jvm_args.extend(patch_jvm_args);
     jvm_args.extend(upstream_jvm_args);
     jvm_args.extend(global_jvm_args);
@@ -624,9 +647,6 @@ pub async fn build_launch_invocation(
     if let Some(glfw_path) = config.glfw_path.as_deref() {
         jvm_args.push(format!("-Dorg.lwjgl.glfw.libname={glfw_path}"));
     }
-
-    let mut environment = global_environment;
-    environment.extend(config.environment.clone());
 
     Ok(LaunchInvocation {
         java,
@@ -644,8 +664,12 @@ pub async fn build_launch_invocation(
 fn command_process(command: &str) -> tokio::process::Command {
     #[cfg(windows)]
     {
-        let mut process = tokio::process::Command::new("cmd");
-        process.args(["/C", command]);
+        let mut process = tokio::process::Command::new("cmd.exe");
+        // cmd parses shell text rather than CRT argv. /S removes this outer pair
+        // of quotes; raw_arg preserves all quotes and metacharacters inside it.
+        process
+            .args(["/D", "/S", "/C"])
+            .raw_arg(format!("\"{command}\""));
         process
     }
     #[cfg(not(windows))]
@@ -683,29 +707,66 @@ async fn run_launch_command(
         .envs(&invocation.environment)
         .env("INST_NAME", &config.name)
         .env("INST_ID", &config.name)
-        .env("INST_DIR", instance_dir)
+        .env("INST_DIR", std::path::absolute(instance_dir)?)
         .env("INST_MC_DIR", &invocation.working_dir)
         .env("INST_JAVA", &invocation.java)
-        .env("INST_JAVA_ARGS", invocation.jvm_args.join(" "));
-    let output = process
-        .output()
-        .await
-        .map_err(|error| LaunchError::Command {
+        .env("INST_JAVA_ARGS", invocation.jvm_args.join(" "))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let (mut child, tree) =
+        process::spawn_owned(&mut process).map_err(|error| LaunchError::Command {
             phase,
             reason: error.to_string(),
         })?;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        tracing::info!("[{}] [{}] {}", config.name, phase, line);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
+    let mut readers = tokio::task::JoinSet::new();
+    if let Some(stdout) = child.stdout.take() {
+        readers.spawn(output::capture(
+            stdout,
+            parser::LogStream::Stdout,
+            sender.clone(),
+            Default::default(),
+        ));
     }
-    for line in String::from_utf8_lossy(&output.stderr).lines() {
-        tracing::warn!("[{}] [{}] {}", config.name, phase, line);
+    if let Some(stderr) = child.stderr.take() {
+        readers.spawn(output::capture(
+            stderr,
+            parser::LogStream::Stderr,
+            sender.clone(),
+            Default::default(),
+        ));
     }
-    if output.status.success() {
+    drop(sender);
+    let log = |stream, line| match stream {
+        parser::LogStream::Stdout => tracing::info!("[{}] [{}] {}", config.name, phase, line),
+        parser::LogStream::Stderr => tracing::warn!("[{}] [{}] {}", config.name, phase, line),
+    };
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status?,
+            Some((stream, line)) = receiver.recv() => log(stream, line),
+        }
+    };
+    let drain_deadline = tokio::time::sleep(std::time::Duration::from_secs(1));
+    tokio::pin!(drain_deadline);
+    loop {
+        tokio::select! {
+            line = receiver.recv() => match line { Some((stream, line)) => log(stream, line), None => break },
+            _ = &mut drain_deadline => { tracing::warn!("[{phase}] Output pipes remained open after command exit"); break; },
+        }
+    }
+    // Normal completion can intentionally leave a background command running.
+    // Cancellation before this point still drops the armed process-tree guard.
+    tree.detach().map_err(|error| LaunchError::Command {
+        phase,
+        reason: error.to_string(),
+    })?;
+    if status.success() {
         Ok(())
     } else {
         Err(LaunchError::Command {
             phase,
-            reason: output.status.to_string(),
+            reason: status.to_string(),
         })
     }
 }
@@ -729,6 +790,13 @@ pub async fn launch(
     quick_play_world: Option<&str>,
 ) -> Result<(), LaunchError> {
     let name = config.name.clone();
+    let instance_lock = crate::instance::runtime::lock_instance(instances_dir, &name)
+        .map_err(|error| LaunchError::Parse(error.to_string()))?;
+    let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut kill_rx = Some(kill_rx);
+    crate::instance::runtime::register_kill(&name, kill_tx);
+    let launch_cleanup = LaunchCleanup(name.clone());
+    crate::instance::runtime::set_state(&name, crate::instance::runtime::RunState::Authenticating);
 
     let mut account_store = crate::auth::AccountStore::load();
     account_store
@@ -749,7 +817,10 @@ pub async fn launch(
     }
 
     let (token, new_refresh, new_expires) = match acc.account_type {
-        AccountType::Microsoft => match crate::auth::refresh_and_get_token(&acc).await {
+        AccountType::Microsoft => match tokio::select! {
+            result = crate::auth::refresh_and_get_token(&acc) => result,
+            _ = wait_for_kill(&mut kill_rx) => return Err(LaunchError::Cancelled),
+        } {
             Ok(triple) => triple,
             Err(e) => return Err(LaunchError::Auth(format!("Authentication failed: {e}"))),
         },
@@ -770,8 +841,10 @@ pub async fn launch(
         user_type,
     };
 
-    let invocation =
-        build_launch_invocation(config, instances_dir, meta_dir, &auth, quick_play_world).await?;
+    let invocation = tokio::select! {
+        result = build_launch_invocation(config, instances_dir, meta_dir, &auth, quick_play_world) => result?,
+        _ = wait_for_kill(&mut kill_rx) => return Err(LaunchError::Cancelled),
+    };
     let instance_dir = instances_dir.join(&config.name);
     tracing::debug!(
         "[{}] Prepared launch invocation: working_dir={} classpath_entries={} jvm_args={} extra_args={} game_args={} main_class={}",
@@ -788,21 +861,20 @@ pub async fn launch(
         meta_dir,
         &invocation.working_dir,
     )?;
-    if let Err(error) = run_launch_command(
+    if let Err(error) = tokio::select! {
+        result = run_launch_command(
         "Pre-launch",
         &config.pre_launch_command,
         config,
         &invocation,
         &instance_dir,
-    )
-    .await
-    {
+        ) => result,
+        _ = wait_for_kill(&mut kill_rx) => Err(LaunchError::Cancelled),
+    } {
         finish_config_sync(config_sync_lock, &invocation.working_dir, &name);
         return Err(error);
     }
 
-    let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
-    crate::instance::runtime::register_kill(&name, kill_tx);
     crate::instance::runtime::set_state(&name, crate::instance::runtime::RunState::Starting);
     tracing::info!(
         "[{}] Starting Minecraft ({} {})",
@@ -835,6 +907,7 @@ pub async fn launch(
     cmd.envs(&invocation.environment);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    cmd.kill_on_drop(true);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -870,11 +943,11 @@ pub async fn launch(
     let invocation_for_post_exit = invocation.clone();
 
     tokio::spawn(async move {
-        use std::io::Write;
+        let _instance_lock = instance_lock;
+        let _launch_cleanup = launch_cleanup;
         use std::sync::{Arc, Mutex};
-        use tokio::io::AsyncBufReadExt;
         use tokio::sync::mpsc;
-        use tokio::time::{Duration, sleep};
+        use tokio::time::Duration;
 
         use crate::instance::launch::parser::{LogStream, MinecraftLogParser};
 
@@ -887,6 +960,9 @@ pub async fn launch(
         let parser_task = tokio::spawn(async move {
             let mut parser = MinecraftLogParser::new();
             let idle_flush = Duration::from_millis(150);
+            let mut flush_interval = tokio::time::interval(idle_flush);
+            flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            flush_interval.tick().await;
 
             loop {
                 tokio::select! {
@@ -900,7 +976,7 @@ pub async fn launch(
                             None => break,
                         }
                     }
-                    _ = sleep(idle_flush), if parser.has_pending() => {
+                    _ = flush_interval.tick(), if parser.has_pending() => {
                         if let Some(event) = parser.flush() {
                             emit_parsed_instance_log(&parser_name, event);
                         }
@@ -913,47 +989,28 @@ pub async fn launch(
             }
         });
 
+        let mut readers = tokio::task::JoinSet::new();
         if let Some(stdout) = child.stdout.take() {
-            let w = log_writer.clone();
-            let tx = log_tx.clone();
-            let mut lines = tokio::io::BufReader::new(stdout).lines();
-            tokio::spawn(async move {
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if let Ok(mut f) = w.lock()
-                        && let Some(f) = f.as_mut()
-                    {
-                        let _ = writeln!(f, "{}", line);
-                    }
-                    if tx.send((LogStream::Stdout, line)).await.is_err() {
-                        break;
-                    }
-                }
-                tracing::trace!("Minecraft stdout capture task ended");
-            });
+            readers.spawn(output::capture(
+                stdout,
+                LogStream::Stdout,
+                log_tx.clone(),
+                log_writer.clone(),
+            ));
         }
 
         if let Some(stderr) = child.stderr.take() {
-            let w = log_writer.clone();
-            let tx = log_tx.clone();
-            let mut lines = tokio::io::BufReader::new(stderr).lines();
-            tokio::spawn(async move {
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if let Ok(mut f) = w.lock()
-                        && let Some(f) = f.as_mut()
-                    {
-                        let _ = writeln!(f, "{}", line);
-                    }
-                    if tx.send((LogStream::Stderr, line)).await.is_err() {
-                        break;
-                    }
-                }
-                tracing::trace!("Minecraft stderr capture task ended");
-            });
+            readers.spawn(output::capture(
+                stderr,
+                LogStream::Stderr,
+                log_tx.clone(),
+                log_writer.clone(),
+            ));
         }
         drop(log_tx);
 
         let (code, killed_by_user) = tokio::select! {
-            _ = kill_rx => {
+            _ = wait_for_kill(&mut kill_rx) => {
                 tracing::info!("[{}] Kill requested, terminating process", name_for_task);
                 let _ = child.kill().await;
                 let _ = child.wait().await;
@@ -963,23 +1020,46 @@ pub async fn launch(
                 (result.ok().and_then(|s| s.code()), false)
             }
         };
+        if tokio::time::timeout(Duration::from_secs(1), async {
+            while readers.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
+        {
+            tracing::warn!("Minecraft output pipes remained open after process exit");
+            readers.abort_all();
+            while readers.join_next().await.is_some() {}
+        }
         let _ = parser_task.await;
         tracing::info!("[{}] Exited with code {:?}", name_for_task, code);
 
-        if let Err(error) = run_launch_command(
-            "Post-exit",
-            &post_exit_command,
-            &config_for_post_exit,
-            &invocation_for_post_exit,
-            &instance_dir_owned,
-        )
-        .await
+        if !killed_by_user
+            && let Err(error) = tokio::select! {
+                result = run_launch_command(
+                "Post-exit",
+                &post_exit_command,
+                &config_for_post_exit,
+                &invocation_for_post_exit,
+                &instance_dir_owned,
+                ) => result,
+                _ = wait_for_kill(&mut kill_rx) => Err(LaunchError::Cancelled),
+            }
         {
             tracing::warn!("[{}] {}", name_for_task, error);
             crate::feedback::errors::push_message(tracing::Level::WARN, error.to_string());
         }
 
         finish_config_sync(config_sync_lock, &minecraft_dir_owned, &name_for_task);
+        let manager = crate::instance::InstanceManager::new(instances_dir_owned, meta_dir_owned);
+        if let Err(e) = manager.touch_last_played(&name_for_task) {
+            tracing::warn!(
+                "Failed to update last_played for '{}': {}",
+                name_for_task,
+                e
+            );
+        }
+        crate::instance::runtime::push_last_played(&name_for_task, chrono::Utc::now());
+        crate::instance::runtime::cleanup_kill_sender(&name_for_task);
         if code == Some(0) || killed_by_user {
             crate::instance::runtime::remove(&name_for_task);
             tracing::debug!(
@@ -1004,17 +1084,6 @@ pub async fn launch(
                 pushed_at: std::time::Instant::now(),
             });
         }
-
-        let manager = crate::instance::InstanceManager::new(instances_dir_owned, meta_dir_owned);
-        if let Err(e) = manager.touch_last_played(&name_for_task) {
-            tracing::warn!(
-                "Failed to update last_played for '{}': {}",
-                name_for_task,
-                e
-            );
-        }
-        crate::instance::runtime::push_last_played(&name_for_task, chrono::Utc::now());
-        crate::instance::runtime::cleanup_kill_sender(&name_for_task);
     });
 
     Ok(())

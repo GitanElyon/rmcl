@@ -8,7 +8,7 @@ pub mod neoforge;
 mod quilt;
 mod vanilla;
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -63,6 +63,7 @@ pub trait ModLoaderInstaller: Send + Sync {
         meta_dir: &Path,
     ) -> Result<(), InstallError>;
 
+    #[allow(clippy::too_many_arguments)]
     async fn install_with_java(
         &self,
         client: &HttpClient,
@@ -70,9 +71,9 @@ pub trait ModLoaderInstaller: Send + Sync {
         loader_version: &str,
         instance_dir: &Path,
         meta_dir: &Path,
-        java_path: Option<&str>,
+        _java_path: Option<&str>,
+        _environment: &BTreeMap<String, String>,
     ) -> Result<(), InstallError> {
-        let _ = java_path;
         self.install(client, game_version, loader_version, instance_dir, meta_dir)
             .await
     }

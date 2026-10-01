@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use async_trait::async_trait;
 
@@ -45,17 +45,24 @@ impl ModLoaderInstaller for NeoForgeInstaller {
         instance_dir: &Path,
         meta_dir: &Path,
     ) -> Result<(), InstallError> {
+        let settings = crate::config::SETTINGS.read().clone();
+        let environment = crate::instance::java::merge_environment(
+            &settings.defaults.environment,
+            &Default::default(),
+        );
         self.install_with_java(
             client,
             game_version,
             loader_version,
             instance_dir,
             meta_dir,
-            None,
+            settings.paths.effective_java_path(),
+            &environment,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn install_with_java(
         &self,
         client: &HttpClient,
@@ -64,6 +71,7 @@ impl ModLoaderInstaller for NeoForgeInstaller {
         instance_dir: &Path,
         meta_dir: &Path,
         java_path: Option<&str>,
+        environment: &BTreeMap<String, String>,
     ) -> Result<(), InstallError> {
         let installer_jar = instance_dir
             .join(crate::storage::MINECRAFT_DIR_NAME)
@@ -73,16 +81,9 @@ impl ModLoaderInstaller for NeoForgeInstaller {
 
         neoforge_api::download_neoforge_installer(client, loader_version, &installer_jar).await?;
 
-        let java_path = java_path.map(str::to_owned).unwrap_or_else(|| {
-            crate::config::SETTINGS
-                .read()
-                .paths
-                .effective_java_path()
-                .map(str::to_owned)
-                .unwrap_or_else(crate::instance::java::detect_java_path)
-        });
-        tracing::debug!("Running NeoForge installer with Java {}", java_path);
-        if let Err(e) = run_neoforge_installer(&installer_jar, instance_dir, &java_path).await {
+        if let Err(e) =
+            run_neoforge_installer(&installer_jar, instance_dir, java_path, environment).await
+        {
             let _ = tokio::fs::remove_file(&installer_jar).await;
             return Err(InstallError::Installer(e));
         }
@@ -102,20 +103,27 @@ impl ModLoaderInstaller for NeoForgeInstaller {
 pub async fn run_neoforge_installer(
     installer_path: &Path,
     instance_dir: &Path,
-    java_path: &str,
+    java_path: Option<&str>,
+    environment: &BTreeMap<String, String>,
 ) -> Result<(), InstallerError> {
     use tokio::process::Command;
 
     set_action("Running NeoForge installer...");
+    let minecraft_dir = std::path::absolute(instance_dir.join(crate::storage::MINECRAFT_DIR_NAME))?;
+    let java_path =
+        crate::instance::java::resolve_java_path_in(java_path, &minecraft_dir, environment);
+    tracing::debug!("Running NeoForge installer with Java {}", java_path);
 
-    let output = match Command::new(java_path)
-        .arg(format!("-Duser.home={}", instance_dir.display()))
-        .arg("-jar")
-        .arg(installer_path)
-        .arg("--installClient")
-        .current_dir(instance_dir.join(crate::storage::MINECRAFT_DIR_NAME))
-        .output()
-        .await
+    let output = match crate::instance::process::output(
+        Command::new(&java_path)
+            .arg("-jar")
+            .arg(std::path::absolute(installer_path)?)
+            .arg("--installClient")
+            .arg(&minecraft_dir)
+            .current_dir(&minecraft_dir)
+            .envs(environment),
+    )
+    .await
     {
         Ok(o) => o,
         Err(e) => {

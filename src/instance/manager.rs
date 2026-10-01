@@ -123,7 +123,13 @@ impl InstanceManager {
         loader_version: Option<&str>,
         instance_dir: &std::path::Path,
     ) -> Result<InstanceConfig, InstanceError> {
+        let settings = crate::config::SETTINGS.read().clone();
+        let instance_dir = std::path::absolute(instance_dir)?;
         let minecraft_dir = instance_dir.join(crate::storage::MINECRAFT_DIR_NAME);
+        let environment = crate::instance::java::merge_environment(
+            &settings.defaults.environment,
+            &Default::default(),
+        );
         tracing::debug!(
             "Preparing Minecraft directory for '{}': {}",
             name,
@@ -134,6 +140,11 @@ impl InstanceManager {
             std::fs::create_dir_all(&path)?;
             tracing::trace!("Ensured instance subdirectory {}", path.display());
         }
+        let java_path = crate::instance::java::resolve_java_path_in(
+            settings.paths.effective_java_path(),
+            &minecraft_dir,
+            &environment,
+        );
 
         // forge insists on this file existing, even if it's empty json. thanks forge.
         let launcher_profiles_path = minecraft_dir.join("launcher_profiles.json");
@@ -203,7 +214,19 @@ impl InstanceManager {
         crate::storage::write_atomic(&meta_json_path, &raw_meta_bytes)?;
         tracing::debug!("Saved version meta to {}", meta_json_path.display());
 
-        crate::net::mojang::download_libraries(&self.client, &version_meta, &self.meta_dir).await?;
+        let runtime = crate::instance::java::probe_java_in(
+            Path::new(&java_path),
+            &minecraft_dir,
+            &environment,
+        )
+        .await?;
+        crate::net::mojang::download_libraries_for_platform(
+            &self.client,
+            &version_meta,
+            &self.meta_dir,
+            &runtime.platform,
+        )
+        .await?;
 
         crate::net::mojang::download_assets(&self.client, &version_meta, &self.meta_dir).await?;
 
@@ -225,12 +248,14 @@ impl InstanceManager {
             name
         );
         installer
-            .install(
+            .install_with_java(
                 &self.client,
                 game_version,
                 effective_loader_version,
-                instance_dir,
+                &instance_dir,
                 &self.meta_dir,
+                Some(&java_path),
+                &environment,
             )
             .await
             .map_err(|e| match e {
@@ -240,7 +265,7 @@ impl InstanceManager {
                 }
             })?;
 
-        let defaults = crate::config::SETTINGS.read().defaults.clone();
+        let defaults = &settings.defaults;
         let config = InstanceConfig {
             name: name.to_string(),
             game_version: game_version.to_string(),
@@ -273,6 +298,23 @@ impl InstanceManager {
     }
 
     pub async fn repair_runtime_cache(&self, config: &InstanceConfig) -> Result<(), InstanceError> {
+        validate_name(&config.name)?;
+        let settings = crate::config::SETTINGS.read().clone();
+        let instance_dir = std::path::absolute(self.instances_dir.join(&config.name))?;
+        let minecraft_dir = instance_dir.join(crate::storage::MINECRAFT_DIR_NAME);
+        std::fs::create_dir_all(&minecraft_dir)?;
+        let environment = crate::instance::java::merge_environment(
+            &settings.defaults.environment,
+            &config.environment,
+        );
+        let java_path = crate::instance::java::resolve_java_path_in(
+            config
+                .java_path
+                .as_deref()
+                .or(settings.paths.effective_java_path()),
+            &minecraft_dir,
+            &environment,
+        );
         let task = crate::feedback::progress::ProgressTask::start(format!(
             "Rebuilding runtime for '{}'",
             config.name
@@ -352,7 +394,19 @@ impl InstanceManager {
         if fetched_meta {
             crate::storage::write_atomic(&meta_path, &raw_meta)?;
         }
-        crate::net::mojang::download_libraries(&self.client, &version_meta, &self.meta_dir).await?;
+        let runtime = crate::instance::java::probe_java_in(
+            Path::new(&java_path),
+            &minecraft_dir,
+            &environment,
+        )
+        .await?;
+        crate::net::mojang::download_libraries_for_platform(
+            &self.client,
+            &version_meta,
+            &self.meta_dir,
+            &runtime.platform,
+        )
+        .await?;
         crate::net::mojang::download_assets(&self.client, &version_meta, &self.meta_dir).await?;
 
         if config.loader != ModLoader::Vanilla {
@@ -368,9 +422,10 @@ impl InstanceManager {
                     &self.client,
                     &config.game_version,
                     loader_version,
-                    &self.instances_dir.join(&config.name),
+                    &instance_dir,
                     &self.meta_dir,
-                    config.java_path.as_deref(),
+                    Some(&java_path),
+                    &environment,
                 )
                 .await
                 .map_err(|error| match error {

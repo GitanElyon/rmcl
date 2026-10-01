@@ -4,7 +4,7 @@
 // Old Forge installers cannot run headless, so their profiles and libraries
 // must be extracted from the jar instead.
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use async_trait::async_trait;
 
@@ -48,17 +48,24 @@ impl ModLoaderInstaller for ForgeInstaller {
         instance_dir: &Path,
         meta_dir: &Path,
     ) -> Result<(), InstallError> {
+        let settings = crate::config::SETTINGS.read().clone();
+        let environment = crate::instance::java::merge_environment(
+            &settings.defaults.environment,
+            &Default::default(),
+        );
         self.install_with_java(
             client,
             game_version,
             loader_version,
             instance_dir,
             meta_dir,
-            None,
+            settings.paths.effective_java_path(),
+            &environment,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn install_with_java(
         &self,
         client: &HttpClient,
@@ -67,6 +74,7 @@ impl ModLoaderInstaller for ForgeInstaller {
         instance_dir: &Path,
         meta_dir: &Path,
         java_path: Option<&str>,
+        environment: &BTreeMap<String, String>,
     ) -> Result<(), InstallError> {
         let installer_jar = instance_dir
             .join(crate::storage::MINECRAFT_DIR_NAME)
@@ -93,16 +101,9 @@ impl ModLoaderInstaller for ForgeInstaller {
                 return Err(e);
             }
         } else {
-            let java_path = java_path.map(str::to_owned).unwrap_or_else(|| {
-                crate::config::SETTINGS
-                    .read()
-                    .paths
-                    .effective_java_path()
-                    .map(str::to_owned)
-                    .unwrap_or_else(crate::instance::java::detect_java_path)
-            });
-            tracing::debug!("Running Forge installer with Java {}", java_path);
-            if let Err(e) = run_forge_installer(&installer_jar, instance_dir, &java_path).await {
+            if let Err(e) =
+                run_forge_installer(&installer_jar, instance_dir, java_path, environment).await
+            {
                 let _ = tokio::fs::remove_file(&installer_jar).await;
                 return Err(InstallError::Installer(e));
             }
@@ -127,19 +128,26 @@ impl ModLoaderInstaller for ForgeInstaller {
 pub async fn run_forge_installer(
     installer_path: &Path,
     instance_dir: &Path,
-    java_path: &str,
+    java_path: Option<&str>,
+    environment: &BTreeMap<String, String>,
 ) -> Result<(), InstallerError> {
     use tokio::process::Command;
 
     set_action("Running Forge installer...");
+    let minecraft_dir = std::path::absolute(instance_dir.join(crate::storage::MINECRAFT_DIR_NAME))?;
+    let java_path =
+        crate::instance::java::resolve_java_path_in(java_path, &minecraft_dir, environment);
+    tracing::debug!("Running Forge installer with Java {}", java_path);
 
-    let output = match Command::new(java_path)
-        .arg("-jar")
-        .arg(installer_path)
-        .arg("--installClient")
-        .current_dir(instance_dir.join(crate::storage::MINECRAFT_DIR_NAME))
-        .output()
-        .await
+    let output = match crate::instance::process::output(
+        Command::new(&java_path)
+            .arg("-jar")
+            .arg(std::path::absolute(installer_path)?)
+            .arg("--installClient")
+            .current_dir(&minecraft_dir)
+            .envs(environment),
+    )
+    .await
     {
         Ok(o) => o,
         Err(e) => {
@@ -347,12 +355,7 @@ pub(crate) async fn install_forge_from_profile(
     // inheritsFrom field - implicitly inherits from the configured game
     // version so vanilla libraries layer in via resolve().
     //
-    // we use serde_json::to_vec (not the pretty-print variant via
-    // save_profile_json) so the written file is content-faithful: every
-    // field present in the installer's versionInfo round-trips. key order
-    // and whitespace may differ from the original installer JSON because
-    // the source is a serde_json::Value (which doesn't preserve order),
-    // but no field is silently dropped.
+    // Keep unknown installer fields instead of round-tripping a stripped profile model.
     let serialized = serde_json::to_vec(version_info).map_err(|e| {
         InstallError::Installer(InstallerError::Profile(format!(
             "Failed to serialize Forge profile: {e}"

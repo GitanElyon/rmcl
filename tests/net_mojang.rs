@@ -8,9 +8,35 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use rmcl::net::HttpClient;
 use rmcl::net::mojang::{
     Artifact, AssetIndex, Download, JavaVersion, Library, LibraryDownloads, VersionDownloads,
-    VersionEntry, VersionMeta, download_assets, download_assets_from, download_libraries,
-    fetch_version_manifest_from, fetch_version_meta_with_raw,
+    VersionEntry, VersionMeta, download_assets, download_assets_from,
+    download_libraries_for_platform, fetch_version_manifest_from, fetch_version_meta_with_raw,
 };
+
+fn test_platform() -> rmcl::launch_profile::system::JavaPlatform {
+    rmcl::launch_profile::system::JavaPlatform::from_java_properties(
+        match std::env::consts::OS {
+            "windows" => "Windows 10",
+            "macos" => "Mac OS X",
+            _ => "Linux",
+        },
+        std::env::consts::ARCH,
+        if cfg!(target_pointer_width = "64") {
+            "64"
+        } else {
+            "32"
+        },
+        "10.0",
+    )
+    .unwrap()
+}
+
+async fn download_libraries(
+    client: &HttpClient,
+    meta: &VersionMeta,
+    meta_dir: &std::path::Path,
+) -> Result<(), rmcl::net::NetError> {
+    download_libraries_for_platform(client, meta, meta_dir, &test_platform()).await
+}
 
 fn sha1(bytes: &[u8]) -> String {
     use sha1::Digest;
@@ -299,8 +325,10 @@ async fn download_assets_from_writes_index_and_assets() {
     let server = MockServer::start().await;
     let hash = sha1(b"asset-bytes");
     let index = serde_json::to_vec(&json!({
+        "virtual": true,
         "objects": {
-            "minecraft/lang/en_us.json": {"hash": hash, "size": b"asset-bytes".len()}
+            "minecraft/lang/en_us.json": {"hash": hash, "size": b"asset-bytes".len()},
+            "lang/en_us.lang": {"hash": hash, "size": b"asset-bytes".len()}
         }
     }))
     .unwrap();
@@ -335,6 +363,20 @@ async fn download_assets_from_writes_index_and_assets() {
         .join(&hash);
     assert!(asset_path.exists(), "asset file missing");
     assert_eq!(std::fs::read(&asset_path).unwrap(), b"asset-bytes");
+    for name in ["minecraft/lang/en_us.json", "lang/en_us.lang"] {
+        assert_eq!(
+            std::fs::read(
+                tmp.path()
+                    .join("cache/minecraft/assets/virtual/5")
+                    .join(name)
+            )
+            .unwrap(),
+            b"asset-bytes"
+        );
+    }
+    download_assets_from(&HttpClient::new(), &meta, tmp.path(), &cdn_base)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -509,7 +551,14 @@ async fn download_libraries_downloads_and_extracts_natives() {
             downloads: LibraryDownloads {
                 artifact: None,
                 classifiers: Some(std::collections::HashMap::from([(
-                    "natives-linux".to_string(),
+                    format!(
+                        "natives-linux-{}",
+                        if cfg!(target_pointer_width = "64") {
+                            "64"
+                        } else {
+                            "32"
+                        }
+                    ),
                     Artifact {
                         url: format!("{server_uri}/lwjgl-natives.jar"),
                         path: "org/lwjgl/lwjgl/lwjgl/2.9.4/lwjgl-2.9.4-natives-linux.jar"
@@ -522,7 +571,7 @@ async fn download_libraries_downloads_and_extracts_natives() {
             rules: None,
             natives: Some(std::collections::HashMap::from([(
                 rmcl::launch_profile::system::mojang_os_name().to_string(),
-                "natives-linux".to_string(),
+                "natives-linux-${arch}".to_string(),
             )])),
             extract: Some(rmcl::net::mojang::LibraryExtract {
                 exclude: Some(vec!["META-INF/".to_string()]),
@@ -541,18 +590,151 @@ async fn download_libraries_downloads_and_extracts_natives() {
     );
     assert_eq!(std::fs::read(&cached_jar).unwrap(), jar_bytes);
 
-    let extracted = tmp
-        .path()
-        .join("cache/minecraft/versions/test/natives/lib/native.so");
+    let natives = test_platform().natives_directory(tmp.path(), "test");
+    let extracted = natives.join("lib/native.so");
     assert_eq!(
         std::fs::read(&extracted).unwrap(),
         b"native-bits",
         "natives payload must be unpacked next to java.library.path"
     );
+    let original_permissions = std::fs::metadata(&extracted).unwrap().permissions();
+    let modified = std::fs::metadata(&extracted).unwrap().modified().unwrap();
+    let mut protected = original_permissions.clone();
+    protected.set_readonly(true);
+    std::fs::set_permissions(&extracted, protected).unwrap();
+    let reuse = download_libraries(&HttpClient::new(), &meta, tmp.path()).await;
+    std::fs::set_permissions(&extracted, original_permissions).unwrap();
+    reuse.expect("unchanged natives must be reusable without replacing a protected/loaded library");
+    assert_eq!(
+        std::fs::metadata(&extracted).unwrap().modified().unwrap(),
+        modified
+    );
+    std::fs::write(&extracted, b"corrupted extraction").unwrap();
+    download_libraries(&HttpClient::new(), &meta, tmp.path())
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&extracted).unwrap(), b"native-bits");
     assert!(
-        !tmp.path()
-            .join("cache/minecraft/versions/test/natives/META-INF")
-            .exists(),
+        !natives.join("META-INF").exists(),
         "extract.exclude prefixes must be skipped"
     );
+}
+
+fn native_zip(payload: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file("native.dll", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(payload).unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
+#[tokio::test]
+async fn selected_java_bitness_controls_downloads_and_extraction_is_isolated() {
+    let server = MockServer::start().await;
+    let mut classifiers = serde_json::Map::new();
+    for bits in [32, 64] {
+        let bytes = native_zip(bits.to_string().as_bytes());
+        let url = format!("/native-{bits}.jar");
+        Mock::given(method("GET"))
+            .and(path(&url))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        classifiers.insert(
+            format!("natives-windows-{bits}"),
+            json!({
+                "url":format!("{}{url}", server.uri()), "sha1":sha1(&bytes), "size":bytes.len(),
+            }),
+        );
+    }
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.libraries = serde_json::from_value(json!([{
+        "name":"tv.twitch:twitch-platform:5.16", "downloads":{"classifiers":classifiers},
+        "natives":{"windows":"natives-windows-${arch}"},
+        "rules":[{"action":"allow", "os":{"name":"windows", "version":"^10\\."}}],
+    }]))
+    .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    for (arch, bits) in [("x86", "32"), ("amd64", "64")] {
+        let platform = rmcl::launch_profile::system::JavaPlatform::from_java_properties(
+            "Windows 10",
+            arch,
+            bits,
+            "10.0",
+        )
+        .unwrap();
+        download_libraries_for_platform(&HttpClient::new(), &meta, temp.path(), &platform)
+            .await
+            .unwrap();
+        let natives = platform.natives_directory(temp.path(), &meta.id);
+        assert_eq!(
+            std::fs::read(natives.join("native.dll")).unwrap(),
+            bits.as_bytes()
+        );
+    }
+    // The second extraction must leave the first architecture's payload intact.
+    let java32 = rmcl::launch_profile::system::JavaPlatform::from_java_properties(
+        "Windows 10",
+        "x86",
+        "32",
+        "10.0",
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(
+            java32
+                .natives_directory(temp.path(), &meta.id)
+                .join("native.dll")
+        )
+        .unwrap(),
+        b"32"
+    );
+    assert!(
+        !temp
+            .path()
+            .join("cache/minecraft/versions")
+            .join(&meta.id)
+            .join("natives/native.dll")
+            .exists()
+    );
+    let old_windows = rmcl::launch_profile::system::JavaPlatform::from_java_properties(
+        "Windows 7",
+        "x86",
+        "32",
+        "6.1",
+    )
+    .unwrap();
+    let other = tempfile::tempdir().unwrap();
+    download_libraries_for_platform(&HttpClient::new(), &meta, other.path(), &old_windows)
+        .await
+        .unwrap();
+    assert!(
+        !old_windows
+            .natives_directory(other.path(), &meta.id)
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn missing_selected_native_classifier_is_reported() {
+    let mut meta = meta_with_one_library("https://example.invalid");
+    meta.libraries = serde_json::from_value(json!([{
+        "name":"tv.twitch:twitch-platform:5.16", "downloads":{"classifiers":{}},
+        "natives":{"windows":"natives-windows-${arch}"},
+    }]))
+    .unwrap();
+    let java32 = rmcl::launch_profile::system::JavaPlatform::from_java_properties(
+        "Windows 10",
+        "x86",
+        "32",
+        "10.0",
+    )
+    .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let error = download_libraries_for_platform(&HttpClient::new(), &meta, temp.path(), &java32)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("natives-windows-32"));
 }

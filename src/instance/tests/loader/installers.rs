@@ -3,9 +3,6 @@
 
 use super::*;
 
-// the factory maps every ModLoader variant to its concrete installer.
-// covering all five arms catches a misordered match or a copy-paste typo
-// that would route, say, NeoForge to the Forge installer.
 #[rstest::rstest]
 #[case::vanilla(ModLoader::Vanilla)]
 #[case::forge(ModLoader::Forge)]
@@ -24,8 +21,7 @@ fn save_installer_profile_copies_raw_bytes_verbatim() {
     let instance_dir = tmp.path().join("instance");
     let meta_dir = tmp.path().join("meta");
 
-    // a synthetic installer version JSON with the modern arguments
-    // object - exactly the shape we used to strip.
+    // Preserve modern JVM arguments that older rmcl caches stripped.
     let installer_json = br#"{
             "id": "1.20.1-forge-47.2.0",
             "inheritsFrom": "1.20.1",
@@ -111,10 +107,6 @@ fn profile_filenames_match_launch_cache_names(
     );
 }
 
-// shape-pinning test: a synthetic versionInfo from a 1.7.10 forge
-// install_profile.json must deserialise as a LaunchProfile so the
-// launch flow's render_args + resolve pipeline can consume it. no
-// filesystem round-trip; serde_json directly on the literal bytes.
 #[test]
 fn legacy_forge_version_info_deserialises_as_launch_profile() {
     let bytes = br#"{
@@ -158,10 +150,6 @@ fn legacy_forge_version_info_deserialises_as_launch_profile() {
     assert!(profile.libraries[0].downloads.is_none());
 }
 
-// shape-pinning test: a synthetic upstream fabric profile (no
-// inheritsFrom, no arguments, libraries with name+url) must
-// deserialise as a LaunchProfile so the install path can write it
-// through to disk and the launch flow can read it back.
 #[test]
 fn raw_fabric_profile_bytes_parse_as_launch_profile() {
     let bytes = br#"{
@@ -189,4 +177,180 @@ fn raw_fabric_profile_bytes_parse_as_launch_profile() {
         parsed.libraries[0].url.as_deref(),
         Some("https://maven.fabricmc.net/")
     );
+}
+
+fn recording_java(temp: &Path) -> String {
+    let path = temp.join(if cfg!(windows) {
+        "installer java.cmd"
+    } else {
+        "installer java.sh"
+    });
+    #[cfg(windows)]
+    std::fs::write(&path, "@echo off\r\n(echo %~1\r\necho %~2\r\necho %~3\r\necho %~4\r\n)>installer-args.txt\r\necho %CD%>installer-cwd.txt\r\n(echo %INSTALLER_CONTEXT%\r\necho %INSTALLER_GLOBAL%\r\n)>installer-env.txt\r\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > installer-args.txt\npwd > installer-cwd.txt\nprintf '%s\\n' \"$INSTALLER_CONTEXT\" \"$INSTALLER_GLOBAL\" > installer-env.txt\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path.to_string_lossy().into_owned()
+}
+
+#[rstest::rstest]
+#[case::forge(false)]
+#[case::neoforge(true)]
+#[tokio::test]
+async fn installers_use_merged_environment_and_minecraft_cwd(#[case] neoforge: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let instance = temp.path().join("instance with spaces");
+    let minecraft = instance.join(crate::storage::MINECRAFT_DIR_NAME);
+    std::fs::create_dir_all(&minecraft).unwrap();
+    let installer = minecraft.join("neoforge installer.jar");
+    let java = recording_java(temp.path());
+    let environment = crate::instance::java::merge_environment(
+        &BTreeMap::from([
+            ("PATH".to_owned(), "missing-global-java".to_owned()),
+            ("INSTALLER_CONTEXT".to_owned(), "global".to_owned()),
+            ("INSTALLER_GLOBAL".to_owned(), "global-only".to_owned()),
+        ]),
+        &BTreeMap::from([
+            (
+                "PATH".to_owned(),
+                temp.path().to_string_lossy().into_owned(),
+            ),
+            ("INSTALLER_CONTEXT".to_owned(), "selected".to_owned()),
+        ]),
+    );
+    let java_name = Path::new(&java).file_name().unwrap().to_str().unwrap();
+    if neoforge {
+        super::neoforge::run_neoforge_installer(
+            &installer,
+            &instance,
+            Some(java_name),
+            &environment,
+        )
+        .await
+        .unwrap();
+    } else {
+        super::forge::run_forge_installer(&installer, &instance, Some(java_name), &environment)
+            .await
+            .unwrap();
+    }
+    let args = std::fs::read_to_string(minecraft.join("installer-args.txt")).unwrap();
+    let args: Vec<_> = args.lines().collect();
+    assert_eq!(
+        &args[..3],
+        ["-jar", &installer.to_string_lossy(), "--installClient"]
+    );
+    if neoforge {
+        assert_eq!(args[3], minecraft.to_string_lossy());
+    } else {
+        assert!(args[3..].iter().all(|arg| arg.trim().is_empty()));
+    }
+    let cwd = std::fs::read_to_string(minecraft.join("installer-cwd.txt")).unwrap();
+    assert_eq!(
+        Path::new(cwd.trim()).canonicalize().unwrap(),
+        minecraft.canonicalize().unwrap()
+    );
+    assert!(!args.iter().any(|arg| arg.starts_with("-Duser.home=")));
+    assert_eq!(
+        std::fs::read_to_string(minecraft.join("installer-env.txt"))
+            .unwrap()
+            .lines()
+            .map(str::trim)
+            .collect::<Vec<_>>(),
+        ["selected", "global-only"]
+    );
+}
+
+#[tokio::test]
+async fn cancelled_installers_do_not_leave_java_or_its_descendants_running() {
+    let fixture = tempfile::tempdir().unwrap();
+    let classes = fixture.path().join("classes");
+    std::fs::create_dir_all(&classes).unwrap();
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/InstallerLifetimeFixture.java");
+    let compiler = std::process::Command::new("javac")
+        .args(["-source", "8", "-target", "8"])
+        .arg("-d")
+        .arg(&classes)
+        .arg(source)
+        .output()
+        .unwrap();
+    assert!(
+        compiler.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiler.stderr)
+    );
+    let jar = fixture.path().join("installer fixture.jar");
+    let packer = std::process::Command::new("jar")
+        .arg("cfe")
+        .arg(&jar)
+        .arg("InstallerLifetimeFixture")
+        .arg("-C")
+        .arg(&classes)
+        .arg(".")
+        .output()
+        .unwrap();
+    assert!(
+        packer.status.success(),
+        "{}",
+        String::from_utf8_lossy(&packer.stderr)
+    );
+    let java = crate::instance::java::resolve_java_path_in(
+        None,
+        &std::env::current_dir().unwrap(),
+        &Default::default(),
+    );
+    for neoforge in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let minecraft = temp.path().join(crate::storage::MINECRAFT_DIR_NAME);
+        std::fs::create_dir_all(&minecraft).unwrap();
+        {
+            let future = async {
+                if neoforge {
+                    super::neoforge::run_neoforge_installer(
+                        &jar,
+                        temp.path(),
+                        Some(&java),
+                        &Default::default(),
+                    )
+                    .await
+                } else {
+                    super::forge::run_forge_installer(
+                        &jar,
+                        temp.path(),
+                        Some(&java),
+                        &Default::default(),
+                    )
+                    .await
+                }
+            };
+            tokio::pin!(future);
+            let ready = async {
+                while !minecraft.join("installer-ready").is_file()
+                    || !minecraft.join("installer-child-ready").is_file()
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            };
+            tokio::select! {
+                result = &mut future => panic!("installer exited before cancellation: {result:?}"),
+                result = tokio::time::timeout(std::time::Duration::from_secs(15), ready) => result.unwrap(),
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
+        assert!(
+            !minecraft.join("installer-survived").exists(),
+            "Java process survived installer cancellation"
+        );
+        assert!(
+            !minecraft.join("installer-child-survived").exists(),
+            "Java descendant survived installer cancellation"
+        );
+    }
 }

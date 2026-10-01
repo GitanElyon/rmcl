@@ -2,12 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
 };
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +11,9 @@ use tokio::task::JoinSet;
 
 use super::{HttpClient, NetError, download_file};
 use crate::feedback::progress::{clear, set_action, set_progress, set_sub_action};
+use crate::launch_profile::{model, system::JavaPlatform};
+
+pub use model::{Artifact, LibraryDownloads, LibraryExtract};
 
 const MANIFEST_URL: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const ASSETS_BASE_URL: &str = "https://resources.download.minecraft.net";
@@ -86,32 +85,6 @@ pub struct Library {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LibraryExtract {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exclude: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LibraryDownloads {
-    pub artifact: Option<Artifact>,
-    // classifier -> download info (same shape as artifact). populated on
-    // libraries that declare `natives`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub classifiers: Option<HashMap<String, Artifact>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Artifact {
-    pub url: String,
-    // empty when upstream omits it; callers fall back to deriving the
-    // relative path from the library's maven coordinate.
-    #[serde(default)]
-    pub path: String,
-    pub sha1: String,
-    pub size: u64,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JavaVersion {
     pub major_version: u32,
@@ -120,6 +93,8 @@ pub struct JavaVersion {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AssetIndexContent {
     pub objects: HashMap<String, AssetObject>,
+    #[serde(default, rename = "virtual")]
+    pub virtual_assets: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -270,32 +245,76 @@ pub async fn download_libraries(
     meta: &VersionMeta,
     meta_dir: &Path,
 ) -> Result<(), NetError> {
+    let java = crate::instance::java::resolve_java_path(None);
+    let runtime = crate::instance::java::probe_java(Path::new(&java)).await?;
+    download_libraries_for_platform(client, meta, meta_dir, &runtime.platform).await
+}
+
+pub async fn download_libraries_for_platform(
+    client: &HttpClient,
+    meta: &VersionMeta,
+    meta_dir: &Path,
+    platform: &JavaPlatform,
+) -> Result<(), NetError> {
+    if !crate::storage::safe_relative_path(Path::new(&meta.id))
+        || Path::new(&meta.id).components().count() != 1
+    {
+        return Err(NetError::Parse(format!(
+            "Invalid Minecraft version ID: {}",
+            meta.id
+        )));
+    }
+    let libraries: Vec<_> = meta
+        .libraries
+        .iter()
+        .map(|lib| model::Library {
+            name: lib.name.clone(),
+            downloads: Some(lib.downloads.clone()),
+            rules: lib.rules.clone(),
+            natives: lib.natives.clone(),
+            extract: lib.extract.clone(),
+            ..Default::default()
+        })
+        .collect();
+    download_profile_libraries(
+        client,
+        &libraries,
+        &crate::storage::MetadataPaths::new(meta_dir).libraries(),
+        &platform.natives_directory(meta_dir, &meta.id),
+        platform,
+        &crate::launch_profile::rules::FeatureSet::default(),
+    )
+    .await
+}
+
+pub(crate) async fn download_profile_libraries(
+    client: &HttpClient,
+    libraries: &[model::Library],
+    lib_dir: &Path,
+    natives_dir: &Path,
+    platform: &JavaPlatform,
+    features: &crate::launch_profile::rules::FeatureSet,
+) -> Result<(), NetError> {
     set_action("Downloading libraries...");
     tracing::debug!(
-        "Resolving {} libraries for Minecraft {}",
-        meta.libraries.len(),
-        meta.id
+        "Resolving {} libraries for Java {} {}",
+        libraries.len(),
+        platform.os_name,
+        platform.arch
     );
 
-    let features = crate::launch_profile::rules::FeatureSet::default();
-    let host_os_version = crate::launch_profile::system::mojang_os_version();
     let rule_ctx = crate::launch_profile::rules::RuleContext {
-        os_name: crate::launch_profile::system::mojang_os_name(),
-        os_version: &host_os_version,
-        arch: crate::launch_profile::system::mojang_arch_name(),
-        features: &features,
+        os_name: platform.os_name,
+        os_version: &platform.os_version,
+        arch: &platform.arch,
+        features,
     };
-
-    let natives_dir = crate::storage::MetadataPaths::new(meta_dir)
-        .versions()
-        .join(&meta.id)
-        .join("natives");
 
     let mut downloads: Vec<(String, PathBuf, String, String, u64)> = Vec::new();
     // natives jars to unpack once every download has landed:
     // (jar path inside the library cache, extract.exclude prefixes)
     let mut natives_jars: Vec<(PathBuf, Vec<String>)> = Vec::new();
-    for library in &meta.libraries {
+    for library in libraries {
         if let Some(rules) = &library.rules
             && !crate::launch_profile::rules::evaluate(rules, &rule_ctx)
         {
@@ -303,20 +322,16 @@ pub async fn download_libraries(
             continue;
         }
 
-        if let Some(artifact) = &library.downloads.artifact {
-            let rel = library_relative_path(library, artifact.path.as_str()).ok_or_else(|| {
-                NetError::Parse(format!("Invalid library path for {}", library.name))
-            })?;
-            let destination = crate::storage::MetadataPaths::new(meta_dir)
-                .libraries()
-                .join(&rel);
+        if let Some(artifact) = library.downloads.as_ref().and_then(|d| d.artifact.as_ref()) {
+            let rel = library_artifact_path(library)?.expect("artifact has a path");
+            let destination = lib_dir.join(&rel);
             if verify_cached(&destination, &artifact.sha1, artifact.size) {
-                tracing::trace!("Library already cached: {}", rel);
+                tracing::trace!("Library already cached: {}", rel.display());
             } else {
                 downloads.push((
                     artifact.url.clone(),
                     destination,
-                    rel,
+                    rel.to_string_lossy().into_owned(),
                     artifact.sha1.clone(),
                     artifact.size,
                 ));
@@ -324,18 +339,24 @@ pub async fn download_libraries(
         }
 
         // native classifier jar (pre-1.13 era libraries). the jar itself is
-        // cached alongside the other libraries; its contents get unpacked
-        // into versions/<id>/natives where java.library.path points.
+        // cached alongside the other libraries; extraction is isolated by Java architecture.
         if let Some(classifier) = library
             .natives
             .as_ref()
-            .and_then(|n| n.get(crate::launch_profile::system::mojang_os_name()))
-            && let Some(info) = library
-                .downloads
-                .classifiers
-                .as_ref()
-                .and_then(|classifiers| classifiers.get(classifier))
+            .and_then(|n| n.get(platform.os_name))
+            .map(|classifier| classifier.replace("${arch}", &platform.bitness.to_string()))
         {
+            let info = library
+                .downloads
+                .as_ref()
+                .and_then(|downloads| downloads.classifiers.as_ref())
+                .and_then(|classifiers| classifiers.get(&classifier))
+                .ok_or_else(|| {
+                    NetError::Parse(format!(
+                        "Library {} declares missing native classifier {classifier}",
+                        library.name
+                    ))
+                })?;
             // the maven fallback must carry the classifier: it selects
             // <artifact>-<version>-<classifier>.jar, not the base jar.
             let rel = if !info.path.is_empty() {
@@ -355,9 +376,7 @@ pub async fn download_libraries(
                     library.name
                 )));
             }
-            let destination = crate::storage::MetadataPaths::new(meta_dir)
-                .libraries()
-                .join(&rel);
+            let destination = lib_dir.join(&rel);
             if !verify_cached(&destination, &info.sha1, info.size) {
                 downloads.push((
                     info.url.clone(),
@@ -386,23 +405,44 @@ pub async fn download_libraries(
     clear();
     result?;
 
-    for (jar, exclude) in &natives_jars {
-        extract_natives(jar, &natives_dir, exclude)?;
+    if !natives_jars.is_empty() {
+        std::fs::create_dir_all(natives_dir)?;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(natives_dir.join(".extract.lock"))?;
+        lock.lock()?;
+        for (jar, exclude) in &natives_jars {
+            extract_natives(jar, natives_dir, exclude)?;
+        }
     }
 
     Ok(())
 }
 
-fn library_relative_path(library: &Library, recorded_path: &str) -> Option<String> {
-    let path = if recorded_path.is_empty() {
-        crate::instance::loader::maven::maven_coord_to_path(&library.name)?
-    } else {
-        recorded_path.to_owned()
+pub(crate) fn library_artifact_path(library: &model::Library) -> Result<Option<PathBuf>, NetError> {
+    let recorded_path = match &library.downloads {
+        Some(downloads) => match &downloads.artifact {
+            Some(artifact) => &artifact.path,
+            // A classifier-only library belongs in the extraction directory, not the classpath.
+            None => return Ok(None),
+        },
+        None => "",
     };
-    crate::storage::safe_relative_path(Path::new(&path)).then_some(path)
+    let path = if recorded_path.is_empty() {
+        crate::instance::loader::maven::maven_coord_to_path(&library.name)
+    } else {
+        Some(recorded_path.to_owned())
+    }
+    .filter(|path| crate::storage::safe_relative_path(Path::new(path)))
+    .ok_or_else(|| NetError::Parse(format!("Invalid library path for {}", library.name)))?;
+    Ok(Some(PathBuf::from(path)))
 }
 
 fn extract_natives(jar: &Path, dest: &Path, exclude: &[String]) -> Result<(), NetError> {
+    use std::io::Read;
     let file = std::fs::File::open(jar)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| NetError::Parse(format!("Invalid natives jar {}: {e}", jar.display())))?;
@@ -432,11 +472,22 @@ fn extract_natives(jar: &Path, dest: &Path, exclude: &[String]) -> Result<(), Ne
             continue;
         }
         let out_path = dest.join(&rel);
-        if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        // Reusing a loaded DLL must not truncate or replace it on another launch.
+        let cached = match std::fs::read(&out_path) {
+            Ok(cached) => Some(cached),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(NetError::Parse(format!(
+                    "Could not read native {}: {error}",
+                    out_path.display()
+                )));
+            }
+        };
+        if cached.as_deref() != Some(bytes.as_slice()) {
+            crate::storage::write_atomic(&out_path, &bytes)?;
         }
-        let mut out = std::fs::File::create(&out_path)?;
-        std::io::copy(&mut entry, &mut out)?;
     }
     Ok(())
 }
@@ -509,6 +560,7 @@ pub async fn download_assets_from(
     };
 
     let mut downloads = Vec::new();
+    let mut hashes = HashSet::new();
     for object in asset_index.objects.values() {
         if object.hash.len() != 40 || !object.hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             clear();
@@ -526,7 +578,7 @@ pub async fn download_assets_from(
             .join(prefix)
             .join(&object.hash);
 
-        if verify_cached(&destination, &object.hash, object.size) {
+        if !hashes.insert(&object.hash) || verify_cached(&destination, &object.hash, object.size) {
             continue;
         }
 
@@ -541,18 +593,32 @@ pub async fn download_assets_from(
 
     if downloads.is_empty() {
         tracing::info!("All assets already cached");
+    } else if let Err(error) = run_parallel_downloads(client, downloads, true).await {
         clear();
-        return Ok(());
+        return Err(error);
     }
-
-    tracing::debug!(
-        "Downloading {} missing asset(s) from index {}",
-        downloads.len(),
-        meta.asset_index.id
-    );
-    let result = run_parallel_downloads(client, downloads, true).await;
+    if asset_index.virtual_assets {
+        let assets = crate::storage::MetadataPaths::new(meta_dir).assets();
+        for (name, object) in &asset_index.objects {
+            if !crate::storage::safe_relative_path(Path::new(name)) {
+                clear();
+                return Err(NetError::Parse(format!(
+                    "Invalid virtual asset path: {name}"
+                )));
+            }
+            let destination = assets.join("virtual").join(&meta.asset_index.id).join(name);
+            if !verify_cached(&destination, &object.hash, object.size) {
+                let source = assets
+                    .join("objects")
+                    .join(&object.hash[..2])
+                    .join(&object.hash);
+                let bytes = tokio::fs::read(source).await?;
+                crate::storage::write_atomic(&destination, &bytes)?;
+            }
+        }
+    }
     clear();
-    result
+    Ok(())
 }
 
 // Continue other downloads after one fails; report the first error afterward.
@@ -567,7 +633,7 @@ async fn run_parallel_downloads(
         total_downloads,
         MAX_CONCURRENT_DOWNLOADS
     );
-    let completed = Arc::new(AtomicU64::new(0));
+    let mut completed = 0;
     let mut queue = downloads.into_iter();
     let mut set = JoinSet::new();
 
@@ -585,9 +651,9 @@ async fn run_parallel_downloads(
     while let Some(join_result) = set.join_next().await {
         match join_result {
             Ok(Ok(label)) => {
-                let finished = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                completed += 1;
                 if report_count_progress {
-                    set_progress(finished, total_downloads);
+                    set_progress(completed, total_downloads);
                 }
                 set_sub_action(label);
             }

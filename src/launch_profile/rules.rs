@@ -16,7 +16,7 @@ pub struct OsCondition {
     pub arch: Option<String>,
     // mojang occasionally constrains natives selection on os.version with a
     // regex. rare in practice - when present, it's a substring/anchor match
-    // against the host OS version reported by `system::mojang_os_version`.
+    // against os.version reported by the selected Java runtime.
     pub version: Option<String>,
 }
 

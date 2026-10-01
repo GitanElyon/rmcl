@@ -51,7 +51,6 @@ pub fn substitute(input: &str, ctx: &TemplateContext) -> String {
                 rest = &after_open[close_rel + 1..];
             }
             None => {
-                // unclosed `${...` - emit the rest literally and stop.
                 out.push_str("${");
                 out.push_str(after_open);
                 return out;
@@ -72,10 +71,21 @@ fn lookup(name: &str, ctx: &TemplateContext) -> Option<String> {
         "classpath" => ctx.classpath.to_string(),
         "game_directory" => ctx.game_directory.display().to_string(),
         "assets_root" => ctx.assets_root.display().to_string(),
+        "game_assets" => ctx
+            .assets_root
+            .join("virtual")
+            .join(ctx.assets_index_name)
+            .display()
+            .to_string(),
         "assets_index_name" => ctx.assets_index_name.to_string(),
         "auth_player_name" => ctx.auth_player_name.to_string(),
         "auth_uuid" => ctx.auth_uuid.to_string(),
         "auth_access_token" => ctx.auth_access_token.to_string(),
+        "auth_session" => format!(
+            "token:{}:{}",
+            ctx.auth_access_token,
+            ctx.auth_uuid.replace('-', "")
+        ),
         "auth_xuid" => ctx.auth_xuid.to_string(),
         "user_type" => ctx.user_type.to_string(),
         "user_properties" => ctx.user_properties.to_string(),

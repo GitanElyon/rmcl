@@ -278,6 +278,29 @@ async fn resolve_returns_unchanged_when_no_inherits_from() {
 }
 
 #[tokio::test]
+async fn inheritance_rejects_paths_outside_the_versions_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = temp.path().join("cache/minecraft/outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(
+        outside.join("meta.json"),
+        serde_json::to_vec(&empty_profile("outside")).unwrap(),
+    )
+    .unwrap();
+    for id in [
+        "../outside".to_owned(),
+        outside.to_string_lossy().into_owned(),
+    ] {
+        let mut child = empty_profile("child");
+        child.inherits_from = Some(id);
+        assert!(matches!(
+            resolve(child, temp.path()).await,
+            Err(ResolveError::ParseError(_, _))
+        ));
+    }
+}
+
+#[tokio::test]
 async fn resolve_single_level_inheritance_merges_parent() {
     let tmp = TempDir::new().unwrap();
 

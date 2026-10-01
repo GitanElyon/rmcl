@@ -311,3 +311,147 @@ fn instance_names_are_portable_components() {
         assert!(validate_name(name).is_ok(), "{name}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn runtime_repair_uses_selected_java_cwd_environment_and_platform() {
+    use sha1::{Digest, Sha1};
+    use std::collections::BTreeMap;
+    use std::io::{Cursor, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const ROOT: &str = "RMCL_RUNTIME_CONTEXT_TEST";
+    let Some(root) = std::env::var_os(ROOT) else {
+        let temp =
+            tempfile::tempdir_in(Path::new(env!("CARGO_MANIFEST_DIR")).join("target")).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "instance::manager::tests::runtime_repair_uses_selected_java_cwd_environment_and_platform",
+                "--nocapture",
+            ])
+            .env(ROOT, temp.path())
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .current_dir(temp.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    };
+    let root = PathBuf::from(root);
+    let config_dir = crate::config::get_config_path();
+    assert!(config_dir.starts_with(&root));
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let mut settings = crate::config::Config::default();
+    settings.paths.java_path = Some("context-java".to_owned());
+    settings.defaults.environment = BTreeMap::from([
+        ("PATH".to_owned(), "global-bin".to_owned()),
+        ("JAVA_HOME".to_owned(), "missing-home".to_owned()),
+        ("RUNTIME_GLOBAL".to_owned(), "global-only".to_owned()),
+        ("RUNTIME_SHARED".to_owned(), "global".to_owned()),
+    ]);
+    std::fs::write(
+        config_dir.join("config.toml"),
+        toml::to_string(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let server = MockServer::start().await;
+        let client_jar = b"client";
+        let assets = br#"{"objects":{}}"#;
+        for (endpoint, body) in [("/client.jar", client_jar.as_slice()), ("/assets.json", assets.as_slice())] {
+            Mock::given(method("GET"))
+                .and(path(endpoint))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
+                .expect(3)
+                .mount(&server).await;
+        }
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        archive.start_file("native.bin", zip::write::SimpleFileOptions::default()).unwrap();
+        archive.write_all(b"selected-native").unwrap();
+        let native = archive.finish().unwrap().into_inner();
+        let hash = |bytes: &[u8]| format!("{:x}", Sha1::digest(bytes));
+        let manager = InstanceManager::new("instances", "meta");
+        let metadata = crate::storage::MetadataPaths::new(&manager.meta_dir);
+
+        for (name, os, java_os, java_arch, arch, bits) in [
+            ("global", "linux", "Linux", "aarch64", "arm64", 64),
+            ("override", "windows", "Windows 11", "i386", "x86", 32),
+            ("relative", "osx", "Mac OS X", "amd64", "x86_64", 64),
+        ] {
+            let mut config = dummy_config(name);
+            config.game_version = name.to_owned();
+            let minecraft = root.join("instances").join(name).join(crate::storage::MINECRAFT_DIR_NAME);
+            let bin = if name == "global" { "global-bin" } else { "instance-bin" };
+            let java = minecraft.join(bin).join("context-java");
+            std::fs::create_dir_all(java.parent().unwrap()).unwrap();
+            std::fs::write(&java, "#!/bin/sh\nprintf '%s\\n' \"$0\" > probe-java.txt\npwd > probe-cwd.txt\nprintf '%s\\n' \"$RUNTIME_GLOBAL\" \"$RUNTIME_SHARED\" > probe-env.txt\nprintf 'java.version = 25\\nos.name = %s\\nos.arch = %s\\nsun.arch.data.model = %s\\nos.version = fixture-os\\n' \"$RUNTIME_OS\" \"$RUNTIME_ARCH\" \"$RUNTIME_BITS\" >&2\n").unwrap();
+            std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o755)).unwrap();
+            config.environment = BTreeMap::from([
+                ("RUNTIME_OS".to_owned(), java_os.to_owned()),
+                ("RUNTIME_ARCH".to_owned(), java_arch.to_owned()),
+                ("RUNTIME_BITS".to_owned(), bits.to_string()),
+                ("RUNTIME_SHARED".to_owned(), "instance".to_owned()),
+            ]);
+            if name != "global" {
+                config.environment.insert("PATH".to_owned(), bin.to_owned());
+            }
+            if name == "relative" {
+                config.java_path = Some("./instance-bin/context-java".to_owned());
+            }
+
+            let mut libraries = Vec::new();
+            for (library_os, library_arch) in [("linux", "arm64"), ("windows", "x86"), ("osx", "x86_64")] {
+                let mut classifiers = serde_json::Map::new();
+                for native_bits in [32, 64] {
+                    let endpoint = format!("/{name}-{library_os}-{native_bits}.jar");
+                    Mock::given(method("GET"))
+                        .and(path(&endpoint))
+                        .respond_with(ResponseTemplate::new(200).set_body_bytes(native.clone()))
+                        .expect(u64::from(library_os == os && native_bits == bits))
+                        .mount(&server).await;
+                    classifiers.insert(format!("natives-{native_bits}"), serde_json::json!({
+                        "url": format!("{}{endpoint}", server.uri()),
+                        "path": format!("{name}/{library_os}-{native_bits}.jar"),
+                        "sha1": hash(&native), "size": native.len()
+                    }));
+                }
+                libraries.push(serde_json::json!({
+                    "name": format!("example:{library_os}:1"),
+                    "rules": [{ "action": "allow", "os": { "name": library_os, "arch": library_arch, "version": "^fixture-os$" } }],
+                    "natives": { (library_os): "natives-${arch}" },
+                    "downloads": { "classifiers": classifiers }
+                }));
+            }
+            let version_dir = metadata.versions().join(name);
+            std::fs::create_dir_all(&version_dir).unwrap();
+            std::fs::write(version_dir.join("meta.json"), serde_json::to_vec(&serde_json::json!({
+                "id": name, "mainClass": "fixture.Main", "arguments": { "game": [], "jvm": [] },
+                "assetIndex": { "id": name, "url": format!("{}/assets.json", server.uri()), "sha1": hash(assets) },
+                "downloads": { "client": { "url": format!("{}/client.jar", server.uri()), "sha1": hash(client_jar), "size": client_jar.len() } },
+                "libraries": libraries
+            })).unwrap()).unwrap();
+
+            manager.repair_runtime_cache(&config).await.unwrap();
+            let selected_java = std::fs::read_to_string(minecraft.join("probe-java.txt")).unwrap();
+            assert_eq!(Path::new(selected_java.trim()), java);
+            let cwd = std::fs::read_to_string(minecraft.join("probe-cwd.txt")).unwrap();
+            assert_eq!(Path::new(cwd.trim()).canonicalize().unwrap(), minecraft.canonicalize().unwrap());
+            assert_eq!(std::fs::read_to_string(minecraft.join("probe-env.txt")).unwrap(), "global-only\ninstance\n");
+            assert_eq!(std::fs::read(version_dir.join("natives").join(format!("{os}-{arch}-{bits}")).join("native.bin")).unwrap(), b"selected-native");
+            for (library_os, _) in [("linux", "arm64"), ("windows", "x86"), ("osx", "x86_64")] {
+                for native_bits in [32, 64] {
+                    assert_eq!(metadata.libraries().join(name).join(format!("{library_os}-{native_bits}.jar")).exists(), library_os == os && native_bits == bits);
+                }
+            }
+        }
+    });
+}

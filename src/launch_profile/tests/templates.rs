@@ -4,10 +4,6 @@
 use super::*;
 use std::path::PathBuf;
 
-// owns the path buffers so tests don't have to declare them inline; the
-// ctx() method borrows from self to build a TemplateContext with the
-// standard set of values. windows() returns a fixture with backslash
-// paths so the OS-independence test stays self-contained.
 struct Fixture {
     lib: PathBuf,
     nat: PathBuf,
@@ -128,4 +124,18 @@ fn custom_resolution_is_substituted_when_present() {
         substitute("${resolution_width}x${resolution_height}", &context),
         "1920x1080"
     );
+}
+
+#[test]
+fn legacy_164_arguments_resolve_session_and_virtual_assets() {
+    let fixture = Fixture::unix();
+    let mut context = fixture.ctx();
+    context.assets_index_name = "legacy";
+    let args = substitute(
+        "--username ${auth_player_name} --session ${auth_session} --version ${version_name} --gameDir ${game_directory} --assetsDir ${game_assets}",
+        &context,
+    );
+    assert!(!args.contains("${"));
+    assert!(args.contains("--session token:token:00000000000000000000000000000000"));
+    assert!(args.contains(&fixture.assets.join("virtual/legacy").display().to_string()));
 }

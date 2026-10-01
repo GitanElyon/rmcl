@@ -72,15 +72,7 @@ impl WizardState {
     }
 
     pub fn selected_version(&self) -> Option<&GameVersion> {
-        if let LoadState::Loaded(ref versions) = self.versions {
-            let visible: Vec<_> = versions
-                .iter()
-                .filter(|v| self.show_snapshots || v.stable)
-                .collect();
-            visible.get(self.version_idx).copied()
-        } else {
-            None
-        }
+        visible_versions(self).nth(self.version_idx)
     }
 
     pub fn selected_loader(&self) -> ModLoader {
@@ -178,14 +170,14 @@ fn handle_version_key(
             KeyCode::Char('k') | KeyCode::Up => {}
             KeyCode::Char(c) => {
                 state.version_search.push(c);
-                state.version_idx = 0; // reset to top of filtered list
+                state.version_idx = 0;
                 return;
             }
             _ => {}
         }
     }
 
-    let visible_count = visible_versions(state).len();
+    let visible_count = visible_versions(state).count();
 
     match key_event.code {
         KeyCode::Esc => {
@@ -344,21 +336,20 @@ fn close_popup(state: &mut WizardState, instances_state: &mut instances::State) 
     instances_state.show_popup = false;
 }
 
-pub(crate) fn visible_versions(state: &WizardState) -> Vec<GameVersion> {
+pub(crate) fn visible_versions(state: &WizardState) -> impl Iterator<Item = &GameVersion> {
     let q = state.version_search.query.to_lowercase();
-    match &state.versions {
-        LoadState::Loaded(versions) => versions
-            .iter()
-            .filter(|v| state.show_snapshots || v.stable)
-            .filter(|v| q.is_empty() || v.id.to_lowercase().contains(&q))
-            .cloned()
-            .collect(),
-        _ => Vec::new(),
-    }
+    let versions = match &state.versions {
+        LoadState::Loaded(versions) => versions.as_slice(),
+        _ => &[],
+    };
+    versions.iter().filter(move |version| {
+        (state.show_snapshots || version.stable)
+            && (q.is_empty() || version.id.to_lowercase().contains(&q))
+    })
 }
 
 pub(crate) fn clamp_version_index(state: &mut WizardState) {
-    let count = visible_versions(state).len();
+    let count = visible_versions(state).count();
     if count == 0 {
         state.version_idx = 0;
     } else if state.version_idx >= count {

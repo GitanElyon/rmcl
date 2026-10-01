@@ -178,7 +178,6 @@ fn render_version_step(state: &WizardState, area: Rect, buf: &mut ratatui::buffe
         }
         LoadState::Loaded(_) => {
             let items: Vec<ListItem> = visible_versions(state)
-                .into_iter()
                 .enumerate()
                 .map(|(index, version)| {
                     let suffix = if version.stable {

@@ -12,7 +12,7 @@ fn key(code: KeyCode) -> KeyEvent {
 }
 
 #[test]
-fn vanilla_wizard_reaches_confirm_and_returns_parameters() {
+fn filtered_vanilla_wizard_returns_the_displayed_version() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let mut instances = instances::State {
         show_popup: true,
@@ -32,10 +32,17 @@ fn vanilla_wizard_reaches_confirm_and_returns_parameters() {
     {
         let mut state = WIZARD_STATE.lock().unwrap();
         state.step = WizardStep::Version;
-        state.versions = LoadState::Loaded(vec![GameVersion {
-            id: "1.21.1".to_owned(),
-            stable: true,
-        }]);
+        state.versions = LoadState::Loaded(vec![
+            GameVersion {
+                id: "1.20.1".to_owned(),
+                stable: true,
+            },
+            GameVersion {
+                id: "1.21.1".to_owned(),
+                stable: true,
+            },
+        ]);
+        state.version_search.query = "1.21.1".to_owned();
     }
     handle_key(&key(KeyCode::Enter), &mut instances);
     assert_eq!(WIZARD_STATE.lock().unwrap().step, WizardStep::Confirm);
@@ -68,10 +75,12 @@ fn version_filter_clamps_a_stale_selection() {
 
     clamp_version_index(&mut state);
     assert_eq!(state.version_idx, 0);
-    assert_eq!(visible_versions(&state).len(), 1);
+    assert_eq!(visible_versions(&state).count(), 1);
 
     state.show_snapshots = true;
-    assert_eq!(visible_versions(&state).len(), 2);
+    assert_eq!(visible_versions(&state).count(), 2);
+    state.version_search.query = "missing".to_owned();
+    assert!(state.selected_version().is_none());
 }
 
 #[test]

@@ -8,9 +8,6 @@ fn format_relative_time_none_returns_never_played() {
     assert_eq!(format_relative_time(None), "Never played");
 }
 
-// each #[case] picks a "seconds ago" value that lands in exactly one
-// bucket of the match. mutating any bucket boundary (e.g. 3600 to 3601,
-// or "minutes" to "seconds") makes one of these cases fail.
 #[rstest::rstest]
 #[case::just_now(0, "Just now")]
 #[case::just_now_upper(59, "Just now")]
@@ -33,9 +30,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 fn synthetic_instance(name: &str) -> InstanceConfig {
-    // last_played intentionally None so the rendered text is the
-    // deterministic "Never played" string. anything else would make the
-    // snapshot drift relative to chrono::Utc::now().
+    // Avoid clock-dependent snapshot text.
     InstanceConfig {
         name: name.to_string(),
         game_version: "1.20.1".to_string(),

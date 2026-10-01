@@ -84,9 +84,7 @@ fn import_modpack_renders_fetching_step() {
     insta::assert_snapshot!(terminal.backend());
 }
 
-// Version step: pre-populate versions as LoadState::Loaded with synthetic
-// VersionInfo entries so render walks the list path without triggering
-// any network helpers.
+// Loaded fixtures keep rendering from spawning network tasks.
 #[test]
 fn import_modpack_renders_version_step() {
     use crate::net::modrinth::VersionInfo;
@@ -133,9 +131,6 @@ fn import_modpack_renders_version_step() {
     insta::assert_snapshot!(terminal.backend());
 }
 
-// Confirm step: needs a populated ImportSummary so the render path
-// doesn't bail. ImportSummary is constructed manually with synthetic
-// values; archive_path is a fake tempdir-ish path that never gets read.
 #[test]
 fn import_modpack_renders_confirm_step() {
     use crate::instance::import::{ImportSummary, PackFormat};
@@ -177,9 +172,6 @@ fn modpack_confirmation_area_fits_its_summary() {
     assert_eq!(popup_rect(Rect::new(0, 0, 100, 30)).height, 8);
 }
 
-// Confirm step with loader_version=None: covers the branch where the
-// pack didn't declare a loader version (rare upstream, but happens for
-// older mmc packs). render_confirm_step has to handle the Option.
 #[test]
 fn import_modpack_renders_confirm_step_without_loader_version() {
     use crate::instance::import::{ImportSummary, PackFormat};

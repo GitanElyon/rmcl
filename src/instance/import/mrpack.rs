@@ -150,6 +150,7 @@ pub async fn execute_import(
     manager: &InstanceManager,
     config: &crate::instance::InstanceConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    crate::instance::manager::validate_name(&config.name)?;
     tracing::info!(
         "Importing Modrinth pack '{}' as instance '{}'",
         summary.name,
@@ -251,14 +252,11 @@ async fn download_mod_files(
 }
 
 fn safe_mrpack_path(path: &str) -> Result<PathBuf, crate::net::NetError> {
-    let path = Path::new(path);
-    if !crate::storage::safe_relative_path(path) {
-        return Err(crate::net::NetError::Parse(format!(
-            "Unsafe .mrpack file path '{}'",
-            path.display()
-        )));
-    }
-    Ok(path.to_owned())
+    super::portable_pack_path(path)
+        .map(PathBuf::from)
+        .map_err(|error| {
+            crate::net::NetError::Parse(format!("Unsafe .mrpack file path '{path}': {error}"))
+        })
 }
 
 pub(super) fn owned_files(path: &Path) -> Result<Vec<PathBuf>, String> {
@@ -298,8 +296,8 @@ fn seed_content_manifest(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut manifest = ContentManifest::default();
     for file in index.client_files() {
-        let relative_path = Path::new(&file.path);
-        let Some(kind) = mrpack_content_kind(relative_path) else {
+        let relative_path = safe_mrpack_path(&file.path)?;
+        let Some(kind) = mrpack_content_kind(&relative_path) else {
             continue;
         };
         let Some((project_id, version_id)) = file.downloads.iter().find_map(|url| {
@@ -314,7 +312,7 @@ fn seed_content_manifest(
         let Some(expected_sha512) = file.hashes.get("sha512") else {
             continue;
         };
-        let file_fingerprint = fingerprint(&paths.minecraft().join(relative_path))?;
+        let file_fingerprint = fingerprint(&paths.minecraft().join(&relative_path))?;
         if file_fingerprint
             .hash("sha512")
             .is_none_or(|actual| !actual.eq_ignore_ascii_case(expected_sha512))
@@ -326,7 +324,7 @@ fn seed_content_manifest(
             continue;
         }
         manifest.upsert(ContentFileRecord {
-            relative_path: relative_path.to_owned(),
+            relative_path,
             kind,
             enabled: true,
             fingerprint: file_fingerprint,

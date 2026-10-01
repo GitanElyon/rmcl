@@ -95,6 +95,7 @@ pub async fn execute_import(
     manager: &InstanceManager,
     config: &crate::instance::InstanceConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    crate::instance::manager::validate_name(&config.name)?;
     tracing::info!(
         "Importing MultiMC/Prism pack '{}' as instance '{}'",
         summary.name,
@@ -159,13 +160,20 @@ fn extract_mmc_archive(
                 )
             })?;
 
+        let relative = if relative.as_os_str().is_empty() {
+            std::path::PathBuf::new()
+        } else {
+            std::path::PathBuf::from(super::portable_pack_path(
+                relative.to_str().ok_or("Archive path is not UTF-8")?,
+            )?)
+        };
         if relative.as_os_str().is_empty() || entry_name.ends_with('/') {
-            std::fs::create_dir_all(minecraft_dir.join(relative))?;
+            std::fs::create_dir_all(minecraft_dir.join(&relative))?;
             dirs += 1;
             continue;
         }
 
-        let dest = minecraft_dir.join(relative);
+        let dest = minecraft_dir.join(&relative);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }

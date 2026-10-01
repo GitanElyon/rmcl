@@ -251,6 +251,13 @@ pub static SETTINGS: LazyLock<ConfigStore> = LazyLock::new(|| {
 
 fn write_config_document(path: &std::path::Path, config: &Config) -> io::Result<()> {
     write_merged_toml_document(path, config, |document| {
+        if let Some(environment) = document
+            .get_mut("defaults")
+            .and_then(|defaults| defaults.get_mut("environment"))
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            environment.retain(|key, _| config.defaults.environment.contains_key(key));
+        }
         if config.paths.java_path.is_none()
             && let Some(paths) = document
                 .get_mut("paths")

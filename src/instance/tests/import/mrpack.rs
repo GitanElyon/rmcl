@@ -195,6 +195,25 @@ fn extraction_rejects_path_traversal() {
 }
 
 #[test]
+fn overrides_reject_windows_reserved_and_escaping_components_on_every_platform() {
+    let temp = tempfile::tempdir().unwrap();
+    for entry in [
+        "overrides/config/NUL.txt",
+        "overrides/config/file:stream",
+        "overrides/config/trailing.",
+        r"overrides/config\..\..\escaped.txt",
+    ] {
+        let path = make_mrpack(temp.path(), &[(entry, b"unsafe")]);
+        assert!(owned_files(&path).is_err(), "{entry}");
+        assert!(
+            extract_overrides(&path, &temp.path().join("minecraft")).is_err(),
+            "{entry}"
+        );
+        assert!(!temp.path().join("escaped.txt").exists());
+    }
+}
+
+#[test]
 fn mod_files_download_to_their_manifest_paths() {
     let _guard = crate::tests::TEST_LOCK
         .lock()
@@ -383,7 +402,7 @@ fn mod_file_removes_downloads_with_invalid_metadata() {
 #[test]
 fn import_seeds_exact_modrinth_content_identity() {
     let tmp = tempfile::tempdir().unwrap();
-    let paths = crate::storage::InstancePaths::new(tmp.path());
+    let paths = crate::storage::InstancePaths::new(tmp.path().join("Indexed"));
     let relative_path = PathBuf::from("resourcepacks/example.zip");
     std::fs::create_dir_all(paths.minecraft().join("resourcepacks")).unwrap();
     std::fs::write(paths.minecraft().join(&relative_path), b"resource pack").unwrap();

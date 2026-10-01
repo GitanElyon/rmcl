@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use thiserror::Error;
@@ -465,6 +465,8 @@ impl InstanceManager {
         if crate::instance::runtime::is_active(name) {
             return Err(InstanceError::InstanceRunning(name.to_owned()));
         }
+        let _lock = crate::instance::runtime::lock_instance(&self.instances_dir, name)?;
+        let _config_lock = self.config_lock(name)?;
         let instance_dir = self.instances_dir.join(name);
         if !instance_dir.exists() {
             tracing::warn!(
@@ -505,10 +507,8 @@ impl InstanceManager {
             tracing::debug!("Ignoring no-op instance rename '{}'", old_name);
             return Ok(());
         }
-        // same path-traversal guards as create: without this, "../x" or ".x"
-        // would move the instance directory out of (or hide it inside) the
-        // instances root.
         validate_name(new_name)?;
+        let _old_lock = crate::instance::runtime::lock_instance(&self.instances_dir, old_name)?;
         let old_dir = self.instances_dir.join(old_name);
         let new_dir = self.instances_dir.join(new_name);
         if !old_dir.exists() {
@@ -519,7 +519,16 @@ impl InstanceManager {
             );
             return Err(InstanceError::NotFound(old_name.to_string()));
         }
-        if new_dir.exists() {
+        let aliases_source = paths_alias(&old_dir, &new_dir)?;
+        let _new_lock = if aliases_source {
+            None
+        } else {
+            Some(crate::instance::runtime::lock_instance(
+                &self.instances_dir,
+                new_name,
+            )?)
+        };
+        if std::fs::symlink_metadata(&new_dir).is_ok() && !aliases_source {
             tracing::warn!(
                 "Cannot rename instance '{}' to '{}': destination exists at {}",
                 old_name,
@@ -528,11 +537,17 @@ impl InstanceManager {
             );
             return Err(InstanceError::AlreadyExists(new_name.to_string()));
         }
+        let _old_config_lock = self.config_lock(old_name)?;
+        let _new_config_lock = if aliases_source {
+            None
+        } else {
+            Some(self.config_lock(new_name)?)
+        };
         let mut config = self.load_one(old_name)?;
         config.name = new_name.to_owned();
         let json = serde_json::to_vec_pretty(&config)?;
         tracing::info!("Renaming instance '{}' to '{}'", old_name, new_name);
-        if let Err(e) = std::fs::rename(&old_dir, &new_dir) {
+        if let Err(e) = rename_path(&old_dir, &new_dir, aliases_source) {
             tracing::error!(
                 "Failed to rename instance directory {} to {}: {}",
                 old_dir.display(),
@@ -544,7 +559,7 @@ impl InstanceManager {
 
         let config_path = new_dir.join("instance.json");
         if let Err(error) = crate::storage::write_atomic(&config_path, &json) {
-            if let Err(rollback_error) = std::fs::rename(&new_dir, &old_dir) {
+            if let Err(rollback_error) = rename_path(&new_dir, &old_dir, aliases_source) {
                 tracing::error!(
                     "Failed to roll back instance rename from {} to {}: {}",
                     new_dir.display(),
@@ -583,6 +598,12 @@ impl InstanceManager {
                     continue;
                 }
             };
+            let Some(directory_name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if validate_name(&directory_name).is_err() {
+                continue;
+            }
             let config_path = entry.path().join("instance.json");
             if !config_path.exists() {
                 tracing::trace!("Skipping non-instance directory {}", entry.path().display());
@@ -597,12 +618,6 @@ impl InstanceManager {
             };
             match serde_json::from_str::<InstanceConfig>(&contents) {
                 Ok(mut config) => {
-                    let Some(directory_name) = entry.file_name().to_str().map(str::to_owned) else {
-                        continue;
-                    };
-                    if validate_name(&directory_name).is_err() {
-                        continue;
-                    }
                     config.name = directory_name;
                     instances.push(config);
                 }
@@ -659,6 +674,47 @@ impl InstanceManager {
     }
 
     pub fn save(&self, instance: &InstanceConfig) -> Result<(), InstanceError> {
+        let _lock = self.config_lock(&instance.name)?;
+        let mut instance = instance.clone();
+        match self.load_one(&instance.name) {
+            Ok(current) => {
+                instance.last_played = instance.last_played.max(current.last_played);
+                // Selection changes must commit with their corresponding filesystem payload.
+                instance.config_sync_profile = current.config_sync_profile;
+            }
+            Err(InstanceError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        self.save_unlocked(&instance)
+    }
+
+    pub(crate) fn save_config_sync_profile(
+        &self,
+        name: &str,
+        profile: Option<String>,
+    ) -> Result<InstanceConfig, InstanceError> {
+        let _lock = self.config_lock(name)?;
+        let mut config = self.load_one(name)?;
+        config.config_sync_profile = profile;
+        self.save_unlocked(&config)?;
+        Ok(config)
+    }
+
+    pub(crate) fn config_lock(&self, name: &str) -> Result<std::fs::File, InstanceError> {
+        validate_name(name)?;
+        // the lock must survive replacing or renaming the instance directory.
+        std::fs::create_dir_all(&self.instances_dir)?;
+        let path = self.instances_dir.join(format!(".rmcl-config-{name}.lock"));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)?;
+        file.lock()?;
+        Ok(file)
+    }
+
+    fn save_unlocked(&self, instance: &InstanceConfig) -> Result<(), InstanceError> {
         validate_name(&instance.name)?;
         let instance_dir = self.instances_dir.join(&instance.name);
         if !instance_dir.is_dir() {
@@ -676,10 +732,11 @@ impl InstanceManager {
     }
 
     pub fn touch_last_played(&self, name: &str) -> Result<(), InstanceError> {
+        let _lock = self.config_lock(name)?;
         let mut config = self.load_one(name)?;
         config.last_played = Some(chrono::Utc::now());
         tracing::debug!("Updating last_played for '{}'", name);
-        self.save(&config)
+        self.save_unlocked(&config)
     }
 }
 
@@ -725,6 +782,78 @@ pub(crate) fn portable_component(name: &str) -> bool {
             )
         })
     })
+}
+
+pub(crate) fn paths_alias(left: &Path, right: &Path) -> std::io::Result<bool> {
+    if left.parent() != right.parent() {
+        return Ok(false);
+    }
+    let right_metadata = match std::fs::symlink_metadata(right) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let left_metadata = std::fs::symlink_metadata(left)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if left_metadata.dev() != right_metadata.dev()
+            || left_metadata.ino() != right_metadata.ino()
+        {
+            return Ok(false);
+        }
+        // Distinct hard links are not aliases of the same directory entry.
+        if left.file_name() != right.file_name() {
+            let mut left_entry = false;
+            let mut right_entry = false;
+            for entry in std::fs::read_dir(
+                left.parent()
+                    .ok_or_else(|| std::io::Error::other("Path has no parent"))?,
+            )? {
+                let name = entry?.file_name();
+                left_entry |= Some(name.as_os_str()) == left.file_name();
+                right_entry |= Some(name.as_os_str()) == right.file_name();
+            }
+            if left_entry && right_entry {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        if left_metadata.file_type().is_symlink() || right_metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+        Ok(std::fs::canonicalize(left)? == std::fs::canonicalize(right)?)
+    }
+}
+
+pub(crate) fn rename_path(from: &Path, to: &Path, aliases_source: bool) -> std::io::Result<()> {
+    if !aliases_source {
+        return std::fs::rename(from, to);
+    }
+    let temporary = tempfile::Builder::new()
+        .prefix(".rmcl-rename-")
+        .tempdir_in(
+            from.parent()
+                .ok_or_else(|| std::io::Error::other("Path has no parent"))?,
+        )?;
+    let staged = temporary.path().join("original");
+    std::fs::rename(from, &staged)?;
+    if let Err(error) = std::fs::rename(&staged, to) {
+        if let Err(rollback) = std::fs::rename(&staged, from) {
+            let retained = temporary.keep();
+            return Err(std::io::Error::other(format!(
+                "Could not rename '{}' to '{}': {error}; rollback failed: {rollback}; original retained at '{}'",
+                from.display(),
+                to.display(),
+                retained.join("original").display(),
+            )));
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

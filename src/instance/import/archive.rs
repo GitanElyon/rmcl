@@ -32,7 +32,13 @@ fn relative_path(
     let relative = enclosed
         .strip_prefix(root)
         .map_err(|_| format!("Invalid override path: {}", entry.name()))?;
-    Ok(Some(relative.to_owned()))
+    if relative.as_os_str().is_empty() {
+        return Ok(Some(relative.to_owned()));
+    }
+    let relative = relative
+        .to_str()
+        .ok_or_else(|| "Override path is not UTF-8".to_owned())?;
+    Ok(Some(PathBuf::from(super::portable_pack_path(relative)?)))
 }
 
 pub(super) fn override_files(path: &Path, roots: &[&str]) -> Result<Vec<PathBuf>, String> {

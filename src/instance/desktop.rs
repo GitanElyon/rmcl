@@ -76,32 +76,95 @@ fn legacy_path(name: &str) -> Option<PathBuf> {
 }
 
 fn owns_legacy_shortcut(path: &Path, name: &str) -> bool {
-    let content = build_content(name, None);
-    let command = content.lines().find(|line| {
-        line.starts_with("Exec=")
-            || line.starts_with("shell.Run ")
-            || line.starts_with("rmcl instance launch ")
-    });
-    command.is_some_and(|command| {
-        std::fs::read_to_string(path)
-            .is_ok_and(|existing| existing.lines().any(|line| line == command))
-    })
+    let Ok(existing) = read_shortcut(path) else {
+        return false;
+    };
+    let marker = shortcut_marker(name);
+    if existing.lines().any(|line| line == marker) {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    let commands = {
+        let quoted = quote_desktop_exec_arg(name);
+        [
+            format!("Exec=rmcl instance launch {quoted}"),
+            format!(
+                "Exec=rmcl instance launch {}",
+                quoted.replace("\\\\", "\\").replace("%%", "%")
+            ),
+        ]
+    };
+    #[cfg(target_os = "windows")]
+    let commands = {
+        let command =
+            format!("rmcl instance launch {}", quote_windows_arg(name)).replace('"', "\"\"");
+        [format!("shell.Run \"{command}\", 0, False")]
+    };
+    #[cfg(target_os = "macos")]
+    let commands = [format!("rmcl instance launch {}", quote_shell_arg(name))];
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    let commands: [String; 0] = [];
+    existing
+        .lines()
+        .any(|line| commands.iter().any(|command| line == command))
 }
 
+fn read_shortcut(path: &Path) -> std::io::Result<String> {
+    let bytes = std::fs::read(path)?;
+    if let Some(bytes) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        if bytes.len() % 2 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid UTF-16 shortcut",
+            ));
+        }
+        let units = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16(&units)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    } else {
+        String::from_utf8(bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }
+}
+
+#[cfg(any(windows, test))]
+fn windows_script_bytes(content: &str) -> Vec<u8> {
+    // Windows Script Host reads Unicode scripts as BOM-prefixed UTF-16, not UTF-8.
+    [0xfeff]
+        .into_iter()
+        .chain(content.encode_utf16())
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+fn shortcut_marker(name: &str) -> String {
+    let prefix = if cfg!(windows) { "'" } else { "#" };
+    format!("{prefix} rmcl-instance: {}", shortcut_name(name))
+}
 pub fn exists(name: &str) -> bool {
     desktop_path(name).is_some_and(|path| owns_legacy_shortcut(&path, name))
         || legacy_path(name).is_some_and(|path| owns_legacy_shortcut(&path, name))
 }
 
 pub fn create(config: &InstanceConfig) -> std::io::Result<PathBuf> {
+    crate::instance::manager::validate_name(&config.name).map_err(std::io::Error::other)?;
     let path = desktop_path(&config.name)
         .ok_or_else(|| std::io::Error::other("cannot resolve shortcut directory"))?;
 
-    if path.exists() && !owns_legacy_shortcut(&path, &config.name) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("Another shortcut already exists at '{}'", path.display()),
-        ));
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) if !owns_legacy_shortcut(&path, &config.name) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("Another shortcut already exists at '{}'", path.display()),
+            ));
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
     }
 
     if let Some(parent) = path.parent() {
@@ -109,9 +172,22 @@ pub fn create(config: &InstanceConfig) -> std::io::Result<PathBuf> {
     }
 
     let icon = ensure_icon();
-    let content = build_content(&config.name, icon.as_deref());
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(content.as_str()) {
-        crate::storage::write_atomic(&path, content.as_bytes())?;
+    let executable = std::env::current_exe()?;
+    let executable = executable.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Launcher executable path is not UTF-8",
+        )
+    })?;
+    let content = build_content(&config.name, icon.as_deref(), executable);
+    if read_shortcut(&path).ok().as_deref() != Some(content.as_str()) {
+        #[cfg(windows)]
+        let encoded = windows_script_bytes(&content);
+        #[cfg(windows)]
+        let bytes = encoded.as_slice();
+        #[cfg(not(windows))]
+        let bytes = content.as_bytes();
+        crate::storage::write_atomic(&path, bytes)?;
     }
 
     #[cfg(unix)]
@@ -164,6 +240,19 @@ pub fn rename(old_name: &str, new_config: &InstanceConfig) -> std::io::Result<()
         return Ok(());
     }
     let same_path = desktop_path(old_name) == desktop_path(&new_config.name);
+    if !same_path && let Some(new_path) = desktop_path(&new_config.name) {
+        for old_path in [desktop_path(old_name), legacy_path(old_name)]
+            .into_iter()
+            .flatten()
+        {
+            if rename_shortcut_alias(&old_path, &new_path, old_name, || {
+                create(new_config).map(|_| ())
+            })? {
+                remove(old_name)?;
+                return Ok(());
+            }
+        }
+    }
     create(new_config)?;
     if !same_path {
         remove(old_name)?;
@@ -171,41 +260,77 @@ pub fn rename(old_name: &str, new_config: &InstanceConfig) -> std::io::Result<()
     Ok(())
 }
 
-fn build_content(name: &str, icon: Option<&Path>) -> String {
+fn rename_shortcut_alias(
+    old_path: &Path,
+    new_path: &Path,
+    old_name: &str,
+    create: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<bool> {
+    if old_path == new_path
+        || !owns_legacy_shortcut(old_path, old_name)
+        || !crate::instance::manager::paths_alias(old_path, new_path)?
+    {
+        return Ok(false);
+    }
+    let temporary = tempfile::Builder::new()
+        .prefix(".rmcl-shortcut-")
+        .tempdir_in(
+            old_path
+                .parent()
+                .ok_or_else(|| std::io::Error::other("Shortcut has no parent"))?,
+        )?;
+    let original = temporary.path().join("original");
+    std::fs::rename(old_path, &original)?;
+    if let Err(error) = create() {
+        if let Err(rollback) = std::fs::rename(&original, old_path) {
+            let retained = temporary.keep();
+            return Err(std::io::Error::other(format!(
+                "Could not update shortcut: {error}; rollback failed: {rollback}; original retained at '{}'",
+                retained.join("original").display(),
+            )));
+        }
+        return Err(error);
+    }
+    Ok(true)
+}
+
+fn build_content(name: &str, icon: Option<&Path>, executable: &str) -> String {
     #[cfg(target_os = "linux")]
     {
-        build_linux_desktop(name, icon)
+        build_linux_desktop(name, icon, executable)
     }
 
     #[cfg(target_os = "windows")]
     {
         let _ = icon;
-        build_windows_shortcut(name)
+        build_windows_shortcut(name, executable)
     }
 
     #[cfg(target_os = "macos")]
     {
         let _ = icon;
-        build_macos_command(name)
+        build_macos_command(name, executable)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
-        let _ = (name, icon);
+        let _ = (name, icon, executable);
         String::new()
     }
 }
 
-#[cfg(target_os = "linux")]
-fn build_linux_desktop(name: &str, icon: Option<&Path>) -> String {
+#[cfg(any(target_os = "linux", test))]
+fn build_linux_desktop(name: &str, icon: Option<&Path>, executable: &str) -> String {
     let mut out = String::new();
     out.push_str("[Desktop Entry]\n");
-    out.push_str("Version=0.3.1\n");
+    out.push_str("Version=1.0\n");
     out.push_str("Type=Application\n");
     out.push_str(&format!("Name=Minecraft - {name}\n"));
     out.push_str(&format!("Comment=Launch {name} Minecraft instance\n"));
+    out.push_str(&format!("# rmcl-instance: {}\n", shortcut_name(name)));
     out.push_str(&format!(
-        "Exec=rmcl instance launch {}\n",
+        "Exec={} instance launch {}\n",
+        quote_desktop_exec_arg(executable),
         quote_desktop_exec_arg(name)
     ));
     if let Some(icon) = icon {
@@ -216,26 +341,38 @@ fn build_linux_desktop(name: &str, icon: Option<&Path>) -> String {
     out
 }
 
-#[cfg(target_os = "windows")]
-fn build_windows_shortcut(name: &str) -> String {
-    let command = format!("rmcl instance launch {}", quote_windows_arg(name));
-    let escaped_command = command.replace('"', "\"\"");
-
-    let mut out = String::new();
-    out.push_str("Set shell = CreateObject(\"WScript.Shell\")\r\n");
-    out.push_str(&format!("shell.Run \"{escaped_command}\", 0, False\r\n"));
+#[cfg(any(target_os = "windows", test))]
+fn build_windows_shortcut(name: &str, executable: &str) -> String {
+    let arguments = format!("instance launch {}", quote_windows_arg(name));
+    let mut out = format!("' rmcl-instance: {}\r\n", shortcut_name(name));
+    out.push_str(&windows_shell_execute(executable, &arguments));
     out
 }
 
-#[cfg(target_os = "macos")]
-fn build_macos_command(name: &str) -> String {
+#[cfg(any(target_os = "windows", test))]
+fn windows_shell_execute(executable: &str, arguments: &str) -> String {
+    // ShellExecute passes parameters literally; WScript.Shell.Run expands %VAR% in them.
+    format!(
+        "Set shell = CreateObject(\"Shell.Application\")\r\nshell.ShellExecute \"{}\", \"{}\", \"\", \"open\", 0\r\n",
+        executable.replace('"', "\"\""),
+        arguments.replace('"', "\"\"")
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn build_macos_command(name: &str, executable: &str) -> String {
     let mut out = String::new();
     out.push_str("#!/bin/bash\n");
-    out.push_str(&format!("# Launch Minecraft instance: {name}\n"));
-    out.push_str(&format!("rmcl instance launch {}\n", quote_shell_arg(name)));
+    out.push_str(&format!("# rmcl-instance: {}\n", shortcut_name(name)));
+    out.push_str(&format!(
+        "{} instance launch {}\n",
+        quote_shell_arg(executable),
+        quote_shell_arg(name)
+    ));
     out
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn quote_desktop_exec_arg(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len() + 2);
     escaped.push('"');
@@ -246,7 +383,7 @@ fn quote_desktop_exec_arg(value: &str) -> String {
         escaped.push(character);
     }
     escaped.push('"');
-    escaped
+    escaped.replace('\\', "\\\\").replace('%', "%%")
 }
 
 #[cfg(any(target_os = "macos", test))]

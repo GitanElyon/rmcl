@@ -80,7 +80,7 @@ fn detect_format_errors_on_missing_file() {
 #[test]
 fn unique_name_no_collision() {
     let tmp = tempfile::tempdir().unwrap();
-    let name = unique_instance_name("TestPack", tmp.path());
+    let name = unique_instance_name("TestPack", tmp.path()).unwrap();
     assert_eq!(name, "TestPack");
 }
 
@@ -90,7 +90,7 @@ fn unique_name_with_collision() {
     let dir = tmp.path().join("TestPack");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("instance.json"), "{}").unwrap();
-    let name = unique_instance_name("TestPack", tmp.path());
+    let name = unique_instance_name("TestPack", tmp.path()).unwrap();
     assert_eq!(name, "TestPack (2)");
 }
 
@@ -99,7 +99,10 @@ fn unique_name_preserves_directory_without_config() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join("TestPack")).unwrap();
 
-    assert_eq!(unique_instance_name("TestPack", tmp.path()), "TestPack (2)");
+    assert_eq!(
+        unique_instance_name("TestPack", tmp.path()).unwrap(),
+        "TestPack (2)"
+    );
     assert!(tmp.path().join("TestPack").exists());
 }
 
@@ -111,7 +114,7 @@ fn unique_name_multiple_collisions() {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("instance.json"), "{}").unwrap();
     }
-    let name = unique_instance_name("TestPack", tmp.path());
+    let name = unique_instance_name("TestPack", tmp.path()).unwrap();
     assert_eq!(name, "TestPack (4)");
 }
 
@@ -123,7 +126,10 @@ fn unique_name_keeps_searching_after_ninety_nine_collisions() {
         std::fs::create_dir(tmp.path().join(format!("Pack ({suffix})"))).unwrap();
     }
     std::fs::create_dir(tmp.path().join("Pack (import)")).unwrap();
-    assert_eq!(unique_instance_name("Pack", tmp.path()), "Pack (101)");
+    assert_eq!(
+        unique_instance_name("Pack", tmp.path()).unwrap(),
+        "Pack (101)"
+    );
 }
 
 #[test]
@@ -183,6 +189,110 @@ fn parse_input_trims_whitespace() {
         parse_import_input("  fabulously-optimized  "),
         ImportInput::ProjectSlug("fabulously-optimized".to_string())
     );
+}
+
+#[test]
+fn windows_and_mixed_case_archive_inputs_stay_local() {
+    for input in [
+        r"C:\Downloads\Pack.ZIP",
+        r"c:extensionless",
+        r"C:/Downloads/Pack.MrPaCk",
+        r"\\server\share\Pack.ZIP",
+        r"\\server\share\extensionless",
+        r"\Downloads\extensionless",
+        r"\\?\C:\Downloads\Pack",
+        r".\extensionless",
+        "./extensionless",
+        "../extensionless",
+        "Pack.ZIP",
+        "Pack.MRPACK",
+        "~/Downloads/Pack.ZIP",
+    ] {
+        assert_eq!(
+            parse_import_input(input),
+            ImportInput::LocalFile(input.to_owned()),
+            "{input}"
+        );
+    }
+    assert_eq!(
+        parse_import_input("https://modrinth.com/modpack/pack.zip"),
+        ImportInput::ProjectSlug("pack.zip".to_owned())
+    );
+}
+
+#[test]
+fn imported_names_and_pack_paths_are_validated_before_joining() {
+    let temp = tempfile::tempdir().unwrap();
+    for name in ["C:victim", "CON.txt", "trailing.", "../escape"] {
+        assert!(unique_instance_name(name, temp.path()).is_err(), "{name}");
+        cleanup_failed_import(
+            &InstanceManager::new(temp.path(), temp.path().join("meta")),
+            name,
+        );
+    }
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    std::fs::create_dir(temp.path().join("a".repeat(64))).unwrap();
+    assert!(unique_instance_name(&"a".repeat(64), temp.path()).is_err());
+    for path in [
+        "../escape",
+        "mods/../../escape",
+        "C:victim",
+        r"\\server\share\file",
+        "/absolute",
+        "mods/C:victim",
+        "mods/NUL.jar",
+        "mods/trailing. ",
+        "mods/./file",
+        "mods//file",
+    ] {
+        assert!(portable_pack_path(path).is_err(), "{path}");
+    }
+    assert_eq!(
+        portable_pack_path(r"config\nested\pack.toml").unwrap(),
+        "config/nested/pack.toml"
+    );
+    assert_eq!(
+        portable_pack_path(".config/pack.toml").unwrap(),
+        ".config/pack.toml"
+    );
+}
+
+#[tokio::test]
+async fn format_import_entry_points_validate_names_before_opening_archives() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = InstanceManager::new(temp.path().join("instances"), temp.path().join("meta"));
+    let config = serde_json::from_value(serde_json::json!({
+        "name": "C:victim", "game_version": "1.21", "loader": "vanilla", "created": "2026-01-01T00:00:00Z"
+    })).unwrap();
+    let summary = ImportSummary {
+        name: "Pack".to_owned(),
+        pack_version: "1".to_owned(),
+        game_version: "1.21".to_owned(),
+        loader: crate::instance::ModLoader::Vanilla,
+        loader_version: None,
+        mod_count: 0,
+        override_count: 0,
+        format: PackFormat::Mrpack,
+        archive_path: temp.path().join("missing.zip"),
+        source: None,
+    };
+    for error in [
+        mrpack::execute_import(&summary, &manager, &config)
+            .await
+            .unwrap_err(),
+        curseforge::execute_import(&summary, &manager, &config)
+            .await
+            .unwrap_err(),
+        mmc::execute_import(&summary, &manager, &config)
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(
+            error.to_string().contains("Invalid instance name"),
+            "{error}"
+        );
+    }
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
 }
 
 #[test]

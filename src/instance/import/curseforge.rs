@@ -114,6 +114,7 @@ pub async fn execute_import(
     manager: &InstanceManager,
     config: &InstanceConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    crate::instance::manager::validate_name(&config.name)?;
     let minecraft_dir = manager
         .instances_dir
         .join(&config.name)
@@ -210,8 +211,9 @@ pub(super) async fn owned_files(path: &Path) -> Result<Vec<std::path::PathBuf>, 
                 .iter()
                 .find(|file| file.primary)
                 .or_else(|| version.files.first())
-                .map(|file| std::path::PathBuf::from("mods").join(&file.filename))
                 .ok_or_else(|| format!("CurseForge file '{}' has no artifact", version.id))
+                .and_then(|file| super::portable_pack_path(&format!("mods/{}", file.filename)))
+                .map(std::path::PathBuf::from)
         })
         .collect::<Result<_, _>>()?;
     files.extend(overrides);

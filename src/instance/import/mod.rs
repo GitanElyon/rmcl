@@ -31,15 +31,6 @@ pub enum ImportInput {
 pub fn parse_import_input(input: &str) -> ImportInput {
     let input = input.trim();
 
-    if input.ends_with(".mrpack")
-        || input.ends_with(".zip")
-        || input.starts_with('/')
-        || input.starts_with("~/")
-    {
-        tracing::debug!("Import input resolved as local file: {}", input);
-        return ImportInput::LocalFile(input.to_string());
-    }
-
     if let Some(rest) = input
         .strip_prefix("https://modrinth.com/modpack/")
         .or_else(|| input.strip_prefix("http://modrinth.com/modpack/"))
@@ -55,6 +46,22 @@ pub fn parse_import_input(input: &str) -> ImportInput {
         };
         tracing::debug!("Import input resolved as Modrinth URL: {:?}", parsed);
         return parsed;
+    }
+
+    if input.rsplit_once('.').is_some_and(|(_, extension)| {
+        extension.eq_ignore_ascii_case("mrpack") || extension.eq_ignore_ascii_case("zip")
+    }) || input.starts_with('/')
+        || input.starts_with("~/")
+        || input.starts_with("./")
+        || input.starts_with("../")
+        || input.contains('\\')
+        || input
+            .as_bytes()
+            .get(..2)
+            .is_some_and(|prefix| prefix[0].is_ascii_alphabetic() && prefix[1] == b':')
+    {
+        tracing::debug!("Import input resolved as local file: {}", input);
+        return ImportInput::LocalFile(input.to_string());
     }
 
     tracing::debug!("Import input resolved as Modrinth project slug: {}", input);
@@ -133,22 +140,27 @@ pub fn build_summary(path: &Path) -> Result<ImportSummary, String> {
     Ok(summary)
 }
 
-pub fn unique_instance_name(base: &str, instances_dir: &Path) -> String {
+pub fn unique_instance_name(
+    base: &str,
+    instances_dir: &Path,
+) -> Result<String, crate::instance::manager::InstanceError> {
+    crate::instance::manager::validate_name(base)?;
     let candidate = base.to_string();
     if !instances_dir.join(&candidate).exists() {
         tracing::trace!("Import instance name '{}' is available", candidate);
-        return candidate;
+        return Ok(candidate);
     }
     let mut n = 2;
     loop {
         let candidate = format!("{base} ({n})");
+        crate::instance::manager::validate_name(&candidate)?;
         if !instances_dir.join(&candidate).exists() {
             tracing::debug!(
                 "Import instance name '{}' collided; using '{}'",
                 base,
                 candidate
             );
-            return candidate;
+            return Ok(candidate);
         }
         n += 1;
     }
@@ -164,7 +176,8 @@ pub async fn execute_import(
         summary.name,
         summary.archive_path.display()
     );
-    let name = unique_instance_name(&summary.name, &manager.instances_dir);
+    let name = unique_instance_name(&summary.name, &manager.instances_dir)
+        .inspect_err(|_| crate::feedback::progress::clear())?;
     crate::feedback::progress::set_action(format!("Importing '{name}'..."));
     crate::feedback::progress::set_sub_action(format!(
         "{} {}",
@@ -271,6 +284,10 @@ async fn owned_files(summary: &ImportSummary) -> Result<Vec<PathBuf>, String> {
 }
 
 fn cleanup_failed_import(manager: &InstanceManager, name: &str) {
+    if let Err(error) = crate::instance::manager::validate_name(name) {
+        tracing::warn!("Refusing to clean up an invalid imported instance: {error}");
+        return;
+    }
     let instance_dir = manager.instances_dir.join(name);
     if let Err(error) = std::fs::remove_dir_all(&instance_dir)
         && error.kind() != std::io::ErrorKind::NotFound
@@ -281,6 +298,18 @@ fn cleanup_failed_import(manager: &InstanceManager, name: &str) {
             error
         );
     }
+}
+
+pub(super) fn portable_pack_path(path: &str) -> Result<String, String> {
+    let normalized = path.replace('\\', "/");
+    if !crate::storage::safe_relative_path(Path::new(&normalized))
+        || !normalized
+            .split('/')
+            .all(crate::instance::manager::portable_component)
+    {
+        return Err(format!("Unsafe pack-owned path: {path:?}"));
+    }
+    Ok(normalized)
 }
 
 #[cfg(test)]

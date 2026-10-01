@@ -127,3 +127,28 @@ fn extract_mmc_archive_rejects_path_traversal() {
     assert!(error.to_string().contains("archive path"));
     assert!(!tmp.path().join("escaped.txt").exists());
 }
+
+#[test]
+fn mmc_extraction_rejects_windows_reserved_components_on_every_platform() {
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    for entry in [
+        "Pack/.minecraft/config/NUL.txt",
+        "Pack/.minecraft/config/file:stream",
+        r"Pack/.minecraft/config\..\..\escaped.txt",
+    ] {
+        let path = temp.path().join("pack.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("Pack/mmc-pack.json", options).unwrap();
+        zip.write_all(b"{}").unwrap();
+        zip.start_file(entry, options).unwrap();
+        zip.write_all(b"unsafe").unwrap();
+        zip.finish().unwrap();
+        assert!(
+            extract_mmc_archive(&path, &temp.path().join("minecraft")).is_err(),
+            "{entry}"
+        );
+        assert!(!temp.path().join("escaped.txt").exists());
+    }
+}

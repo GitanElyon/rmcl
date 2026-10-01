@@ -5,9 +5,6 @@ use super::*;
 use crate::instance::models::ModLoader;
 use tempfile::TempDir;
 
-// tmp owns the temp directory; its Drop impl cleans up everything when
-// the test ends. the returned InstanceManager points at tmp.path() so
-// tests can join("name") off of either to refer to the same locations.
 fn test_manager() -> (InstanceManager, TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let meta = tmp.path().join("meta");
@@ -56,6 +53,135 @@ fn validate_name_rejects_empty_traversal_and_hidden() {
 }
 
 #[test]
+fn instance_names_are_portable_components() {
+    for name in [
+        "C:victim",
+        "C:",
+        "a:b",
+        "CON",
+        "con.txt",
+        "CON .txt",
+        "AUX.jar",
+        "NUL",
+        "PRN",
+        "COM1",
+        "lpt9.log",
+        "COM¹",
+        "LPT².txt",
+        "CLOCK$",
+        "CONIN$",
+        "CONOUT$",
+        "trailing.",
+        "trailing ",
+        "bad?name",
+        "bad*name",
+        "bad\"name",
+        "bad<name",
+        "bad>name",
+        "bad|name",
+        r"path\name",
+        ".",
+        "..",
+    ] {
+        assert!(validate_name(name).is_err(), "{name}");
+    }
+    for name in ["CONifer", "COM0", "COM10", "世界", "%USERNAME%", "My Pack"] {
+        assert!(validate_name(name).is_ok(), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn all_manager_entry_points_reject_nonportable_names_before_io() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = InstanceManager::new(temp.path().join("instances"), temp.path().join("meta"));
+    for name in ["C:victim", "CON.txt", "trailing.", "bad?name"] {
+        let config = dummy_config(name);
+        assert!(matches!(
+            manager.create(name, "1.21", ModLoader::Vanilla, None).await,
+            Err(InstanceError::InvalidName(_))
+        ));
+        assert!(matches!(
+            manager.repair_runtime_cache(&config).await,
+            Err(InstanceError::InvalidName(_))
+        ));
+        assert!(matches!(
+            manager.delete(name),
+            Err(InstanceError::InvalidName(_))
+        ));
+        assert!(matches!(
+            manager.rename(name, "safe"),
+            Err(InstanceError::InvalidName(_))
+        ));
+        assert!(matches!(
+            manager.rename("safe", name),
+            Err(InstanceError::InvalidName(_))
+        ));
+        assert!(matches!(
+            manager.load_one(name),
+            Err(InstanceError::InvalidName(_))
+        ));
+        assert!(matches!(
+            manager.save(&config),
+            Err(InstanceError::InvalidName(_))
+        ));
+        assert!(matches!(
+            manager.save_config_sync_profile(name, Some("shared".to_owned())),
+            Err(InstanceError::InvalidName(_))
+        ));
+        assert!(matches!(
+            manager.touch_last_played(name),
+            Err(InstanceError::InvalidName(_))
+        ));
+        assert!(matches!(
+            crate::instance::runtime::lock_instance(&manager.instances_dir, name),
+            Err(InstanceError::InvalidName(_))
+        ));
+    }
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn drive_relative_deletion_preserves_an_external_directory() {
+    const ROOT: &str = "RMCL_NAME_BOUNDARY_ROOT";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let cwd = std::env::current_dir().unwrap();
+        let std::path::Component::Prefix(prefix) = cwd.components().next().unwrap() else {
+            panic!("Expected a Windows drive");
+        };
+        let drive = match prefix.kind() {
+            std::path::Prefix::Disk(drive) | std::path::Prefix::VerbatimDisk(drive) => drive,
+            other => panic!("Expected a local drive, got {other:?}"),
+        };
+        let name = format!("{}:victim", char::from(drive));
+        let manager = InstanceManager::new(&root, cwd.join("meta"));
+        assert!(matches!(
+            manager.delete(&name),
+            Err(InstanceError::InvalidName(_))
+        ));
+        assert_eq!(std::fs::read(cwd.join("victim/keep")).unwrap(), b"keep");
+        assert!(!cwd.join("victim.lock").exists());
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("outside");
+    std::fs::create_dir_all(cwd.join("victim")).unwrap();
+    std::fs::write(cwd.join("victim/keep"), b"keep").unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "instance::manager::tests::drive_relative_deletion_preserves_an_external_directory",
+            "--nocapture",
+        ])
+        .env(ROOT, temp.path().join("instances"))
+        .current_dir(&cwd)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read(cwd.join("victim/keep")).unwrap(), b"keep");
+}
+
+#[test]
 fn delete_missing_instance_returns_not_found() {
     let (manager, _tmp) = test_manager();
     let result = manager.delete("ghost-instance");
@@ -81,6 +207,51 @@ fn running_instance_cannot_be_deleted_or_renamed() {
 }
 
 #[test]
+fn instance_lock_child() {
+    use std::io::Write;
+    let Some(root) = std::env::var_os("RMCL_INSTANCE_LOCK_TEST") else {
+        return;
+    };
+    let _lock =
+        crate::instance::runtime::lock_instance(std::path::Path::new(&root), "locked").unwrap();
+    println!("LOCKED");
+    std::io::stdout().flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(10));
+}
+
+#[test]
+fn another_process_protects_the_instance_from_mutation_and_duplicate_launch() {
+    use std::io::BufRead;
+    let (manager, temp) = test_manager();
+    std::fs::create_dir_all(temp.path().join("locked")).unwrap();
+    manager.save(&dummy_config("locked")).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "instance::manager::tests::instance_lock_child",
+            "--nocapture",
+        ])
+        .env("RMCL_INSTANCE_LOCK_TEST", temp.path())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let ready = std::io::BufReader::new(child.stdout.take().unwrap())
+        .lines()
+        .any(|line| line.unwrap() == "LOCKED");
+    let deletion = manager.delete("locked");
+    let rename = manager.rename("locked", "new");
+    let launch = crate::instance::runtime::lock_instance(&manager.instances_dir, "locked");
+    let _ = child.kill();
+    child.wait().unwrap();
+    assert!(ready);
+    assert!(matches!(deletion, Err(InstanceError::InstanceRunning(_))));
+    assert!(matches!(rename, Err(InstanceError::InstanceRunning(_))));
+    assert!(matches!(launch, Err(InstanceError::InstanceRunning(_))));
+    assert!(temp.path().join("locked").is_dir());
+    manager.delete("locked").unwrap();
+}
+
+#[test]
 fn copied_instance_uses_its_directory_as_identity() {
     let (manager, tmp) = test_manager();
     std::fs::create_dir_all(tmp.path().join("original")).unwrap();
@@ -99,6 +270,45 @@ fn copied_instance_uses_its_directory_as_identity() {
             .iter()
             .any(|config| config.name == "copy")
     );
+}
+
+#[test]
+fn configuration_locks_survive_instance_directory_replacement() {
+    let (manager, temp) = test_manager();
+    let name = "replaced";
+    std::fs::create_dir(temp.path().join(name)).unwrap();
+    manager.save(&dummy_config(name)).unwrap();
+    let held = manager.config_lock(name).unwrap();
+    std::fs::rename(temp.path().join(name), temp.path().join("backup")).unwrap();
+    std::fs::create_dir(temp.path().join(name)).unwrap();
+    let root = manager.instances_dir.clone();
+    let meta = manager.meta_dir.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let contender = std::thread::spawn(move || {
+        let manager = InstanceManager::new(root, meta);
+        sender.send("attempting").unwrap();
+        let _held = manager.config_lock(name).unwrap();
+        sender.send("acquired").unwrap();
+    });
+    assert_eq!(
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap(),
+        "attempting"
+    );
+    let while_locked = receiver.recv_timeout(std::time::Duration::from_millis(100));
+    drop(held);
+    assert!(matches!(
+        while_locked,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap(),
+        "acquired"
+    );
+    contender.join().unwrap();
 }
 
 #[tokio::test]
@@ -194,6 +404,54 @@ fn rename_moves_dir_and_updates_config_name() {
 }
 
 #[test]
+fn case_only_rename_uses_the_actual_volume_and_updates_directory_spelling() {
+    let (manager, temp) = test_manager();
+    let old = format!(
+        "CasePack-{}",
+        temp.path().file_name().unwrap().to_str().unwrap()
+    );
+    let new = old.to_lowercase();
+    std::fs::create_dir(temp.path().join(&old)).unwrap();
+    manager.save(&dummy_config(&old)).unwrap();
+    let aliases = temp.path().join(&new).exists();
+    assert_eq!(
+        paths_alias(&temp.path().join(&old), &temp.path().join(&new)).unwrap(),
+        aliases
+    );
+    manager.rename(&old, &new).unwrap();
+    let names: Vec<_> = std::fs::read_dir(temp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(names.iter().any(|name| name.to_str() == Some(new.as_str())));
+    assert!(!names.iter().any(|name| name.to_str() == Some(old.as_str())));
+    let raw: InstanceConfig = serde_json::from_slice(
+        &std::fs::read(temp.path().join(&new).join("instance.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(raw.name, new);
+    if !aliases {
+        std::fs::create_dir(temp.path().join(&old)).unwrap();
+        manager.save(&dummy_config(&old)).unwrap();
+        assert!(matches!(
+            manager.rename(&new, &old),
+            Err(InstanceError::AlreadyExists(_))
+        ));
+    }
+}
+
+#[test]
+fn temporary_rename_rolls_back_when_the_second_step_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("Pack");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("keep"), b"keep").unwrap();
+    assert!(rename_path(&source, &temp.path().join("missing/pack"), true).is_err());
+    assert_eq!(std::fs::read(source.join("keep")).unwrap(), b"keep");
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+}
+
+#[test]
 fn rename_to_same_name_is_noop() {
     let (manager, tmp) = test_manager();
     let dir = tmp.path().join("same");
@@ -275,41 +533,73 @@ fn touch_last_played_updates_field() {
 }
 
 #[test]
-fn instance_names_are_portable_components() {
-    for name in [
-        "C:victim",
-        "C:",
-        "a:b",
-        "CON",
-        "con.txt",
-        "CON .txt",
-        "AUX.jar",
-        "NUL",
-        "PRN",
-        "COM1",
-        "lpt9.log",
-        "COM¹",
-        "LPT².txt",
-        "CLOCK$",
-        "CONIN$",
-        "CONOUT$",
-        "trailing.",
-        "trailing ",
-        "bad?name",
-        "bad*name",
-        "bad\"name",
-        "bad<name",
-        "bad>name",
-        "bad|name",
-        r"path\name",
-        ".",
-        "..",
-    ] {
-        assert!(validate_name(name).is_err(), "{name}");
+fn ordinary_settings_saves_preserve_profile_selection_and_malformed_config() {
+    let (manager, temp) = test_manager();
+    let name = "settings";
+    std::fs::create_dir(temp.path().join(name)).unwrap();
+    let mut stale = dummy_config(name);
+    manager.save(&stale).unwrap();
+    manager
+        .save_config_sync_profile(name, Some("shared".to_owned()))
+        .unwrap();
+    stale.memory_max = Some("8G".to_owned());
+    manager.save(&stale).unwrap();
+    let current = manager.load_one(name).unwrap();
+    assert_eq!(current.config_sync_profile.as_deref(), Some("shared"));
+    assert_eq!(current.memory_max.as_deref(), Some("8G"));
+    let path = temp.path().join(name).join("instance.json");
+    std::fs::write(&path, b"invalid json").unwrap();
+    assert!(matches!(manager.save(&stale), Err(InstanceError::Json(_))));
+    assert_eq!(std::fs::read(path).unwrap(), b"invalid json");
+}
+
+#[test]
+fn config_sync_profile_save_preserves_authoritative_settings_and_last_played() {
+    let (manager, temp) = test_manager();
+    let name = "sync-profile";
+    let directory = temp.path().join(name);
+    std::fs::create_dir(&directory).unwrap();
+    manager.save(&dummy_config(name)).unwrap();
+    let staged = manager.load_one(name).unwrap();
+
+    let mut latest = staged.clone();
+    latest.config_sync_profile = Some("previous".to_owned());
+    latest.memory_max = Some("8G".to_owned());
+    latest.jvm_args.push("-Dlocal.setting=new".to_owned());
+    latest
+        .environment
+        .insert("LOCAL_SETTING".to_owned(), "new".to_owned());
+    manager.save(&latest).unwrap();
+    manager
+        .save_config_sync_profile(name, latest.config_sync_profile.clone())
+        .unwrap();
+    manager.touch_last_played(name).unwrap();
+    let mut expected = manager.load_one(name).unwrap();
+    let before: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.join("instance.json")).unwrap()).unwrap();
+
+    for profile in [Some("shared".to_owned()), None] {
+        expected.config_sync_profile = profile.clone();
+        let saved = manager
+            .save_config_sync_profile(&staged.name, profile)
+            .unwrap();
+        assert_eq!(saved, expected);
+        assert_eq!(manager.load_one(name).unwrap(), expected);
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.join("instance.json")).unwrap())
+                .unwrap();
+        assert_eq!(after["last_played"], before["last_played"]);
     }
-    for name in ["CONifer", "COM0", "COM10", "世界", "%USERNAME%", "My Pack"] {
-        assert!(validate_name(name).is_ok(), "{name}");
-    }
+
+    std::fs::write(directory.join("instance.json"), b"invalid json").unwrap();
+    assert!(matches!(
+        manager.save_config_sync_profile(name, Some("shared".to_owned())),
+        Err(InstanceError::Json(_))
+    ));
+    assert_eq!(
+        std::fs::read(directory.join("instance.json")).unwrap(),
+        b"invalid json"
+    );
 }
 
 #[cfg(unix)]

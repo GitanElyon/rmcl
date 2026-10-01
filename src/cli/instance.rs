@@ -22,7 +22,7 @@ pub async fn handle_instance(matches: &ArgMatches) -> CliResult {
         Some(("rename", sub_matches)) => rename_instance(sub_matches),
         Some(("launch", sub_matches)) => launch_instance(sub_matches).await,
         Some(("config", sub_matches)) => config_instance(sub_matches),
-        Some(("profile", sub_matches)) => profile_instance(sub_matches),
+        Some(("profile", sub_matches)) => profile_instance(sub_matches, &manager()),
         Some(("desktop", sub_matches)) => desktop_instance(sub_matches),
         _ => Ok(()),
     }
@@ -206,7 +206,7 @@ fn config_instance(matches: &ArgMatches) -> CliResult {
             if config.jvm_args.is_empty() {
                 "-".to_string()
             } else {
-                config.jvm_args.join(" ")
+                crate::config::settings::format_tag_values(&config.jvm_args)
             },
         ],
         vec![
@@ -226,19 +226,10 @@ fn config_instance(matches: &ArgMatches) -> CliResult {
     Ok(())
 }
 
-fn profile_instance(matches: &ArgMatches) -> CliResult {
+fn profile_instance(matches: &ArgMatches, manager: &InstanceManager) -> CliResult {
     let name = required_arg(matches, "name")?;
-    let manager = manager();
     let mut config = manager.load_one(name)?;
     let profiles = crate::instance::config_sync::list_profiles(&manager.meta_dir)?;
-    if config
-        .config_sync_profile
-        .as_ref()
-        .is_some_and(|profile| !profiles.iter().any(|candidate| candidate == profile))
-    {
-        config.config_sync_profile = None;
-        manager.save(&config)?;
-    }
 
     let Some(profile) = matches.get_one::<String>("profile") else {
         let rows = vec![
@@ -264,7 +255,7 @@ fn profile_instance(matches: &ArgMatches) -> CliResult {
     } else {
         Some(profile.as_str())
     };
-    crate::instance::config_sync::switch_profile_and_save(&manager, &mut config, target)?;
+    crate::instance::config_sync::switch_profile_and_save(manager, &mut config, target)?;
 
     println!(
         "Updated '{}' config profile to {}.",
@@ -308,7 +299,8 @@ fn apply_config_update(
             }
         }
         "jvm-args" => {
-            config.jvm_args = value.split_whitespace().map(String::from).collect();
+            config.jvm_args =
+                crate::config::settings::parse_tag_values(value).map_err(io::Error::other)?;
         }
         "resolution" => {
             config.resolution = if value.is_empty() {

@@ -292,7 +292,7 @@ fn modpack_versions_are_not_limited_to_hardcoded_loaders() {
 }
 
 #[tokio::test]
-async fn content_download_skips_an_existing_filename() {
+async fn content_download_rejects_an_unverifiable_existing_filename() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("example.jar");
     std::fs::write(&path, b"existing").unwrap();
@@ -304,11 +304,11 @@ async fn content_download_skips_an_existing_filename() {
         hashes: HashMap::new(),
     }]);
 
-    let outcome = download_version_file(&crate::net::HttpClient::new(), &version, directory.path())
+    let error = download_version_file(&crate::net::HttpClient::new(), &version, directory.path())
         .await
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(outcome, DownloadOutcome::SkippedExisting(path));
+    assert!(error.to_string().contains("does not match"));
     assert_eq!(
         std::fs::read(directory.path().join("example.jar")).unwrap(),
         b"existing"

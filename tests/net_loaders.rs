@@ -202,10 +202,19 @@ async fn quilt_fetch_profile_parses_libraries() {
 async fn fabric_and_quilt_download_libraries_into_the_shared_cache() {
     let server = MockServer::start().await;
     let temp = tempfile::tempdir().unwrap();
-    for (name, content) in [("fabric", "fabric jar"), ("quilt", "quilt jar")] {
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    use std::io::Write;
+    zip.start_file(
+        "META-INF/MANIFEST.MF",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.write_all(b"Manifest-Version: 1.0\n").unwrap();
+    let jar = zip.finish().unwrap().into_inner();
+    for name in ["fabric", "quilt"] {
         Mock::given(method("GET"))
             .and(path(format!("/example/{name}/1.0/{name}-1.0.jar")))
-            .respond_with(ResponseTemplate::new(200).set_body_string(content))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(jar.clone()))
             .expect(1)
             .mount(&server)
             .await;
@@ -238,7 +247,7 @@ async fn fabric_and_quilt_download_libraries_into_the_shared_cache() {
     download_fabric_libraries(&client, &fabric, temp.path())
         .await
         .unwrap();
-    for (name, content) in [("fabric", "fabric jar"), ("quilt", "quilt jar")] {
+    for name in ["fabric", "quilt"] {
         assert_eq!(
             std::fs::read(
                 rmcl::storage::MetadataPaths::new(temp.path())
@@ -246,9 +255,45 @@ async fn fabric_and_quilt_download_libraries_into_the_shared_cache() {
                     .join(format!("example/{name}/1.0/{name}-1.0.jar"))
             )
             .unwrap(),
-            content.as_bytes()
+            jar
         );
     }
+}
+
+#[tokio::test]
+async fn fabric_replaces_a_truncated_cached_library() {
+    let server = MockServer::start().await;
+    let temp = tempfile::tempdir().unwrap();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    use std::io::Write;
+    zip.start_file("valid.txt", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"ok").unwrap();
+    let jar = zip.finish().unwrap().into_inner();
+    Mock::given(method("GET"))
+        .and(path("/example/fabric/1.0/fabric-1.0.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(jar.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let profile = FabricProfile {
+        id: "fabric".into(),
+        main_class: String::new(),
+        libraries: vec![FabricLibrary {
+            name: "example:fabric:1.0".into(),
+            url: server.uri(),
+        }],
+    };
+    let destination = rmcl::storage::MetadataPaths::new(temp.path())
+        .libraries()
+        .join("example/fabric/1.0/fabric-1.0.jar");
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    std::fs::write(&destination, b"truncated").unwrap();
+
+    download_fabric_libraries(&HttpClient::new(), &profile, temp.path())
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(destination).unwrap(), jar);
 }
 
 #[tokio::test]

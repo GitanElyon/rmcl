@@ -65,7 +65,8 @@ fn parse(path: &Path) -> Result<Manifest, String> {
     let entry = archive
         .by_name("manifest.json")
         .map_err(|_| "Missing manifest.json in CurseForge pack".to_owned())?;
-    serde_json::from_reader(entry).map_err(|error| format!("Invalid CurseForge manifest: {error}"))
+    let raw = super::read_pack_manifest(entry)?;
+    serde_json::from_slice(&raw).map_err(|error| format!("Invalid CurseForge manifest: {error}"))
 }
 
 fn loader(manifest: &Manifest) -> (ModLoader, Option<String>) {
@@ -178,14 +179,18 @@ async fn download_files(
 
 pub(super) async fn owned_files(path: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     let manifest = parse(path)?;
-    let api_key = crate::net::curseforge::api_key()
-        .ok_or_else(|| "CurseForge API key is not configured".to_owned())?;
+    let overrides = super::override_files(path, &[manifest.overrides.trim_matches('/')])?;
     let ids = manifest
         .files
         .iter()
         .filter(|file| file.required)
         .map(|file| file.file_id)
         .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(overrides);
+    }
+    let api_key = crate::net::curseforge::api_key()
+        .ok_or_else(|| "CurseForge API key is not configured".to_owned())?;
     let versions =
         crate::net::curseforge::fetch_file_versions(&crate::net::HttpClient::new(), api_key, &ids)
             .await
@@ -197,7 +202,7 @@ pub(super) async fn owned_files(path: &Path) -> Result<Vec<std::path::PathBuf>, 
             ids.len()
         ));
     }
-    versions
+    let mut files: Vec<_> = versions
         .into_iter()
         .map(|version| {
             version
@@ -208,7 +213,9 @@ pub(super) async fn owned_files(path: &Path) -> Result<Vec<std::path::PathBuf>, 
                 .map(|file| std::path::PathBuf::from("mods").join(&file.filename))
                 .ok_or_else(|| format!("CurseForge file '{}' has no artifact", version.id))
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    files.extend(overrides);
+    Ok(files)
 }
 
 fn count_overrides(path: &Path, root: &str) -> Result<usize, String> {

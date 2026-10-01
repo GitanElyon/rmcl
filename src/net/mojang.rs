@@ -160,7 +160,20 @@ pub async fn fetch_version_meta_with_raw(
         entry.id,
         entry.url
     );
-    client.get_json_with_raw(&entry.url, "version meta").await
+    let (meta, raw): (VersionMeta, Vec<u8>) =
+        client.get_json_with_raw(&entry.url, "version meta").await?;
+    if !sha1_matches(&raw, &entry.sha1) || meta.id != entry.id {
+        return Err(NetError::Parse(format!(
+            "Version metadata for '{}' does not match its manifest",
+            entry.id
+        )));
+    }
+    Ok((meta, raw))
+}
+
+fn sha1_matches(bytes: &[u8], expected: &str) -> bool {
+    use sha1::Digest;
+    format!("{:x}", sha1::Sha1::digest(bytes)).eq_ignore_ascii_case(expected)
 }
 
 fn sha1_hex(path: &Path) -> Option<String> {
@@ -192,7 +205,7 @@ fn verify_cached(path: &Path, expected_sha1: &str, expected_size: u64) -> bool {
             return false;
         }
     }
-    sha1_hex(path).is_some_and(|hash| hash == expected_sha1)
+    sha1_hex(path).is_some_and(|hash| hash.eq_ignore_ascii_case(expected_sha1))
 }
 
 pub async fn download_client_jar(
@@ -278,7 +291,7 @@ pub async fn download_libraries(
         .join(&meta.id)
         .join("natives");
 
-    let mut downloads: Vec<(String, PathBuf, String)> = Vec::new();
+    let mut downloads: Vec<(String, PathBuf, String, String, u64)> = Vec::new();
     // natives jars to unpack once every download has landed:
     // (jar path inside the library cache, extract.exclude prefixes)
     let mut natives_jars: Vec<(PathBuf, Vec<String>)> = Vec::new();
@@ -291,20 +304,22 @@ pub async fn download_libraries(
         }
 
         if let Some(artifact) = &library.downloads.artifact {
-            let rel = match library_relative_path(library, artifact.path.as_str()) {
-                Some(rel) => rel,
-                None => {
-                    tracing::warn!("Skipping unresolvable library {}", library.name);
-                    continue;
-                }
-            };
+            let rel = library_relative_path(library, artifact.path.as_str()).ok_or_else(|| {
+                NetError::Parse(format!("Invalid library path for {}", library.name))
+            })?;
             let destination = crate::storage::MetadataPaths::new(meta_dir)
                 .libraries()
                 .join(&rel);
             if verify_cached(&destination, &artifact.sha1, artifact.size) {
                 tracing::trace!("Library already cached: {}", rel);
             } else {
-                downloads.push((artifact.url.clone(), destination, rel));
+                downloads.push((
+                    artifact.url.clone(),
+                    destination,
+                    rel,
+                    artifact.sha1.clone(),
+                    artifact.size,
+                ));
             }
         }
 
@@ -326,25 +341,31 @@ pub async fn download_libraries(
             let rel = if !info.path.is_empty() {
                 info.path.clone()
             } else {
-                match crate::instance::loader::maven::maven_coord_to_path(&format!(
+                crate::instance::loader::maven::maven_coord_to_path(&format!(
                     "{}:{}",
                     library.name, classifier
-                )) {
-                    Some(rel) => rel,
-                    None => {
-                        tracing::warn!(
-                            "Skipping natives of library {}: no usable path",
-                            library.name
-                        );
-                        continue;
-                    }
-                }
+                ))
+                .ok_or_else(|| {
+                    NetError::Parse(format!("Invalid native library path for {}", library.name))
+                })?
             };
+            if !crate::storage::safe_relative_path(Path::new(&rel)) {
+                return Err(NetError::Parse(format!(
+                    "Invalid native library path for {}",
+                    library.name
+                )));
+            }
             let destination = crate::storage::MetadataPaths::new(meta_dir)
                 .libraries()
                 .join(&rel);
             if !verify_cached(&destination, &info.sha1, info.size) {
-                downloads.push((info.url.clone(), destination.clone(), rel));
+                downloads.push((
+                    info.url.clone(),
+                    destination.clone(),
+                    rel,
+                    info.sha1.clone(),
+                    info.size,
+                ));
             }
             let exclude = library
                 .extract
@@ -373,10 +394,12 @@ pub async fn download_libraries(
 }
 
 fn library_relative_path(library: &Library, recorded_path: &str) -> Option<String> {
-    if !recorded_path.is_empty() {
-        return Some(recorded_path.to_owned());
-    }
-    crate::instance::loader::maven::maven_coord_to_path(&library.name)
+    let path = if recorded_path.is_empty() {
+        crate::instance::loader::maven::maven_coord_to_path(&library.name)?
+    } else {
+        recorded_path.to_owned()
+    };
+    crate::storage::safe_relative_path(Path::new(&path)).then_some(path)
 }
 
 fn extract_natives(jar: &Path, dest: &Path, exclude: &[String]) -> Result<(), NetError> {
@@ -433,60 +456,61 @@ pub async fn download_assets_from(
     assets_base: &str,
 ) -> Result<(), NetError> {
     set_action("Downloading assets...");
+    if !crate::storage::safe_relative_path(Path::new(&meta.asset_index.id))
+        || Path::new(&meta.asset_index.id).components().count() != 1
+    {
+        clear();
+        return Err(NetError::Parse("Invalid asset index ID".to_owned()));
+    }
     let index_path = crate::storage::MetadataPaths::new(meta_dir)
         .assets()
         .join("indexes")
         .join(format!("{}.json", meta.asset_index.id));
-    let asset_index: AssetIndexContent = if index_path.exists() {
-        let bytes = tokio::fs::read(&index_path).await?;
-        serde_json::from_slice(&bytes)
-            .map_err(|error| NetError::Parse(format!("Invalid cached asset index: {error}")))?
+    let cached = match tokio::fs::read(&index_path).await {
+        Ok(bytes) if sha1_matches(&bytes, &meta.asset_index.sha1) => {
+            serde_json::from_slice(&bytes).ok()
+        }
+        Ok(_) => {
+            tracing::warn!(
+                "Invalid cached asset index at {}; fetching again",
+                index_path.display()
+            );
+            None
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let asset_index: AssetIndexContent = if let Some(index) = cached {
+        index
     } else {
         tracing::debug!(
             "Fetching asset index {} from {}",
             meta.asset_index.id,
             meta.asset_index.url
         );
-        let index = match client.get_json(&meta.asset_index.url).await {
-            Ok(index) => index,
+        let bytes = match client.get_bytes(&meta.asset_index.url).await {
+            Ok(bytes) => bytes,
             Err(e) => {
                 clear();
                 return Err(e);
             }
         };
-        match serde_json::to_string(&index) {
-            Ok(json) => {
-                if let Some(parent) = index_path.parent() {
-                    match tokio::fs::create_dir_all(parent).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::debug!("Failed to create asset index dir: {}", e);
-                        }
-                    }
-                }
-                match tokio::fs::write(&index_path, json).await {
-                    Ok(_) => {
-                        tracing::debug!("Saved asset index to {}", index_path.display());
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            "Failed to write asset index {}: {}",
-                            index_path.display(),
-                            e
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::debug!("Failed to serialize asset index: {}", e);
-            }
+        if !sha1_matches(&bytes, &meta.asset_index.sha1) {
+            clear();
+            return Err(NetError::Parse(format!(
+                "Asset index '{}' failed its SHA-1 verification",
+                meta.asset_index.id
+            )));
         }
+        let index = serde_json::from_slice(&bytes)
+            .map_err(|error| NetError::Parse(format!("Invalid asset index: {error}")))?;
+        crate::storage::write_atomic(&index_path, &bytes)?;
         index
     };
 
     let mut downloads = Vec::new();
     for object in asset_index.objects.values() {
-        if object.hash.len() < 2 {
+        if object.hash.len() != 40 || !object.hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             clear();
             return Err(NetError::Parse(format!(
                 "Invalid asset hash: {}",
@@ -506,7 +530,13 @@ pub async fn download_assets_from(
             continue;
         }
 
-        downloads.push((url, destination, object.hash.clone()));
+        downloads.push((
+            url,
+            destination,
+            object.hash.clone(),
+            object.hash.clone(),
+            object.size,
+        ));
     }
 
     if downloads.is_empty() {
@@ -528,7 +558,7 @@ pub async fn download_assets_from(
 // Continue other downloads after one fails; report the first error afterward.
 async fn run_parallel_downloads(
     client: &HttpClient,
-    downloads: Vec<(String, PathBuf, String)>,
+    downloads: Vec<(String, PathBuf, String, String, u64)>,
     report_count_progress: bool,
 ) -> Result<(), NetError> {
     let total_downloads = downloads.len() as u64;
@@ -592,9 +622,9 @@ async fn run_parallel_downloads(
 fn spawn_download_task(
     set: &mut JoinSet<Result<String, NetError>>,
     client: &HttpClient,
-    job: (String, PathBuf, String),
+    job: (String, PathBuf, String, String, u64),
 ) {
-    let (url, destination, label) = job;
+    let (url, destination, label, sha1, size) = job;
     let task_client = client.clone();
 
     set.spawn(async move {
@@ -604,7 +634,14 @@ fn spawn_download_task(
             destination.display()
         );
         let result = download_file(&task_client, &url, &destination, |_current, _total| {}).await;
-        result.map(|()| {
+        result?;
+        if !verify_cached(&destination, &sha1, size) {
+            tokio::fs::remove_file(&destination).await?;
+            return Err(NetError::Parse(format!(
+                "Downloaded '{label}' failed its SHA-1 or size verification"
+            )));
+        }
+        Ok({
             tracing::trace!("Finished parallel download '{}'", label);
             label
         })

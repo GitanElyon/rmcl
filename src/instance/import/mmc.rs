@@ -119,8 +119,6 @@ fn extract_mmc_archive(
     archive_path: &Path,
     minecraft_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::io::Read;
-
     progress::set_action("Extracting pack contents...".to_string());
     progress::set_sub_action(String::new());
 
@@ -178,15 +176,14 @@ fn extract_mmc_archive(
             .unwrap_or_default();
         progress::set_sub_action(filename.to_string());
 
-        let mut buf = Vec::new();
-        entry.read_to_end(&mut buf)?;
+        let mut destination = std::fs::File::create(&dest)?;
+        let size = std::io::copy(&mut entry, &mut destination)?;
         tracing::trace!(
             "Extracting MultiMC entry {} to {} ({} bytes)",
             entry_name,
             dest.display(),
-            buf.len()
+            size
         );
-        std::fs::write(&dest, &buf)?;
         extracted += 1;
     }
 
@@ -210,7 +207,8 @@ fn parse_mmc_pack(path: &Path) -> Result<MmcPack, String> {
         .by_name(&entry_name)
         .map_err(|e| format!("Failed to read mmc-pack.json: {e}"))?;
 
-    serde_json::from_reader(entry).map_err(|e| format!("Invalid mmc-pack.json: {e}"))
+    let raw = super::read_pack_manifest(entry)?;
+    serde_json::from_slice(&raw).map_err(|e| format!("Invalid mmc-pack.json: {e}"))
 }
 
 fn instance_name_from_cfg(path: &Path) -> Option<String> {
@@ -220,8 +218,8 @@ fn instance_name_from_cfg(path: &Path) -> Option<String> {
     let entry_name = find_entry(&archive, "instance.cfg")?;
     tracing::trace!("Reading instance name from {}", entry_name);
     let entry = archive.by_name(&entry_name).ok()?;
-
-    let reader = std::io::BufRead::lines(std::io::BufReader::new(entry));
+    let raw = super::read_pack_manifest(entry).ok()?;
+    let reader = std::io::BufRead::lines(std::io::BufReader::new(raw.as_slice()));
     for line in reader.map_while(Result::ok) {
         if let Some(value) = line.strip_prefix("name=") {
             let name = value.trim().to_string();

@@ -54,6 +54,13 @@ fn summary_counts_both_override_roots() {
     assert_eq!(summary.loader, ModLoader::Fabric);
     assert_eq!(summary.loader_version.as_deref(), Some("0.16.14"));
     assert_eq!(summary.override_count, 2);
+    assert_eq!(
+        owned_files(&path).unwrap(),
+        vec![
+            PathBuf::from("config/test.toml"),
+            PathBuf::from("options.txt")
+        ]
+    );
 }
 
 #[test]

@@ -4,6 +4,16 @@
 use super::*;
 use std::io::Write;
 
+#[test]
+fn oversized_pack_manifest_is_rejected() {
+    assert_eq!(read_pack_manifest(&b"{}"[..]).unwrap(), b"{}");
+    assert!(
+        read_pack_manifest(std::io::repeat(0))
+            .unwrap_err()
+            .contains("8 MiB")
+    );
+}
+
 fn make_pack_zip(tmp: &Path, name: &str, entries: &[(&str, &[u8])]) -> std::path::PathBuf {
     let path = tmp.join(name);
     let file = std::fs::File::create(&path).unwrap();

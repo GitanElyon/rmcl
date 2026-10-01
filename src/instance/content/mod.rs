@@ -29,6 +29,17 @@ pub use worlds::{scan_one_world, scan_worlds};
 
 use std::io::Read;
 
+const MAX_LOCAL_METADATA_BYTES: u64 = 8 * 1024 * 1024;
+
+fn read_local_metadata(reader: impl Read) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_LOCAL_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= MAX_LOCAL_METADATA_BYTES).then_some(bytes)
+}
+
 pub(crate) fn parse_enabled_stem(file_name: &str, ext: &str) -> Option<(bool, String)> {
     let disabled_ext = format!("{ext}.disabled");
     if let Some(stem) = file_name.strip_suffix(&disabled_ext) {
@@ -49,10 +60,7 @@ pub(crate) fn parse_enabled_stem_dir(file_name: &str) -> (bool, String) {
 }
 
 pub(crate) fn read_icon_from_zip(archive: &mut zip::ZipArchive<std::fs::File>) -> Option<Vec<u8>> {
-    let mut entry = archive.by_name("pack.png").ok()?;
-    let mut buf = Vec::new();
-    entry.read_to_end(&mut buf).ok()?;
-    Some(buf)
+    read_local_metadata(archive.by_name("pack.png").ok()?)
 }
 
 pub(crate) fn open_zip(path: &std::path::Path) -> Option<zip::ZipArchive<std::fs::File>> {

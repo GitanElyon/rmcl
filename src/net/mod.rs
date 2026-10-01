@@ -13,9 +13,11 @@ use reqwest::Client;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 pub const MAX_PROVIDER_ASSET_BYTES: usize = 16 * 1024 * 1024;
+static NEXT_DOWNLOAD_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Error)]
 pub enum NetError {
@@ -151,7 +153,7 @@ impl HttpClient {
             .await;
             match result {
                 Ok(value) => return Ok(value),
-                Err(error) if is_retryable(&error) && attempt < MAX_RETRIES => {
+                Err(error) if error.is_retryable() && attempt < MAX_RETRIES => {
                     sleep_before_retry("request", url, attempt, &error).await;
                 }
                 Err(error) => return Err(error),
@@ -187,7 +189,7 @@ where
         match client.get(url).await {
             Ok(resp) => match decode(resp).await {
                 Ok(value) => return Ok(value),
-                Err(e) if is_retryable(&e) => {
+                Err(e) if e.is_retryable() => {
                     if attempt == MAX_RETRIES {
                         return Err(e);
                     }
@@ -195,7 +197,7 @@ where
                 }
                 Err(e) => return Err(e),
             },
-            Err(e) if is_retryable(&e) => {
+            Err(e) if e.is_retryable() => {
                 if attempt == MAX_RETRIES {
                     return Err(e);
                 }
@@ -233,14 +235,14 @@ pub async fn download_file(
 ) -> Result<(), NetError> {
     tracing::debug!("Downloading {} to {}", url, dest.display());
 
-    let result = 'download: {
+    'download: {
         for attempt in 0..=MAX_RETRIES {
             match download_file_once(client, url, dest, &progress_cb).await {
                 Ok(()) => {
                     tracing::debug!("Downloaded {} to {}", url, dest.display());
                     break 'download Ok(());
                 }
-                Err(e) if is_retryable(&e) => {
+                Err(e) if e.is_retryable() => {
                     if attempt == MAX_RETRIES {
                         break 'download Err(e);
                     }
@@ -250,11 +252,7 @@ pub async fn download_file(
             }
         }
         unreachable!("retry loop returns on success or final error")
-    };
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(dest).await;
     }
-    result
 }
 
 pub(crate) async fn download_loader_libraries<'a>(
@@ -268,7 +266,7 @@ pub(crate) async fn download_loader_libraries<'a>(
         let maven_path = crate::instance::loader::maven::maven_coord_to_path(name)
             .ok_or_else(|| NetError::Parse(format!("Invalid Maven coordinate: {name}")))?;
         let dest = libraries_dir.join(&maven_path);
-        if dest.exists() {
+        if valid_jar(&dest) {
             tracing::debug!("{loader} library already exists: {name}");
             continue;
         }
@@ -278,8 +276,21 @@ pub(crate) async fn download_loader_libraries<'a>(
         tracing::info!("Downloading {loader} library: {name}");
         tracing::trace!("{loader} library destination: {}", dest.display());
         download_file(client, &download_url, &dest, |_, _| {}).await?;
+        if !valid_jar(&dest) {
+            let _ = tokio::fs::remove_file(&dest).await;
+            return Err(NetError::Parse(format!(
+                "Downloaded {loader} library '{name}' is not a valid JAR"
+            )));
+        }
     }
     Ok(())
+}
+
+fn valid_jar(path: &Path) -> bool {
+    std::fs::File::open(path)
+        .ok()
+        .and_then(|file| zip::ZipArchive::new(file).ok())
+        .is_some()
 }
 
 async fn download_file_once(
@@ -298,18 +309,38 @@ async fn download_file_once(
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let mut file = tokio::fs::File::create(dest).await?;
+    let temporary = dest.with_file_name(format!(
+        ".{}.{}.{}.download",
+        dest.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file"),
+        std::process::id(),
+        NEXT_DOWNLOAD_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .await?;
     let mut downloaded: u64 = 0;
     let mut stream = response;
 
-    while let Some(chunk) = stream.chunk().await? {
-        file.write_all(&chunk).await?;
-        downloaded += chunk.len() as u64;
-        progress_cb(downloaded, total);
+    let result = async {
+        while let Some(chunk) = stream.chunk().await? {
+            file.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+            progress_cb(downloaded, total);
+        }
+        file.flush().await?;
+        drop(file);
+        crate::storage::replace_file(&temporary, dest)?;
+        Ok(())
     }
-    file.flush().await?;
-
-    Ok(())
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    result
 }
 
 // body decode errors and timeouts are worth retrying, but a 404 or disk

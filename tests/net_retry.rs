@@ -49,6 +49,30 @@ async fn get_json_retries_5xx_then_succeeds() {
     assert!(result.ok);
 }
 
+#[tokio::test(start_paused = true)]
+async fn get_json_retries_rate_limit() {
+    let server = MockServer::start().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("GET"))
+        .and(path("/limited"))
+        .respond_with(move |_: &wiremock::Request| {
+            if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(429)
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({"ok": true}))
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let result: ApiResponse = client_without_timeout()
+        .get_json(&format!("{}/limited", server.uri()))
+        .await
+        .unwrap();
+    assert!(result.ok);
+}
+
 #[tokio::test]
 async fn get_json_fails_fast_on_4xx() {
     let server = MockServer::start().await;

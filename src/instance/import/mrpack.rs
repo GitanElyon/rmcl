@@ -47,8 +47,9 @@ pub fn parse_mrpack(path: &Path) -> Result<MrpackIndex, String> {
     let entry = archive
         .by_name("modrinth.index.json")
         .map_err(|_| "Missing modrinth.index.json in .mrpack".to_string())?;
+    let raw = super::read_pack_manifest(entry)?;
     let index: MrpackIndex =
-        serde_json::from_reader(entry).map_err(|e| format!("Invalid manifest JSON: {e}"))?;
+        serde_json::from_slice(&raw).map_err(|e| format!("Invalid manifest JSON: {e}"))?;
     tracing::debug!(
         "Parsed .mrpack '{}' version_id={} files={} deps={}",
         index.name,
@@ -310,11 +311,16 @@ fn safe_mrpack_path(path: &str) -> Result<PathBuf, crate::net::NetError> {
 }
 
 pub(super) fn owned_files(path: &Path) -> Result<Vec<PathBuf>, String> {
-    parse_mrpack(path)?
+    let mut files: Vec<_> = parse_mrpack(path)?
         .files
         .into_iter()
         .map(|file| safe_mrpack_path(&file.path).map_err(|error| error.to_string()))
-        .collect()
+        .collect::<Result<_, _>>()?;
+    files.extend(super::override_files(
+        path,
+        &["overrides", "client-overrides"],
+    )?);
+    Ok(files)
 }
 
 fn verify_mrpack_file(
@@ -420,8 +426,6 @@ fn extract_overrides(
     mrpack_path: &Path,
     minecraft_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::io::Read;
-
     progress::set_action("Extracting overrides...".to_string());
     progress::set_sub_action(String::new());
 
@@ -466,15 +470,14 @@ fn extract_overrides(
             std::fs::create_dir_all(parent)?;
         }
 
-        let mut buf = Vec::new();
-        entry.read_to_end(&mut buf)?;
+        let mut destination = std::fs::File::create(&dest)?;
+        let size = std::io::copy(&mut entry, &mut destination)?;
         tracing::trace!(
             "Extracting .mrpack override {} to {} ({} bytes)",
             entry_name,
             dest.display(),
-            buf.len()
+            size
         );
-        std::fs::write(&dest, &buf)?;
         extracted += 1;
     }
 

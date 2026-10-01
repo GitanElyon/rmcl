@@ -12,6 +12,11 @@ use rmcl::net::mojang::{
     fetch_version_manifest_from, fetch_version_meta_with_raw,
 };
 
+fn sha1(bytes: &[u8]) -> String {
+    use sha1::Digest;
+    format!("{:x}", sha1::Sha1::digest(bytes))
+}
+
 fn synthetic_manifest() -> serde_json::Value {
     json!({
         "latest": { "release": "1.20.1", "snapshot": "24w01a" },
@@ -79,12 +84,10 @@ async fn fetch_version_manifest_parses_synthetic_response() {
 async fn fetch_version_meta_returns_struct_and_raw_bytes() {
     let server = MockServer::start().await;
     let body_json = synthetic_version_meta();
-    // serialise once so we can assert the raw bytes equal what the mock
-    // actually sent (wiremock re-serialises the json, so we have to match
-    // its output format)
+    let body = serde_json::to_vec(&body_json).unwrap();
     Mock::given(method("GET"))
         .and(path("/1.20.1.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body_json.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
         .expect(1)
         .mount(&server)
         .await;
@@ -93,7 +96,7 @@ async fn fetch_version_meta_returns_struct_and_raw_bytes() {
         id: "1.20.1".to_string(),
         version_type: "release".to_string(),
         url: format!("{}/1.20.1.json", server.uri()),
-        sha1: "0".repeat(40),
+        sha1: sha1(&body),
     };
 
     let (meta, raw) = fetch_version_meta_with_raw(&HttpClient::new(), &entry)
@@ -109,6 +112,27 @@ async fn fetch_version_meta_returns_struct_and_raw_bytes() {
     let reparsed: serde_json::Value = serde_json::from_slice(&raw).expect("raw is json");
     assert_eq!(reparsed["id"], "1.20.1");
     assert_eq!(reparsed["mainClass"], "net.minecraft.client.main.Main");
+}
+
+#[tokio::test]
+async fn version_metadata_rejects_a_wrong_manifest_hash() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/version.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(synthetic_version_meta()))
+        .mount(&server)
+        .await;
+    let entry = VersionEntry {
+        id: "1.20.1".to_owned(),
+        version_type: "release".to_owned(),
+        url: format!("{}/version.json", server.uri()),
+        sha1: "0".repeat(40),
+    };
+    assert!(
+        fetch_version_meta_with_raw(&HttpClient::new(), &entry)
+            .await
+            .is_err()
+    );
 }
 
 // constructs a minimal VersionMeta with a single library pointing at the
@@ -136,8 +160,8 @@ fn meta_with_one_library(server_uri: &str) -> VersionMeta {
                 artifact: Some(Artifact {
                     url: format!("{server_uri}/slf4j.jar"),
                     path: "org/slf4j/slf4j-api/2.0.7/slf4j-api-2.0.7.jar".to_string(),
-                    sha1: "0".repeat(40),
-                    size: 11,
+                    sha1: sha1(b"jar-bytes"),
+                    size: b"jar-bytes".len() as u64,
                 }),
                 classifiers: None,
             },
@@ -221,7 +245,10 @@ async fn download_libraries_redownloads_corrupted_cache() {
         .mount(&server)
         .await;
 
-    let meta = meta_with_one_library(&server.uri());
+    let mut meta = meta_with_one_library(&server.uri());
+    let artifact = meta.libraries[0].downloads.artifact.as_mut().unwrap();
+    artifact.sha1 = sha1(b"fresh-bytes");
+    artifact.size = b"fresh-bytes".len() as u64;
     let tmp = tempfile::tempdir().unwrap();
     let existing = tmp
         .path()
@@ -237,33 +264,61 @@ async fn download_libraries_redownloads_corrupted_cache() {
 }
 
 #[tokio::test]
-async fn download_assets_from_writes_index_and_assets() {
-    // exercises the full path: index fetch + write, then per-asset download
-    // from the configurable assets base. uses download_assets_from so the
-    // hardcoded ASSETS_BASE_URL stays out of the way.
+async fn library_rejects_wrong_download_bytes_and_unsafe_paths() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/assets/index.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "objects": {
-                "minecraft/lang/en_us.json": {
-                    "hash": "ab1234567890abcdef1234567890abcdef123456",
-                    "size": 11
-                }
-            }
-        })))
+        .and(path("/slf4j.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"wrong".to_vec()))
         .expect(1)
         .mount(&server)
         .await;
-    // asset hash starts with "ab" so the per-asset URL is /<base>/ab/<hash>.
+    let mut meta = meta_with_one_library(&server.uri());
+    let temp = tempfile::tempdir().unwrap();
+    let library = temp
+        .path()
+        .join("cache/minecraft/libraries/org/slf4j/slf4j-api/2.0.7/slf4j-api-2.0.7.jar");
+    assert!(
+        download_libraries(&HttpClient::new(), &meta, temp.path())
+            .await
+            .is_err()
+    );
+    assert!(!library.exists());
+
+    meta.libraries[0].downloads.artifact.as_mut().unwrap().path =
+        "../../../../escape.jar".to_owned();
+    assert!(
+        download_libraries(&HttpClient::new(), &meta, temp.path())
+            .await
+            .is_err()
+    );
+    assert!(!temp.path().join("escape.jar").exists());
+}
+
+#[tokio::test]
+async fn download_assets_from_writes_index_and_assets() {
+    let server = MockServer::start().await;
+    let hash = sha1(b"asset-bytes");
+    let index = serde_json::to_vec(&json!({
+        "objects": {
+            "minecraft/lang/en_us.json": {"hash": hash, "size": b"asset-bytes".len()}
+        }
+    }))
+    .unwrap();
     Mock::given(method("GET"))
-        .and(path("/cdn/ab/ab1234567890abcdef1234567890abcdef123456"))
+        .and(path("/assets/index.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(index.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/cdn/{}/{}", &hash[..2], hash)))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"asset-bytes".to_vec()))
         .expect(1)
         .mount(&server)
         .await;
 
-    let meta = meta_with_one_library(&server.uri());
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.asset_index.sha1 = sha1(&index);
     let tmp = tempfile::tempdir().unwrap();
     let cdn_base = format!("{}/cdn", server.uri());
 
@@ -275,7 +330,9 @@ async fn download_assets_from_writes_index_and_assets() {
     assert!(index_path.exists(), "index file missing");
     let asset_path = tmp
         .path()
-        .join("cache/minecraft/assets/objects/ab/ab1234567890abcdef1234567890abcdef123456");
+        .join("cache/minecraft/assets/objects")
+        .join(&hash[..2])
+        .join(&hash);
     assert!(asset_path.exists(), "asset file missing");
     assert_eq!(std::fs::read(&asset_path).unwrap(), b"asset-bytes");
 }
@@ -286,14 +343,16 @@ async fn download_assets_writes_index_when_objects_is_empty() {
     // path without triggering individual asset downloads (which go to the
     // hardcoded ASSETS_BASE_URL and can't be wiremocked here).
     let server = MockServer::start().await;
+    let index = serde_json::to_vec(&json!({"objects": {}})).unwrap();
     Mock::given(method("GET"))
         .and(path("/assets/index.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"objects": {}})))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(index.clone()))
         .expect(1)
         .mount(&server)
         .await;
 
-    let meta = meta_with_one_library(&server.uri());
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.asset_index.sha1 = sha1(&index);
     let tmp = tempfile::tempdir().unwrap();
 
     download_assets(&HttpClient::new(), &meta, tmp.path())
@@ -308,6 +367,93 @@ async fn download_assets_writes_index_when_objects_is_empty() {
     let body: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
     assert!(body.get("objects").is_some());
+}
+
+#[tokio::test]
+async fn invalid_cached_index_is_refetched() {
+    let server = MockServer::start().await;
+    let body = serde_json::to_vec(&json!({"objects": {}})).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/assets/index.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.asset_index.sha1 = sha1(&body);
+    let tmp = tempfile::tempdir().unwrap();
+    let index_path = tmp.path().join("cache/minecraft/assets/indexes/5.json");
+    std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+    std::fs::write(&index_path, b"{\"objects\":{\"fake\":{}}}").unwrap();
+
+    download_assets(&HttpClient::new(), &meta, tmp.path())
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(index_path).unwrap(), body);
+}
+
+#[tokio::test]
+async fn invalid_asset_hash_returns_an_error_without_escaping_or_panicking() {
+    let server = MockServer::start().await;
+    let body =
+        serde_json::to_vec(&json!({"objects": {"bad": {"hash": "aé/../escape", "size": 1}}}))
+            .unwrap();
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.asset_index.sha1 = sha1(&body);
+    let tmp = tempfile::tempdir().unwrap();
+    let index_path = tmp.path().join("cache/minecraft/assets/indexes/5.json");
+    std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+    std::fs::write(&index_path, body).unwrap();
+
+    assert!(
+        download_assets(&HttpClient::new(), &meta, tmp.path())
+            .await
+            .is_err()
+    );
+    assert!(!tmp.path().join("escape").exists());
+    meta.asset_index.id = "../outside".to_owned();
+    assert!(
+        download_assets(&HttpClient::new(), &meta, tmp.path())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn downloaded_asset_must_match_index_hash_and_size() {
+    let server = MockServer::start().await;
+    let hash = sha1(b"expected");
+    let body = serde_json::to_vec(&json!({"objects": {"one": {"hash": hash, "size": 8}}})).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/assets/index.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/cdn/{}/{}", &hash[..2], hash)))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"bad bytes".to_vec()))
+        .mount(&server)
+        .await;
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.asset_index.sha1 = sha1(&body);
+    let tmp = tempfile::tempdir().unwrap();
+    let asset = tmp
+        .path()
+        .join("cache/minecraft/assets/objects")
+        .join(&hash[..2])
+        .join(&hash);
+
+    assert!(
+        download_assets_from(
+            &HttpClient::new(),
+            &meta,
+            tmp.path(),
+            &format!("{}/cdn", server.uri())
+        )
+        .await
+        .is_err()
+    );
+    assert!(!asset.exists());
 }
 
 #[tokio::test]

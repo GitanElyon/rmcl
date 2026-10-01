@@ -525,7 +525,11 @@ pub async fn download_version_file(
     validate_path_component(&version.id, "provider version id")?;
     let path = destination.join(&file.filename);
     if path.exists() {
-        if verify_version_file(&path, file)? {
+        if ["sha512", "sha1"]
+            .iter()
+            .any(|algorithm| file.hashes.contains_key(*algorithm))
+            && verify_version_file(&path, file)?
+        {
             return Ok(DownloadOutcome::SkippedExisting(path));
         }
         return Err(crate::net::NetError::Parse(format!(

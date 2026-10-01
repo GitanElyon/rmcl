@@ -10,7 +10,9 @@ use super::entry::{ContentEntry, WorldDetails, WorldGameMode};
 use super::{fallback_icon_large, make_icon_pixels};
 
 pub fn scan_one_world(path: &Path, file_stem: &str, enabled: bool) -> ContentEntry {
-    let icon_bytes = std::fs::read(path.join("icon.png")).ok();
+    let icon_bytes = File::open(path.join("icon.png"))
+        .ok()
+        .and_then(super::read_local_metadata);
     let icon_lines = icon_bytes
         .as_ref()
         .and_then(|bytes| make_icon_pixels(bytes, 12, 6))

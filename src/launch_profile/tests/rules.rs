@@ -236,6 +236,14 @@ fn os_version_pattern_does_not_match_when_host_unknown() {
 }
 
 #[test]
+fn os_version_regex_respects_anchors_and_escapes() {
+    assert!(os_version_matches(r"^10\.", "10.15.7"));
+    assert!(!os_version_matches(r"^10\.", "110.15.7"));
+    assert!(!os_version_matches(r"^10\.", "10x15"));
+    assert!(!os_version_matches("[", "10.15.7"));
+}
+
+#[test]
 fn rule_deserializes_from_mojang_json() {
     // shape lifted from real mojang library rules.
     let json = r#"{

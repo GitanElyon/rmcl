@@ -2,6 +2,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::*;
+
+#[test]
+fn local_metadata_reads_have_a_size_limit() {
+    assert_eq!(
+        super::super::read_local_metadata(&b"icon"[..]),
+        Some(b"icon".to_vec())
+    );
+    assert!(super::super::read_local_metadata(std::io::repeat(0)).is_none());
+}
 use crate::instance::content::entry::{ContentEntry, toggle_entry};
 use std::path::PathBuf;
 

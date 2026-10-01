@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::io::Read;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -212,9 +211,10 @@ fn try_fallback_icons(archive: &mut zip::ZipArchive<std::fs::File>) -> Option<Ve
 fn read_fabric_meta(
     archive: &mut zip::ZipArchive<std::fs::File>,
 ) -> Option<(String, String, String, String)> {
-    let mut entry = archive.by_name("fabric.mod.json").ok()?;
-    let mut raw = String::new();
-    entry.read_to_string(&mut raw).ok()?;
+    let raw = String::from_utf8(super::read_local_metadata(
+        archive.by_name("fabric.mod.json").ok()?,
+    )?)
+    .ok()?;
     let sanitized = sanitize_json_strings(&raw);
     let data: FabricModJson = serde_json::from_str(&sanitized).ok()?;
     let icon = data.icon_path();
@@ -224,9 +224,10 @@ fn read_fabric_meta(
 fn read_quilt_meta(
     archive: &mut zip::ZipArchive<std::fs::File>,
 ) -> Option<(String, String, String, String)> {
-    let mut entry = archive.by_name("quilt.mod.json").ok()?;
-    let mut raw = String::new();
-    entry.read_to_string(&mut raw).ok()?;
+    let raw = String::from_utf8(super::read_local_metadata(
+        archive.by_name("quilt.mod.json").ok()?,
+    )?)
+    .ok()?;
     let sanitized = sanitize_json_strings(&raw);
     let data: QuiltModJson = serde_json::from_str(&sanitized).ok()?;
     let version = data.quilt_loader.version;
@@ -282,9 +283,10 @@ fn read_forge_toml_meta(
 fn read_mcmod_info(
     archive: &mut zip::ZipArchive<std::fs::File>,
 ) -> Option<(String, String, String, String)> {
-    let mut entry = archive.by_name("mcmod.info").ok()?;
-    let mut raw = String::new();
-    entry.read_to_string(&mut raw).ok()?;
+    let raw = String::from_utf8(super::read_local_metadata(
+        archive.by_name("mcmod.info").ok()?,
+    )?)
+    .ok()?;
     let sanitized = sanitize_json_strings(&raw);
     let parsed: serde_json::Value = serde_json::from_str(&sanitized).ok()?;
     let first = match &parsed {
@@ -316,10 +318,7 @@ fn read_mcmod_info(
 }
 
 fn read_zip_string(archive: &mut zip::ZipArchive<std::fs::File>, path: &str) -> Option<String> {
-    let mut entry = archive.by_name(path).ok()?;
-    let mut s = String::new();
-    entry.read_to_string(&mut s).ok()?;
-    Some(s)
+    String::from_utf8(super::read_local_metadata(archive.by_name(path).ok()?)?).ok()
 }
 
 // some mod authors put raw newlines/tabs inside json string values which is
@@ -360,10 +359,7 @@ fn sanitize_json_strings(input: &str) -> String {
 }
 
 fn read_zip_bytes(archive: &mut zip::ZipArchive<std::fs::File>, path: &str) -> Option<Vec<u8>> {
-    let mut entry = archive.by_name(path).ok()?;
-    let mut bytes = Vec::new();
-    entry.read_to_end(&mut bytes).ok()?;
-    Some(bytes)
+    super::read_local_metadata(archive.by_name(path).ok()?)
 }
 
 #[cfg(test)]

@@ -230,12 +230,17 @@ jobs:
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
-          RELEASE_COMMIT: "${{ github.sha }}"
           CHANGELOG: "${{ steps.changelog.outputs.content }}"
           RELEASE_TAG: "${{ needs.plan.outputs.tag }}"
           APP_VERSION: "${{ fromJson(steps.host.outputs.manifest).releases[0].app_version }}"
+          PUBLISH_WINGET: "${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}"
         run: |
+          RELEASE_COMMIT="$(git rev-parse HEAD)"
           echo "$CHANGELOG" > $RUNNER_TEMP/notes.txt
+          WINGET_MANIFEST_NOTE=""
+          if [[ "$PUBLISH_WINGET" == true ]]; then
+            WINGET_MANIFEST_NOTE="The generated WinGet manifest is attached as \`winget-manifest-${APP_VERSION}.zip\` for local validation."
+          fi
           cat >> $RUNNER_TEMP/notes.txt <<EOF
 
           ## downloads
@@ -271,7 +276,7 @@ jobs:
           winget install Objz.Rmcl
           \`\`\`
 
-          The generated WinGet manifest is attached as \`winget-manifest-${APP_VERSION}.zip\` for local validation.
+          $WINGET_MANIFEST_NOTE
 
           ### AUR
 
@@ -374,24 +379,3 @@ jobs:
     secrets: inherit
     permissions:
       "contents": "write"
-
-  announce:
-    needs:
-      - plan
-      - host
-      - publish-homebrew-formula
-      - custom-publish-crates
-      - custom-publish-aur
-      - custom-publish-winget
-    # use "always() && ..." to allow us to wait for all publish jobs while
-    # still allowing individual publish jobs to skip themselves (for prereleases).
-    # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') && (needs.custom-publish-crates.result == 'skipped' || needs.custom-publish-crates.result == 'success') && (needs.custom-publish-aur.result == 'skipped' || needs.custom-publish-aur.result == 'success') && (needs.custom-publish-winget.result == 'skipped' || needs.custom-publish-winget.result == 'success') }}
-    runs-on: "ubuntu-22.04"
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-          submodules: recursive

@@ -32,22 +32,6 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  clippy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "21"
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --locked -- -D warnings
-
   build-and-test:
     name: build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -61,6 +45,8 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -72,6 +58,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes libxcb1-dev
       - run: cargo build --locked
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked --all-targets
 
   network-tests:

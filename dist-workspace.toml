@@ -9,7 +9,7 @@ tap = "objz/homebrew-tap"
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 install-path = "CARGO_HOME"
 publish-jobs = ["homebrew", "./publish-crates", "./publish-aur", "./publish-winget"]
-github-custom-job-permissions = { publish-crates = { contents = "read" }, publish-aur = { contents = "read" }, publish-winget = { contents = "read" } }
+github-custom-job-permissions = { publish-crates = { contents = "read" }, publish-aur = { contents = "read" }, publish-winget = { contents = "write" } }
 github-build-setup = "../dist-build-setup.yml"
 hosting = "github"
 install-updater = false

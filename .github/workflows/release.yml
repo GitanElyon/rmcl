@@ -11,16 +11,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v6
+        id: checkout
+        with:
+          ref: master
+
   checks:
+    needs: resolve
     uses: ./.github/workflows/checks.yml
     with:
       network-tests: true
-      ref: master
+      ref: ${{ needs.resolve.outputs.sha }}
     secrets:
       curseforge-api-key: ${{ secrets.CURSEFORGE_API_KEY }}
 
   prepare:
-    needs: checks
+    needs: [resolve, checks]
     runs-on: ubuntu-latest
     outputs:
       release: ${{ steps.version.outputs.release }}
@@ -28,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: master
+          ref: ${{ needs.resolve.outputs.sha }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -39,23 +50,8 @@ jobs:
           set -euo pipefail
 
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rmcl") | .version')
-          mapfile -t versions < <(git tag --list 'v*' --sort=-v:refname | sed -nE 's/^v([0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?)$/\1/p')
-          latest=${versions[0]:-}
-          tag="v${version}"
-          release=false
-
-          if [[ -z "$latest" ]] || [[ "$version" != "$latest" && "$(printf '%s\n%s\n' "$latest" "$version" | sort -V | tail -n1)" == "$version" ]]; then
-            release=true
-          fi
-
-          echo "release=$release" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-          if [[ "$release" == true ]]; then
-            echo "releasing $tag (latest release: ${latest:-none})"
-          else
-            echo "Cargo.toml version $version is not newer than latest release v$latest; nothing to release"
-          fi
+          python3 scripts/release-version.py --check
+          python3 scripts/release-version.py "$version"
 
       - name: create tag
         if: steps.version.outputs.release == 'true'

@@ -48,6 +48,16 @@ impl App {
             if let Some(state) = self.modpack_versions_state.as_mut() {
                 state.drain_pending();
             }
+            if self.content_update_popup.as_ref().is_some_and(|update| {
+                update.phase != widgets::content::update::Phase::Applying
+                    && self
+                        .instances_state
+                        .selected_instance()
+                        .map(|instance| instance.name.as_str())
+                        != Some(update.instance_name.as_str())
+            }) {
+                self.content_update_popup = None;
+            }
             let content_update_completed = self.content_update_popup.as_mut().and_then(|update| {
                 update.drain();
                 update.list.request_image_loads(&self.picker);
@@ -700,15 +710,21 @@ impl App {
         let editor = std::env::var("EDITOR")
             .or_else(|_| std::env::var("VISUAL"))
             .unwrap_or_else(|_| default_editor.to_owned());
+        let parts = editor_parts(&editor);
+        let Some((program, args)) = parts.split_first() else {
+            tracing::error!("Editor command is empty");
+            return false;
+        };
 
-        let is_tui_editor = editor_runs_in_terminal(&editor);
+        let is_tui_editor = editor_runs_in_terminal(program);
 
         if is_tui_editor {
             let _ = stdout().execute(DisableMouseCapture);
             let _ = stdout().execute(LeaveAlternateScreen);
             let _ = disable_raw_mode();
 
-            let result = std::process::Command::new(&editor)
+            let result = std::process::Command::new(program)
+                .args(args)
                 .arg(path)
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::inherit())
@@ -726,7 +742,8 @@ impl App {
             }
             true
         } else {
-            if let Err(e) = std::process::Command::new(&editor)
+            if let Err(e) = std::process::Command::new(program)
+                .args(args)
                 .arg(path)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -1104,6 +1121,14 @@ fn editor_runs_in_terminal(editor: &str) -> bool {
             | "joe"
             | "mcedit"
     )
+}
+
+fn editor_parts(editor: &str) -> Vec<&str> {
+    if std::path::Path::new(editor).is_file() {
+        vec![editor]
+    } else {
+        editor.split_whitespace().collect()
+    }
 }
 
 #[cfg(test)]

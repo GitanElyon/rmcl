@@ -58,6 +58,17 @@ impl App {
     }
 
     pub(super) fn handle_key_event(&mut self, key_event: KeyEvent) -> color_eyre::Result<()> {
+        if self.content_update_popup.as_ref().is_some_and(|update| {
+            update.phase != widgets::content::update::Phase::Applying
+                && self
+                    .instances_state
+                    .selected_instance()
+                    .map(|instance| instance.name.as_str())
+                    != Some(update.instance_name.as_str())
+        }) {
+            self.content_update_popup = None;
+            return Ok(());
+        }
         if self
             .content_update_popup
             .as_ref()
@@ -206,7 +217,15 @@ impl App {
                                 .accounts
                                 .get(index)
                                 .map(|account| account.uuid.clone());
-                            self.account_state.store.remove(index);
+                            if let Err(error) = self.account_state.store.remove(index) {
+                                error_buffer::push_message(
+                                    tracing::Level::ERROR,
+                                    error.to_string(),
+                                );
+                                self.focused = FocusedArea::Account;
+                                confirm_popup::clear_pending();
+                                return Ok(());
+                            }
                             if let Some(removed_uuid) = removed_uuid {
                                 for instance in &mut self.instances_state.instances {
                                     if instance.preferred_account.as_deref()
@@ -680,6 +699,12 @@ impl App {
         }
 
         if self.focused == FocusedArea::Account
+            && widgets::account::handle_key(&key_event, &mut self.account_state)
+        {
+            return Ok(());
+        }
+
+        if self.focused == FocusedArea::Account
             && let KeyCode::Char('d') = key_event.code
             && let Some(index) = self.account_state.list_state.selected
             && let Some(account) = self.account_state.store.accounts.get(index)
@@ -689,12 +714,6 @@ impl App {
                 index,
             });
             self.focused = FocusedArea::ConfirmDelete;
-            return Ok(());
-        }
-
-        if self.focused == FocusedArea::Account
-            && widgets::account::handle_key(&key_event, &mut self.account_state)
-        {
             return Ok(());
         }
 
@@ -1484,8 +1503,12 @@ impl App {
         {
             return;
         }
-        let state =
-            widgets::content::update::State::checking(kind, target_world.clone(), source_entries);
+        let state = widgets::content::update::State::checking(
+            instance.name.clone(),
+            kind,
+            target_world.clone(),
+            source_entries,
+        );
         let pending = state.pending.clone();
         self.content_update_popup = Some(state);
         tokio::spawn(async move {
@@ -1590,6 +1613,10 @@ impl App {
         let Some(state) = self.content_update_popup.as_mut() else {
             return;
         };
+        if state.instance_name != instance.name {
+            self.content_update_popup = None;
+            return;
+        }
         let Some(plan) = state.plan.as_ref().map(|plan| plan.dependency_plan.clone()) else {
             return;
         };

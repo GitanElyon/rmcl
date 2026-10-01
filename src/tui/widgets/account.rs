@@ -66,7 +66,12 @@ impl AccountState {
             if let Some(result) = result {
                 match result {
                     AuthResult::Success(account) => {
-                        self.store.add(account);
+                        if let Err(error) = self.store.add(account) {
+                            crate::feedback::errors::push_message(
+                                tracing::Level::ERROR,
+                                error.to_string(),
+                            );
+                        }
                         self.add_mode = AddMode::None;
                         if self.list_state.selected.is_none() && !self.store.accounts.is_empty() {
                             self.list_state.selected = Some(0);
@@ -116,7 +121,12 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut AccountState) -> bool {
                 if !trimmed.is_empty() {
                     if state.store.has_microsoft_account() {
                         let account = auth::create_offline_account(&trimmed);
-                        state.store.add(account);
+                        if let Err(error) = state.store.add(account) {
+                            crate::feedback::errors::push_message(
+                                tracing::Level::ERROR,
+                                error.to_string(),
+                            );
+                        }
                         if state.list_state.selected.is_none() && !state.store.accounts.is_empty() {
                             state.list_state.selected = Some(0);
                         }
@@ -169,8 +179,13 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut AccountState) -> bool {
                     true
                 }
                 KeyCode::Enter => {
-                    if let Some(idx) = state.list_state.selected {
-                        state.store.set_active(idx);
+                    if let Some(idx) = state.list_state.selected
+                        && let Err(error) = state.store.set_active(idx)
+                    {
+                        crate::feedback::errors::push_message(
+                            tracing::Level::ERROR,
+                            error.to_string(),
+                        );
                     }
                     true
                 }

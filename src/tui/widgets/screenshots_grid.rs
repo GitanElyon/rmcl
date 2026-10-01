@@ -85,6 +85,8 @@ impl Default for ScreenshotsState {
 
 impl ScreenshotsState {
     pub fn start_load(&mut self, instances_dir: &Path, instance_name: &str) {
+        self.pending_entries = Arc::new(Mutex::new(None));
+        self.pending_images = Arc::new(Mutex::new(Vec::new()));
         self.loading = true;
         self.loaded_for = Some(instance_name.to_string());
         self.entries.clear();
@@ -217,6 +219,7 @@ impl ScreenshotsState {
 
     pub fn remove_path(&mut self, path: &Path) {
         self.entries.retain(|entry| entry.path != path);
+        self.pending_images = Arc::new(Mutex::new(Vec::new()));
         self.protocols.clear();
         self.requested.clear();
 

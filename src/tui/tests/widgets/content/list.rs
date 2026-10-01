@@ -967,7 +967,7 @@ fn streamed_entries_without_icons_are_visible_immediately() {
 }
 
 #[tokio::test]
-async fn installed_icon_decode_survives_manifest_binding_and_cache_restore() {
+async fn installed_icon_decode_survives_manifest_binding() {
     let mut state = ContentListState::default();
     state.set_installed_options(
         &crate::tui::widgets::content::discovery::DiscoveryFilters::default(),
@@ -1003,30 +1003,62 @@ async fn installed_icon_decode_survives_manifest_binding_and_cache_restore() {
     })
     .await
     .expect("installed icon decoded after manifest binding");
+}
 
-    let directory = tempfile::tempdir().unwrap();
-    state.start_load(
-        directory.path(),
-        "other",
-        crate::instance::content::mods::scan_one_mod,
-        "jar",
-    );
-    state.start_load(
-        directory.path(),
-        "main",
-        crate::instance::content::mods::scan_one_mod,
-        "jar",
-    );
-    assert!(state.filtered_indices().is_empty());
-    state.request_image_loads(&picker);
+#[tokio::test]
+async fn switching_back_rescans_content_changed_while_inactive() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::write(first.join("old.jar"), b"old").unwrap();
+    let mut state = ContentListState::default();
+    let scanner = crate::instance::content::mods::scan_one_mod;
+    state.start_load(&first, "first", scanner, ".jar");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while state.filtered_indices().is_empty() {
-            state.drain_image_loads(&picker);
+        while state.loading {
+            state.drain_pending();
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("cached installed icon decoded");
+    .unwrap();
+    assert_eq!(state.entries.len(), 1);
+
+    state.start_load(&second, "second", scanner, ".jar");
+    std::fs::remove_file(first.join("old.jar")).unwrap();
+    std::fs::write(first.join("new.jar"), b"new").unwrap();
+    state.start_load(&first, "first", scanner, ".jar");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while state.loading {
+            state.drain_pending();
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(state.entries.len(), 1);
+    assert_eq!(state.entries[0].path, first.join("new.jar"));
+}
+
+#[test]
+fn old_watcher_results_cannot_update_a_new_instance() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = ContentListState::default();
+    let old_slot = state.watcher_diff.clone();
+    state.watch_dir(temp.path().to_owned());
+    *old_slot.lock().unwrap() = Some(super::WatcherDiff {
+        toggled: vec![(
+            "test".to_owned(),
+            false,
+            temp.path().join("test.jar.disabled"),
+        )],
+        removed: Vec::new(),
+        added: Vec::new(),
+    });
+
+    assert!(state.drain_watcher().toggles.is_empty());
 }
 
 #[test]

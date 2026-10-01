@@ -74,6 +74,7 @@ fn snapshot() -> UpdateSnapshot {
 #[test]
 fn update_review_reuses_content_rows() {
     let mut state = State::checking(
+        "Instance".to_owned(),
         ContentKind::Mod,
         None,
         vec![entry("Example Mod", "mods/example.jar")],
@@ -101,6 +102,7 @@ fn update_conflicts_explain_why_the_item_was_not_updated() {
                 .to_owned(),
         });
     let mut state = State::checking(
+        "Instance".to_owned(),
         ContentKind::Mod,
         None,
         vec![entry("Example Mod", "mods/example.jar")],

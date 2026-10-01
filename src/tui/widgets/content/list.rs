@@ -170,12 +170,6 @@ enum ContentStreamUpdate {
     },
 }
 
-struct CachedList {
-    entries: Vec<ContentEntry>,
-    selected: Option<usize>,
-    sort_metadata: HashMap<std::path::PathBuf, FileSortMetadata>,
-}
-
 struct FileSortMetadata {
     name: String,
     size: Option<u64>,
@@ -283,7 +277,6 @@ pub struct ContentListState {
     display_metadata: HashMap<String, DisplayMetadata>,
     pub search: crate::tui::widgets::search::SearchState,
     filter_search: bool,
-    cache: HashMap<String, CachedList>,
     sort_metadata: RefCell<HashMap<std::path::PathBuf, FileSortMetadata>>,
     filtered_cache: RefCell<Option<CachedSelection>>,
     stream_rx: Option<mpsc::Receiver<ContentStreamUpdate>>,
@@ -337,7 +330,6 @@ impl Default for ContentListState {
             display_metadata: HashMap::new(),
             search: crate::tui::widgets::search::SearchState::default(),
             filter_search: true,
-            cache: HashMap::new(),
             sort_metadata: RefCell::new(HashMap::new()),
             filtered_cache: RefCell::new(None),
             stream_rx: None,
@@ -1303,6 +1295,7 @@ impl ContentListState {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         self._watcher = None;
+        self.watcher_diff = Arc::new(Mutex::new(None));
 
         let watcher_diff = self.watcher_diff.clone();
         let ext: &'static str = self.content_ext.unwrap_or(".jar");
@@ -1678,8 +1671,6 @@ async fn load_installed_version(
 impl ContentListState {
     pub fn forget_instance(&mut self, instance_name: &str) {
         let world_prefix = format!("{instance_name}:");
-        self.cache
-            .retain(|source, _| source != instance_name && !source.starts_with(&world_prefix));
         if self
             .loaded_for
             .as_deref()
@@ -1705,49 +1696,6 @@ impl ContentListState {
         self.requested_images.clear();
         self.pending_entry_images.clear();
         self.pending_removals.clear();
-
-        if let Some(prev) = self.loaded_for.take()
-            && !self.entries.is_empty()
-        {
-            tracing::trace!(
-                "Caching {} content entries for {}",
-                self.entries.len(),
-                prev
-            );
-            self.cache.insert(
-                prev,
-                CachedList {
-                    entries: std::mem::take(&mut self.entries),
-                    selected: self.list_state.selected,
-                    sort_metadata: std::mem::take(self.sort_metadata.get_mut()),
-                },
-            );
-        }
-
-        // files modified while another instance was active become a real problem.
-        if let Some(cached) = self.cache.remove(instance_name) {
-            self.entries = cached.entries;
-            self.invalidate_filtered();
-            *self.sort_metadata.get_mut() = cached.sort_metadata;
-            self.pending_entry_images.extend(
-                self.entries
-                    .iter()
-                    .filter(|entry| entry.icon_bytes.is_some() || entry.provider_icon)
-                    .map(|entry| entry.file_stem.clone()),
-            );
-            self.rebuild_display_metadata();
-            self.list_state.selected = cached.selected;
-            self.loading = false;
-            self.stream_rx = None;
-            self.loaded_for = Some(instance_name.to_string());
-            self.update_scrollbar();
-            tracing::debug!(
-                "Restored {} cached content entries for {}",
-                self.entries.len(),
-                instance_name
-            );
-            return;
-        }
 
         let stream = self.start_stream(instance_name);
 

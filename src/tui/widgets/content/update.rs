@@ -30,6 +30,7 @@ pub enum Phase {
 }
 
 pub struct State {
+    pub instance_name: String,
     pub phase: Phase,
     pub plan: Option<BulkUpdatePlan>,
     pub snapshot: Option<UpdateSnapshot>,
@@ -44,11 +45,13 @@ pub struct State {
 
 impl State {
     pub fn checking(
+        instance_name: String,
         kind: ContentKind,
         target_world: Option<(String, PathBuf)>,
         entries: Vec<ContentEntry>,
     ) -> Self {
         Self {
+            instance_name,
             phase: Phase::Checking,
             plan: None,
             snapshot: None,

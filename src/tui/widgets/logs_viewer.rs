@@ -66,6 +66,7 @@ impl Default for LogsState {
 
 impl LogsState {
     pub fn start_load(&mut self, instances_dir: &Path, instance_name: &str) {
+        self.pending = Arc::new(Mutex::new(None));
         self.loading = true;
         self.loaded_for = Some(instance_name.to_string());
         self.instances_dir_cache = Some(instances_dir.to_path_buf());
@@ -149,6 +150,7 @@ impl LogsState {
 
         let dir = dir.clone();
         let tag = name.clone();
+        self.pending = Arc::new(Mutex::new(None));
         let pending = self.pending.clone();
 
         tokio::spawn(async move {

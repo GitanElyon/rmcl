@@ -667,6 +667,43 @@ fn confirmed_account_delete_updates_the_account_panel() {
 }
 
 #[test]
+fn typing_d_in_offline_account_name_does_not_open_delete_confirmation() {
+    let mut ui = UiHarness::new();
+    ui.add_account("MicrosoftPlayer");
+    ui.app.focused = FocusedArea::Account;
+
+    ui.key(KeyCode::Char('a'));
+    ui.key(KeyCode::Char('o'));
+    ui.key(KeyCode::Char('d'));
+
+    assert_eq!(ui.app.focused, FocusedArea::Account);
+    assert!(matches!(
+        &ui.app.account_state.add_mode,
+        crate::tui::widgets::account::AddMode::OfflineNameInput(name) if name == "d"
+    ));
+}
+
+#[test]
+fn switching_instances_discards_another_instances_update_review() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("A");
+    ui.add_instance("B");
+    let mut update = crate::tui::widgets::content::update::State::checking(
+        "A".to_owned(),
+        ContentKind::Mod,
+        None,
+        Vec::new(),
+    );
+    update.phase = crate::tui::widgets::content::update::Phase::Review;
+    ui.app.content_update_popup = Some(update);
+    ui.app.instances_state.list_state.selected = Some(1);
+
+    ui.key(KeyCode::Enter);
+
+    assert!(ui.app.content_update_popup.is_none());
+}
+
+#[test]
 fn settings_panel_routes_legacy_edit_keys_to_tui_popups() {
     let mut ui = UiHarness::new();
     ui.add_instance("settings-test");

@@ -252,7 +252,10 @@ pub fn render(
         render_separator(frame, chunks[1], focused, state.pane);
         render_instance_info(frame, chunks[2], focused, state, instance);
     } else {
-        render_profile_list(frame, inner, focused, state);
+        match state.pane {
+            SettingsPane::Profile => render_profile_list(frame, inner, focused, state),
+            SettingsPane::Info => render_instance_info(frame, inner, focused, state, instance),
+        }
     }
 
     if let AddMode::ProfileName(name) = &state.add_mode {

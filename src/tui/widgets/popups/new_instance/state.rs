@@ -35,6 +35,7 @@ pub enum WizardStep {
 
 #[derive(Debug, Clone)]
 pub struct WizardState {
+    request_epoch: u64,
     pub step: WizardStep,
     pub name_state: TextState<'static>,
     pub versions: LoadState<Vec<GameVersion>>,
@@ -49,6 +50,7 @@ pub struct WizardState {
 impl Default for WizardState {
     fn default() -> Self {
         Self {
+            request_epoch: 0,
             step: WizardStep::Name,
             name_state: TextState::new().with_focus(FocusState::Focused),
             versions: LoadState::Idle,
@@ -64,7 +66,9 @@ impl Default for WizardState {
 
 impl WizardState {
     pub fn reset(&mut self) {
+        let next_epoch = self.request_epoch.wrapping_add(1);
         *self = WizardState::default();
+        self.request_epoch = next_epoch;
     }
 
     pub fn selected_version(&self) -> Option<&GameVersion> {
@@ -381,12 +385,17 @@ pub(crate) fn ensure_versions_loaded(state: &mut WizardState) {
     }
 
     state.versions = LoadState::Loading;
+    state.request_epoch = state.request_epoch.wrapping_add(1);
+    let epoch = state.request_epoch;
     let versions_arc = WIZARD_STATE.clone();
     let loader = state.selected_loader();
     tokio::spawn(async move {
         match super::super::version_lists::game_versions(loader).await {
             Ok(versions) => match versions_arc.lock() {
                 Ok(mut s) => {
+                    if s.request_epoch != epoch || !matches!(s.versions, LoadState::Loading) {
+                        return;
+                    }
                     s.versions = LoadState::Loaded(versions);
                     clamp_version_index(&mut s);
                 }
@@ -396,6 +405,9 @@ pub(crate) fn ensure_versions_loaded(state: &mut WizardState) {
             },
             Err(e) => match versions_arc.lock() {
                 Ok(mut s) => {
+                    if s.request_epoch != epoch || !matches!(s.versions, LoadState::Loading) {
+                        return;
+                    }
                     s.versions = LoadState::Error(e.to_string());
                 }
                 Err(lock_error) => {
@@ -416,11 +428,17 @@ pub(crate) fn ensure_loader_versions_loaded(
     }
 
     state.loader_versions = LoadState::Loading;
+    state.request_epoch = state.request_epoch.wrapping_add(1);
+    let epoch = state.request_epoch;
     let versions_arc = WIZARD_STATE.clone();
     tokio::spawn(async move {
         match super::super::version_lists::loader_versions(loader, &game_version).await {
             Ok(versions) => match versions_arc.lock() {
                 Ok(mut s) => {
+                    if s.request_epoch != epoch || !matches!(s.loader_versions, LoadState::Loading)
+                    {
+                        return;
+                    }
                     s.loader_versions = LoadState::Loaded(versions);
                     clamp_loader_version_index(&mut s);
                 }
@@ -430,6 +448,10 @@ pub(crate) fn ensure_loader_versions_loaded(
             },
             Err(e) => match versions_arc.lock() {
                 Ok(mut s) => {
+                    if s.request_epoch != epoch || !matches!(s.loader_versions, LoadState::Loading)
+                    {
+                        return;
+                    }
                     s.loader_versions = LoadState::Error(e.to_string());
                 }
                 Err(lock_error) => {

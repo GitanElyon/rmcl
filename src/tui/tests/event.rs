@@ -200,11 +200,10 @@ fn structural_settings_update_repairs_runtime_before_persisting() {
                 .mount(&server)
                 .await;
         }
+        let asset_index = serde_json::to_vec(&serde_json::json!({"objects": {}})).unwrap();
         Mock::given(method("GET"))
             .and(path("/assets.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "objects": {}
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(asset_index.clone()))
             .expect(1)
             .mount(&server)
             .await;
@@ -252,7 +251,7 @@ fn structural_settings_update_repairs_runtime_before_persisting() {
                 "assetIndex": {
                     "id": "1.21.2",
                     "url": format!("{}/assets.json", server.uri()),
-                    "sha1": "unused"
+                    "sha1": sha1(&asset_index)
                 },
                 "downloads": {
                     "client": {
@@ -364,6 +363,7 @@ fn editor_kind_is_detected_from_the_executable_name() {
     assert!(editor_runs_in_terminal("/usr/bin/nvim"));
     assert!(editor_runs_in_terminal("nano"));
     assert!(!editor_runs_in_terminal("/usr/bin/code"));
+    assert_eq!(editor_parts("nvim -u NONE"), ["nvim", "-u", "NONE"]);
 }
 
 #[test]

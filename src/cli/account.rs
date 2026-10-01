@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// cli handlers for account management (microsoft oauth + offline accounts)
 use std::io;
 use std::time::Duration;
 
@@ -65,7 +64,6 @@ async fn add_microsoft_account() -> CliResult {
 
     let result_arc = crate::auth::start_microsoft_auth();
 
-    // wait for the device code to become available before showing it
     loop {
         if let Ok(slot) = crate::auth::DEVICE_CODE_DISPLAY.lock()
             && let Some(info) = slot.as_ref()
@@ -77,7 +75,6 @@ async fn add_microsoft_account() -> CliResult {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    // now wait for the user to complete auth in their browser
     loop {
         if let Ok(slot) = result_arc.lock()
             && let Some(result) = slot.as_ref()

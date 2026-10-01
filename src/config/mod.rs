@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// config loading: reads config.toml from the platform config dir, creates defaults if missing.
-// everything lands in the SETTINGS static so the rest of the app can just grab it.
-
 use config::{Config as ConfigLoader, ConfigError, File};
 use std::fs;
 use std::io;
@@ -22,7 +19,6 @@ pub fn get_config_path() -> PathBuf {
         .join("rmcl")
 }
 
-// seeds the config file from the bundled default on first run
 fn ensure_config_exists() -> PathBuf {
     let config_path = get_config_path().join("config.toml");
     if !config_path.exists() {

@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// world save scanning. worlds are always directories (never zips) and store
-// their icon as icon.png. also computes an approximate size from top-level
-// files + region data so the user gets some sense of how chonky their world is.
-
 use std::{fs::File, path::Path};
 
 use flate2::read::GzDecoder;
@@ -204,7 +200,6 @@ fn dir_size_approx(path: &Path) -> u64 {
             }
         }
     }
-    // Check region folder too (main chunk data)
     let region = path.join("region");
     if let Ok(rd) = std::fs::read_dir(region) {
         for entry in rd.flatten() {

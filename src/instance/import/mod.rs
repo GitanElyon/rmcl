@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// modpack importing: parses user input, detects pack format from zip contents,
-// builds a summary, and delegates the actual import to format-specific modules.
-
 pub mod curseforge;
 pub mod mmc;
 pub mod mrpack;
@@ -28,9 +25,6 @@ pub enum ImportInput {
     LocalFile(String),
 }
 
-// figures out what the user gave us: a modrinth URL, a local pack file,
-// or just a project slug. accepts a pretty wide range of inputs so users
-// don't have to think about it.
 pub fn parse_import_input(input: &str) -> ImportInput {
     let input = input.trim();
 
@@ -78,8 +72,6 @@ pub struct ImportSummary {
     pub source: Option<crate::instance::ProviderProject>,
 }
 
-// peeks inside a zip to figure out what format it is.
-// checks provider manifests first, then mmc-pack.json.
 pub fn detect_format(path: &Path) -> Result<PackFormat, String> {
     tracing::debug!("Detecting modpack format for {}", path.display());
     let file =

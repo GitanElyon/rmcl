@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// cli entry point and clap command definitions.
-// no subcommand = launch TUI, otherwise dispatch to the appropriate handler.
 mod account;
 mod content;
 mod import;
@@ -17,9 +15,7 @@ use clap::{Arg, ArgAction, ArgGroup, Command};
 pub async fn init() {
     let matches = build_command().get_matches();
 
-    // no subcommand means the user just ran `rmcl` bare, so fall through to TUI mode
     if matches.subcommand().is_none() {
-        // force-init the theme so it's ready before the TUI renders
         let _ = &*crate::config::theme::THEME;
         if let Err(e) = crate::tui::show().await {
             tracing::error!("TUI error: {}", e);
@@ -265,7 +261,6 @@ fn build_command() -> Command {
         )
 }
 
-// mods, resource packs, and shaders all share the same list/enable/disable shape
 fn build_content_command(name: &'static str, about: &'static str) -> Command {
     Command::new(name)
         .about(format!("Manage {}", about))

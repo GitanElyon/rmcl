@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// live minecraft process log parser.
-//
 // disk launch logs stay raw, but the tui needs enough structure to color and
 // group output sanely. this parser keeps stdout/stderr as a hint, frames
 // multiline java/jvm/native bursts into events, then assigns a semantic level.

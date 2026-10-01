@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// account management panel: list, add (microsoft/offline), delete
-// microsoft auth uses the device code flow, so it polls a shared mutex
-// for the result while showing the user a code to enter in their browser
-
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -196,8 +192,6 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut AccountState) -> bool {
     }
 }
 
-// the device code arrives asynchronously from the auth thread,
-// so it gets pulled out of a global mutex once it's ready
 pub fn drain_device_code(state: &mut AccountState) {
     if let AddMode::DeviceCodeWaiting { info, .. } = &mut state.add_mode
         && info.user_code.is_empty()
@@ -335,7 +329,6 @@ fn render_account_list(
     frame.render_stateful_widget(list, area, &mut state.list_state);
 }
 
-// center a popup of given size within the terminal. nothing fancy
 fn popup_area(frame: &Frame, width: u16, height: u16) -> Rect {
     let area = frame.area();
     let x = area.x + (area.width.saturating_sub(width)) / 2;

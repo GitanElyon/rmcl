@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// theme resolution: loads theme.toml, picks a base theme (builtin or custom file),
-// then layers user color overrides on top. supports loading .toml themes from the
-// config/theme/ directory or by absolute path.
-
 use std::path::Path;
 use std::sync::{Arc, LazyLock, RwLock};
 
@@ -101,7 +97,6 @@ fn ensure_theme_exists(path: &Path) {
     let _ = std::fs::write(path, include_str!("../../assets/theme.toml"));
 }
 
-// start from a base theme, then override individual colors if the user specified any
 fn resolve_app_theme(config: &ThemeConfig) -> Box<dyn Theme> {
     let base = load_base_theme(&config.theme);
 
@@ -134,7 +129,6 @@ fn resolve_app_theme(config: &ThemeConfig) -> Box<dyn Theme> {
     })
 }
 
-// tries to find the theme: absolute path > config/theme/<name> > config/theme/<name>.toml > builtin
 fn load_base_theme(name: &str) -> Box<dyn Theme> {
     let path = if Path::new(name).is_absolute() {
         Some(std::path::PathBuf::from(name))

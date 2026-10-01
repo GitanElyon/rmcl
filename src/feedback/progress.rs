@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// global progress state shared between background tasks and the status bar widget.
-// background tasks set the action/progress, the render loop reads it every frame.
-
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};

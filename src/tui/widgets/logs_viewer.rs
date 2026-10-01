@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// split-pane log viewer: file list on the left, log content on the right.
-// supports live log tailing when the instance is running, plus search
-// filtering in both the file list and the viewer pane.
-// log scanning runs on a background thread to avoid blocking the UI.
-
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -132,7 +127,6 @@ impl LogsState {
         }
     }
 
-    // periodically re-scan log files in case new ones appeared while playing.
     pub fn try_rescan(&mut self) {
         if self.last_rescan.elapsed() < std::time::Duration::from_secs(2) {
             return;
@@ -676,8 +670,6 @@ fn log_level_style(level: LogLevel) -> Style {
     }
 }
 
-// color-code log lines by severity so errors actually stand out
-// instead of drowning in a wall of white text
 fn line_level_style(line: &str) -> Style {
     let theme = THEME.as_ref();
     let upper = line.to_uppercase();

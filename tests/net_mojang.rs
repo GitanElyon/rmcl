@@ -1,12 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// integration tests for the public mojang fetchers. wiremock stands in for
-// Mojang so tests are fast, deterministic, and don't depend on the live
-// endpoint. these are different from the #[ignore = "hits live Mojang API"]
-// tests in tests/live_apis.rs which verify the upstream schema hasn't drifted;
-// these here verify our parsing + retry envelope on synthetic responses.
-
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -112,8 +106,6 @@ async fn fetch_version_meta_returns_struct_and_raw_bytes() {
     assert_eq!(meta.downloads.client.size, 12345);
     assert_eq!(meta.java_version.unwrap().major_version, 17);
 
-    // the raw bytes must parse back to the same struct - verifies the
-    // get_json_with_raw plumbing actually captures the upstream body intact.
     let reparsed: serde_json::Value = serde_json::from_slice(&raw).expect("raw is json");
     assert_eq!(reparsed["id"], "1.20.1");
     assert_eq!(reparsed["mainClass"], "net.minecraft.client.main.Main");
@@ -214,7 +206,6 @@ async fn download_libraries_skips_when_destination_exists() {
         .await
         .expect("noop succeeds");
 
-    // file untouched, mock untouched (server drop will panic if it isn't)
     assert_eq!(std::fs::read(&existing).unwrap(), b"already there");
 }
 

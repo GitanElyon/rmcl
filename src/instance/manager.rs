@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// CRUD for instances: create, delete, rename, load, save.
-// creation is the heavy one since it downloads the game, assets, and libraries.
-
 use std::path::PathBuf;
 
 use chrono::Utc;
@@ -94,7 +91,6 @@ impl InstanceManager {
             .create_inner(name, game_version, loader, loader_version, &instance_dir)
             .await;
 
-        // clean up on failure so there's no half-baked instance left around
         if result.is_err() {
             tracing::debug!(
                 "Cleaning up incomplete instance '{}' after creation failed",

@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// system-detection helpers shared by launch and install paths. mojang
-// names some things differently from rust's std::env::consts (e.g. macOS
+// Mojang names some things differently from rust's std::env::consts (e.g. macOS
 // is "osx" in mojang profile rules), so this module is the single source
 // of truth for translating.
 

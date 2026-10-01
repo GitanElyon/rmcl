@@ -95,12 +95,10 @@ fn parses_modern_arguments_object() {
     assert_eq!(args.game.len(), 3);
     assert_eq!(args.jvm.len(), 2);
 
-    // first game arg should be a literal "--username"
     match &args.game[0] {
         Argument::Literal(s) => assert_eq!(s, "--username"),
         _ => panic!("expected literal"),
     }
-    // third game arg should be a conditional with a single-string value
     match &args.game[2] {
         Argument::Conditional { rules, value } => {
             assert_eq!(rules.len(), 1);
@@ -109,7 +107,6 @@ fn parses_modern_arguments_object() {
         }
         _ => panic!("expected conditional"),
     }
-    // second jvm arg should be a conditional with a multi-string value
     match &args.jvm[1] {
         Argument::Conditional { value, .. } => {
             assert!(matches!(value, ArgumentValue::Multiple(_)));

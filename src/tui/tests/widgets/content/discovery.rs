@@ -1428,7 +1428,6 @@ fn confirming_popup_toggles_skip_dependencies_with_s() {
     assert!(handle_key(&KeyEvent::from(KeyCode::Char('s')), &mut state));
     assert!(!state.version_popup.as_ref().unwrap().skip_dependencies);
 
-    // Toggling is blocked while loading or installing.
     state.version_popup.as_mut().unwrap().loading = true;
     assert!(handle_key(&KeyEvent::from(KeyCode::Char('s')), &mut state));
     assert!(!state.version_popup.as_ref().unwrap().skip_dependencies);
@@ -1505,7 +1504,6 @@ fn installed_mode_defaults_to_any_game_version() {
     assert_eq!(state.filters.game_version, GameVersionFilter::Any);
     assert_eq!(state.active_filter_count(), 0);
 
-    // The same Any filter counts as active in discovery mode.
     state.set_local_mode(false);
     state.filters.game_version = GameVersionFilter::Any;
     assert_eq!(state.active_filter_count(), 1);

@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// networking layer: http client, file downloads, and shared utilities
-// for fetching game assets from mojang, mod loaders, and modrinth.
-
 pub mod curseforge;
 pub mod fabric;
 pub mod forge;
@@ -181,9 +178,6 @@ impl HttpClient {
     }
 }
 
-// shared retry envelope around `client.get(url).await? -> decode`. retries
-// transient failures (timeouts, connect errors, 5xx) with exponential
-// backoff. used by both get_json and get_bytes.
 async fn get_with_retry<T, F, Fut>(client: &HttpClient, url: &str, decode: F) -> Result<T, NetError>
 where
     F: Fn(reqwest::Response) -> Fut,
@@ -230,9 +224,7 @@ async fn sleep_before_retry(kind: &str, url: &str, attempt: u32, err: &NetError)
     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
 }
 
-// streams a file to disk in chunks, calling progress_cb(downloaded, total) along the way.
-// total will be 0 if the server doesn't send content-length, so callers
-// should handle that gracefully. retries transient failures with exponential backoff.
+// total is 0 without a Content-Length; callers must handle unknown sizes.
 pub async fn download_file(
     client: &HttpClient,
     url: &str,
@@ -265,7 +257,6 @@ pub async fn download_file(
     result
 }
 
-// single attempt at downloading a file to disk
 async fn download_file_once(
     client: &HttpClient,
     url: &str,

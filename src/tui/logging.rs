@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// sets up the tracing subscriber stack: file logging, tui-logger widget, and
-// our custom StatusLayer that feeds WARN/ERROR events into the error toast system.
-// also keeps an in-memory ring buffer of log lines for the log overlay viewer.
-
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -24,7 +20,6 @@ use crate::feedback::errors::{self as error_buffer, ErrorEvent};
 const MINECRAFT_LOG_TARGET: &str = "mc_instance";
 const DEFAULT_FILE_FILTER: &str = "warn,rmcl=trace";
 
-// capped at 5000 lines so it doesn't eat all the ram if something goes haywire
 static APP_LOG_LINES: LazyLock<Arc<Mutex<Vec<String>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
 
@@ -44,8 +39,6 @@ fn push_app_log(line: String) {
 
 // returns a WorkerGuard that must be held alive for the duration of the
 // program, otherwise the file logging thread gets dropped immediately.
-// yes, you will spend 30 minutes debugging "why aren't my logs writing"
-// before you remember this. ask me how i know.
 pub fn init() -> WorkerGuard {
     let log_dir = match dirs_next::cache_dir() {
         Some(d) => d.join("rmcl"),
@@ -118,9 +111,6 @@ fn open_log_writer(log_dir: &Path) -> (NonBlocking, WorkerGuard) {
     }
 }
 
-// custom tracing layer that intercepts all log events:
-// - everything gets appended to the in-memory log buffer for the overlay viewer
-// - WARN and ERROR additionally get pushed as error toasts
 struct StatusLayer;
 
 impl StatusLayer {

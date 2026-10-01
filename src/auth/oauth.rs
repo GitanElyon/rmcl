@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// microsoft oauth device code flow for minecraft authentication.
-// the flow goes: MSA device code -> MSA token -> xbox/mc token exchange -> mc profile fetch.
 // device code auth is used because it works without a redirect URI, which is nice for a TUI.
 
 use std::sync::{Arc, LazyLock, Mutex};
@@ -50,7 +48,6 @@ fn normalize_profile_uuid(id: &str) -> Option<String> {
     })
 }
 
-// shared slot so the TUI can poll for the device code to show the user
 pub static DEVICE_CODE_DISPLAY: LazyLock<Arc<Mutex<Option<DeviceCodeInfo>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(None)));
 
@@ -92,8 +89,6 @@ async fn run_full_oauth_flow() -> Result<(String, Option<String>), String> {
     Ok((ms_access_token, ms_refresh_token))
 }
 
-// kicks off auth on a background task, returns a mutex the caller can poll for the result.
-// the TUI checks DEVICE_CODE_DISPLAY for the code to show, and this mutex for completion.
 pub fn start_microsoft_auth() -> Arc<Mutex<Option<AuthResult>>> {
     let result: Arc<Mutex<Option<AuthResult>>> = Arc::new(Mutex::new(None));
     let result_clone = result.clone();
@@ -183,7 +178,6 @@ fn valid_cached_mc_token(account: &Account, now: i64) -> Option<&str> {
     }
 }
 
-// returns (mc_access_token, new_refresh_token, new_mc_token_expires_at).
 // cached tokens return no expiry so callers don't rewrite the account store.
 pub async fn refresh_and_get_token(
     account: &Account,

@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// scanning and toggling instance content (mods, resource packs, shaders, worlds).
 // minecraft uses a ".disabled" suffix convention for disabled content, so this leans on that heavily.
 
 pub mod datapacks;
@@ -30,8 +29,6 @@ pub use worlds::{scan_one_world, scan_worlds};
 
 use std::io::Read;
 
-// figures out if a file is enabled or disabled based on the ".disabled" suffix,
-// and strips the extension to get a clean stem name
 pub(crate) fn parse_enabled_stem(file_name: &str, ext: &str) -> Option<(bool, String)> {
     let disabled_ext = format!("{ext}.disabled");
     if let Some(stem) = file_name.strip_suffix(&disabled_ext) {
@@ -43,7 +40,6 @@ pub(crate) fn parse_enabled_stem(file_name: &str, ext: &str) -> Option<(bool, St
     }
 }
 
-// same idea but for directories, which don't have a file extension to strip
 pub(crate) fn parse_enabled_stem_dir(file_name: &str) -> (bool, String) {
     if let Some(stem) = file_name.strip_suffix(".disabled") {
         (false, stem.to_string())

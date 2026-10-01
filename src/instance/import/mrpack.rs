@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// modrinth .mrpack import: parse the manifest, download all the mods,
-// and extract config/resource overrides from the zip
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -43,7 +40,6 @@ pub struct MrpackFile {
     pub file_size: u64,
 }
 
-// .mrpack is just a zip with modrinth.index.json at the root
 pub fn parse_mrpack(path: &Path) -> Result<MrpackIndex, String> {
     tracing::debug!("Parsing .mrpack manifest from {}", path.display());
     let file = std::fs::File::open(path).map_err(|e| format!("Cannot open .mrpack: {e}"))?;
@@ -63,8 +59,6 @@ pub fn parse_mrpack(path: &Path) -> Result<MrpackIndex, String> {
     Ok(index)
 }
 
-// mrpack dependencies use keys like "fabric-loader", "forge", etc.
-// checks in priority order and returns the first match.
 pub fn loader_from_dependencies(
     deps: &HashMap<String, String>,
 ) -> (Option<ModLoader>, Option<String>) {
@@ -132,7 +126,6 @@ pub fn build_summary(path: &Path) -> Result<ImportSummary, String> {
     })
 }
 
-// peek into the zip to count files under overrides/ and client-overrides/
 fn count_overrides(mrpack_path: &Path) -> Result<usize, String> {
     let file = std::fs::File::open(mrpack_path).map_err(|e| e.to_string())?;
     let archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;

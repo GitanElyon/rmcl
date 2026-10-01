@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// forge mod loader: version discovery via promotions API, download and
-// installation. modern forge runs a java installer, old forge (pre-1.13ish)
-// doesn't support headless install so we extract directly from the jar.
-
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -23,8 +19,6 @@ struct ForgePromotions {
     promos: HashMap<String, String>,
 }
 
-// forge promotions use keys like "1.20.1-recommended", "1.20.1-latest"
-// so this filters by game version prefix and extracts the forge version values
 pub async fn fetch_forge_versions(
     client: &HttpClient,
     game_version: &str,
@@ -32,7 +26,6 @@ pub async fn fetch_forge_versions(
     fetch_forge_versions_from(client, FORGE_PROMOTIONS_URL, game_version).await
 }
 
-// same as fetch_forge_versions but lets tests point at a wiremock server.
 pub async fn fetch_forge_versions_from(
     client: &HttpClient,
     promotions_url: &str,
@@ -58,8 +51,6 @@ pub async fn fetch_forge_versions_from(
     Ok(versions)
 }
 
-// extracts unique game versions from the promotion keys by splitting off
-// the "-recommended"/"-latest" suffix
 pub async fn fetch_forge_game_versions(client: &HttpClient) -> Result<Vec<GameVersion>, NetError> {
     fetch_forge_game_versions_from(client, FORGE_PROMOTIONS_URL).await
 }

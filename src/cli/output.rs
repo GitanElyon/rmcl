@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// plain-text table rendering for CLI output. no fancy box-drawing,
-// just left-aligned columns with two-space gaps. keeps it pipeable.
 use chrono::{DateTime, Utc};
 use ratatui::text::Span;
 
@@ -47,7 +45,6 @@ fn display_width(value: &str) -> usize {
     Span::raw(value).width()
 }
 
-// find the widest value in each column to pad everything evenly
 fn column_widths(headers: &[&str], rows: &[Vec<String>]) -> Vec<usize> {
     let mut widths: Vec<usize> = headers.iter().map(|header| display_width(header)).collect();
 

@@ -55,7 +55,6 @@ pub struct ContentEntry {
     pub icon_lines: Option<Vec<Vec<IconCell>>>,
 }
 
-// enable/disable by renaming the file with/without ".disabled" suffix.
 pub fn toggle_entry(entry: &ContentEntry) -> Result<(), std::io::Error> {
     toggle_entry_path(entry).map(drop)
 }

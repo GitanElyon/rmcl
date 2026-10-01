@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// fabric mod loader: fetches loader metadata and downloads libraries
-// from fabric's maven. structurally very similar to quilt (they forked).
-
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -51,9 +48,6 @@ pub async fn fetch_fabric_game_versions(client: &HttpClient) -> Result<Vec<GameV
     fetch_fabric_game_versions_from(client, FABRIC_META_BASE).await
 }
 
-// same as fetch_fabric_game_versions but lets tests point at a wiremock
-// server. fabric's API is hierarchical, so we take the base URL and append
-// the rest of the path inside.
 pub async fn fetch_fabric_game_versions_from(
     client: &HttpClient,
     meta_base: &str,
@@ -151,8 +145,6 @@ pub async fn fetch_fabric_profile_with_raw_from(
     client.get_json_with_raw(&url, "Fabric profile").await
 }
 
-// each fabric library entry has a maven coordinate and a base url.
-// the coordinate gets resolved to a path and combined with the url to download.
 pub async fn download_fabric_libraries(
     client: &HttpClient,
     profile: &FabricProfile,

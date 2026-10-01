@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// state machine and input handling for the new instance wizard.
-// flow: Name -> Loader -> Version -> LoaderVersion -> Confirm
-// version lists are fetched lazily from the network when you reach that step.
-
 use crate::instance::{loader::GameVersion, models::ModLoader};
 use crate::tui::widgets::instances;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -16,7 +12,6 @@ use super::super::LoadState;
 
 pub(crate) static WIZARD_STATE: LazyLock<Arc<Mutex<WizardState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(WizardState::default())));
-// populated on confirm, consumed by the main event loop to actually create the instance
 pub(crate) static WIZARD_RESULT: LazyLock<Arc<Mutex<Option<WizardParams>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(None)));
 
@@ -163,7 +158,6 @@ fn handle_version_key(
     key_event: &KeyEvent,
     instances_state: &mut instances::State,
 ) {
-    // Search mode: route char input to search query
     if state.version_search.active {
         match key_event.code {
             KeyCode::Esc => {
@@ -176,12 +170,8 @@ fn handle_version_key(
                 clamp_version_index(state);
                 return;
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                // fall through to navigation below
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                // fall through to navigation below
-            }
+            KeyCode::Char('j') | KeyCode::Down => {}
+            KeyCode::Char('k') | KeyCode::Up => {}
             KeyCode::Char(c) => {
                 state.version_search.push(c);
                 state.version_idx = 0; // reset to top of filtered list
@@ -384,8 +374,7 @@ pub(crate) fn clamp_loader_version_index(state: &mut WizardState) {
     }
 }
 
-// only fires on the Idle -> Loading transition to avoid spamming requests.
-// the spawned task writes results back into WIZARD_STATE when done.
+// Spawn only on Idle -> Loading to avoid repeating network requests per frame.
 pub(crate) fn ensure_versions_loaded(state: &mut WizardState) {
     if !matches!(state.versions, LoadState::Idle) {
         return;

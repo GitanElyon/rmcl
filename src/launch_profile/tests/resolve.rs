@@ -54,7 +54,6 @@ fn merge_carries_parent_inherits_from() {
 
 #[test]
 fn merge_with_root_parent_clears_inherits_from() {
-    // parent with no inherits_from means the chain ends.
     let mut child = empty_profile("child");
     child.inherits_from = Some("parent".into());
     let parent = empty_profile("parent");
@@ -109,8 +108,6 @@ fn child_library_supersedes_parent_with_same_group_artifact() {
     ];
     let merged = merge_into(child, parent);
     let names: Vec<_> = merged.libraries.iter().map(|l| l.name.as_str()).collect();
-    // parent's log4j-core is filtered (superseded by child); parent's
-    // lwjgl stays (no conflict); child's log4j and forge come last.
     assert_eq!(
         names,
         vec![
@@ -128,12 +125,10 @@ fn coord_key_extracts_group_artifact() {
         coord_key("org.apache.logging.log4j:log4j-core:2.17.0"),
         "org.apache.logging.log4j:log4j-core"
     );
-    // with classifier
     assert_eq!(
         coord_key("org.lwjgl:lwjgl:3.3.1:natives-linux"),
         "org.lwjgl:lwjgl"
     );
-    // malformed (no colons) - return as-is
     assert_eq!(coord_key("malformed"), "malformed");
 }
 
@@ -346,7 +341,6 @@ async fn resolve_errors_when_parent_is_invalid_json() {
 async fn resolve_multi_level_chain_merges_all_parents() {
     let tmp = TempDir::new().unwrap();
 
-    // chain: grandchild -> child -> root (vanilla).
     let mut root = empty_profile("1.20.1");
     root.main_class = Some("net.minecraft.client.main.Main".into());
     root.libraries = vec![lib("vanilla-lib")];
@@ -368,7 +362,6 @@ async fn resolve_multi_level_chain_merges_all_parents() {
         resolved.main_class.as_deref(),
         Some("net.minecraft.client.main.Main")
     );
-    // libs: root ++ child ++ grandchild (each parent prepended)
     let names: Vec<_> = resolved.libraries.iter().map(|l| l.name.as_str()).collect();
     assert_eq!(names, vec!["vanilla-lib", "forge-lib", "modpack-lib"]);
 }
@@ -377,7 +370,6 @@ async fn resolve_multi_level_chain_merges_all_parents() {
 async fn resolve_detects_circular_chain() {
     let tmp = TempDir::new().unwrap();
 
-    // a -> b -> a (cycle)
     let mut a = empty_profile("a");
     a.inherits_from = Some("b".into());
     write_profile(tmp.path(), &a);
@@ -386,7 +378,6 @@ async fn resolve_detects_circular_chain() {
     b.inherits_from = Some("a".into());
     write_profile(tmp.path(), &b);
 
-    // start from a fresh "a" profile that asks to inherit from b
     let mut entry = empty_profile("a");
     entry.inherits_from = Some("b".into());
 
@@ -401,8 +392,6 @@ async fn resolve_detects_circular_chain() {
 async fn resolve_caps_depth() {
     let tmp = TempDir::new().unwrap();
 
-    // build a chain 0 -> 1 -> 2 -> ... -> 10. with cap of 8, hitting 10
-    // should fail with DepthExceeded.
     for i in 0..=10 {
         let mut p = empty_profile(&format!("v{i}"));
         if i < 10 {

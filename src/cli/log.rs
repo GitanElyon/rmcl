@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// viewing minecraft log files from the CLI, with optional `--follow` for tailing
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -67,7 +66,6 @@ async fn show_log(matches: &ArgMatches) -> CliResult {
     Ok(())
 }
 
-// if no file is specified, grab the most recent log (first from the sorted scan)
 pub(crate) fn resolve_log_path(
     instances_dir: &Path,
     instance: &str,

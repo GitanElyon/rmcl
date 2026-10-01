@@ -1,9 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// forge installation. modern forge runs a java installer, old forge (pre-1.13)
-// can't run headless so we extract the profile and libraries from the jar
-// directly. the installer jar gets cleaned up either way.
+// Old Forge installers cannot run headless, so their profiles and libraries
+// must be extracted from the jar instead.
 
 use std::path::Path;
 
@@ -85,7 +84,6 @@ impl ModLoaderInstaller for ForgeInstaller {
         let profile_filename = format!("forge-{game_version}-{loader_version}.json");
 
         if has_legacy_install_profile(&installer_jar) {
-            // old forge: no --installClient support, extract directly from jar
             tracing::debug!("Forge installer uses legacy install_profile.json path");
             if let Err(e) =
                 install_forge_from_profile(client, &installer_jar, meta_dir, &profile_filename)
@@ -95,7 +93,6 @@ impl ModLoaderInstaller for ForgeInstaller {
                 return Err(e);
             }
         } else {
-            // modern forge: run the java installer
             let java_path = java_path.map(str::to_owned).unwrap_or_else(|| {
                 crate::config::SETTINGS
                     .read()
@@ -110,7 +107,6 @@ impl ModLoaderInstaller for ForgeInstaller {
                 return Err(InstallError::Installer(e));
             }
 
-            // extract the profile from what the installer just wrote to disk
             save_forge_profile(instance_dir, meta_dir, game_version, loader_version)
                 .map_err(InstallError::Installer)?;
         }
@@ -271,7 +267,6 @@ pub(crate) async fn install_forge_from_profile(
             InstallError::Installer(InstallerError::Profile("missing install.path".into()))
         })?;
 
-    // extract the universal jar to the correct maven location
     let universal_maven_path = crate::instance::loader::maven::maven_coord_to_path(
         install_path_coord,
     )

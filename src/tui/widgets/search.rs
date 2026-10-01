@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// reusable incremental search state used across multiple widgets.
-// handles case-insensitive filtering and inline match highlighting.
-
 use crossterm::event::KeyModifiers;
 use ratatui::{
     style::{Modifier, Style},
@@ -53,8 +50,6 @@ impl SearchState {
         text.to_lowercase().contains(&self.query.to_lowercase())
     }
 
-    // splits text into spans, bolding+underlining the parts that match
-    // the query so every searchable widget can use the same styling
     pub fn highlight_spans(&self, text: &str, base_style: Style) -> Vec<Span<'static>> {
         if self.query.is_empty() {
             return vec![Span::styled(text.to_owned(), base_style)];
@@ -94,7 +89,6 @@ impl SearchState {
         Line::from(self.highlight_spans(text, base_style))
     }
 
-    // renders the "/ query█" indicator in the block title bar
     pub fn title_line(&self) -> Option<Line<'static>> {
         if !self.active && self.query.is_empty() {
             return None;

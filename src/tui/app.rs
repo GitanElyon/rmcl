@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// app state: holds everything the TUI needs between frames.
-// this is basically the "god struct" of the UI. not ideal, but ratatui
-// kinda pushes you into this pattern since you need mutable access
-// to all the widget states during rendering.
-
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -15,8 +10,6 @@ use tachyonfx::Effect;
 use super::widgets::{self, instances};
 use crate::instance::{InstanceConfig, InstanceManager};
 
-// background tasks (instance creation, import) push completed configs here
-// so the main loop can pick them up without blocking
 pub(super) static PENDING_INSTANCES: LazyLock<Arc<Mutex<Vec<InstanceConfig>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
 pub(super) static COMPLETED_INSTANCE_SETTINGS_UPDATES: LazyLock<Arc<Mutex<Vec<InstanceConfig>>>> =
@@ -78,7 +71,6 @@ pub(super) struct ProviderConflictState {
     pub selected: usize,
 }
 
-// lifecycle of an error toast animation: slide in -> sit there -> fade out
 pub(super) enum ErrorEffectState {
     SlidingIn(Effect, std::time::Instant),
     Idle,

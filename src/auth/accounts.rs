@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// account management: persistence, switching active accounts, and offline uuid generation
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};

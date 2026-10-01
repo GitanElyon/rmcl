@@ -4,8 +4,6 @@
 use super::*;
 use std::io::Write;
 
-// builds an in-memory zip with the given entries, writes it to tmp, and
-// returns the path. shared by parse_add_opens tests.
 fn make_zip(tmp: &Path, name: &str, entries: &[(&str, &[u8])]) -> PathBuf {
     let path = tmp.join(name);
     let file = std::fs::File::create(&path).unwrap();
@@ -29,7 +27,6 @@ fn strip_replaced_libs_removes_dominated_prefixes() {
         PathBuf::from("/libs/commons-compress-1.4.1.jar"),
         PathBuf::from("/libs/commons-io-2.4.jar"),
         PathBuf::from("/libs/guava-15.0.jar"),
-        // these stay
         PathBuf::from("/libs/log4j-core-2.0.jar"),
         PathBuf::from("/libs/guava-21.0.jar"),
     ];
@@ -130,8 +127,6 @@ fn add_lwjgl3_inserts_only_jars_that_exist() {
     let mut classpath = vec![PathBuf::from("/leading/forge-patches.jar")];
     add_lwjgl3(lib_dir, &mut classpath);
 
-    // forge-patches stays at index 0; lwjgl core is inserted at index 1.
-    // none of the other modules existed so nothing else was added.
     assert_eq!(classpath[0], PathBuf::from("/leading/forge-patches.jar"));
     assert_eq!(classpath[1], core_jar);
     assert_eq!(classpath.len(), 2);

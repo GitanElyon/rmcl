@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// quilt mod loader: fabric fork with a nearly identical metadata API.
-// if you're getting deja vu reading this after fabric.rs, that's why.
-
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -48,8 +45,6 @@ pub async fn fetch_quilt_game_versions(client: &HttpClient) -> Result<Vec<GameVe
     fetch_quilt_game_versions_from(client, QUILT_META_BASE).await
 }
 
-// same as fetch_quilt_game_versions but lets tests point at a wiremock
-// server. quilt mirrors the fabric API shape.
 pub async fn fetch_quilt_game_versions_from(
     client: &HttpClient,
     meta_base: &str,

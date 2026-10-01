@@ -1,12 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// mod scanning and loader-specific metadata extraction.
-// jar files are just zips, so it cracks them open looking for loader-specific
-// metadata (fabric.mod.json, quilt.mod.json, mods.toml, mcmod.info) to get
-// names, descriptions, and icons. if none of those work, falls back to common
-// root-level icon paths (logo.png, icon.png, pack.png) or just the filename.
-
 use std::io::Read;
 use std::path::Path;
 
@@ -47,7 +41,6 @@ fn icon_path_from_value(value: &serde_json::Value) -> String {
     }
 }
 
-// quilt puts its metadata under a "metadata" sub-object
 #[derive(Deserialize, Default)]
 struct QuiltModJson {
     #[serde(default)]
@@ -142,10 +135,6 @@ pub fn scan_mods(instances_dir: &Path, instance_name: &str) -> Vec<ContentEntry>
     entries
 }
 
-// tries each loader's metadata file to extract name, description, and icon.
-// checks fabric.mod.json, quilt.mod.json, META-INF/mods.toml (forge),
-// META-INF/neoforge.mods.toml, and mcmod.info (legacy forge). if none of
-// those yield an icon, falls back to common root-level paths.
 fn read_mod_metadata(jar_path: &Path) -> (String, String, String, Option<Vec<u8>>) {
     let file = match std::fs::File::open(jar_path) {
         Ok(file) => file,
@@ -197,7 +186,6 @@ fn read_mod_metadata(jar_path: &Path) -> (String, String, String, Option<Vec<u8>
         }
     }
 
-    // no recognized metadata at all, try common icon paths
     let icon_bytes = try_fallback_icons(&mut archive);
     tracing::trace!(
         "No recognized mod metadata in {}; fallback_icon={}",
@@ -291,8 +279,6 @@ fn read_forge_toml_meta(
     Some((name, description, version, logo))
 }
 
-// legacy forge mcmod.info is either a bare json array of mod entries
-// or an object with a "modList" key wrapping the array
 fn read_mcmod_info(
     archive: &mut zip::ZipArchive<std::fs::File>,
 ) -> Option<(String, String, String, String)> {

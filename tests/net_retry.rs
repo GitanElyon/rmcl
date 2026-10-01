@@ -1,12 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// integration tests for the retry envelope in src/net/mod.rs. wiremock
-// stands in for live upstream APIs so we can assert that 5xx responses
-// retry, 4xx responses fail fast, and the cap (MAX_RETRIES = 3, total
-// 4 attempts) is honoured. these tests exercise public HttpClient methods,
-// not the private retry helper directly.
-//
 // Tokio time is paused in retrying tests so the production backoff remains
 // covered without adding wall-clock delay to the suite.
 
@@ -32,14 +26,11 @@ fn client_without_timeout() -> HttpClient {
     reqwest::Client::builder().build().unwrap().into()
 }
 
-// ---------- get_json (via get_with_retry) ----------
-
 #[tokio::test(start_paused = true)]
 async fn get_json_retries_5xx_then_succeeds() {
     let server = MockServer::start().await;
     let attempts = Arc::new(AtomicUsize::new(0));
 
-    // first request: 503. second request: 200.
     Mock::given(method("GET"))
         .and(path("/api"))
         .respond_with(move |_: &wiremock::Request| {
@@ -123,8 +114,6 @@ async fn get_bytes_limited_rejects_oversized_responses() {
         .unwrap_err();
     assert!(error.to_string().contains("8-byte limit"));
 }
-
-// ---------- download_file ----------
 
 #[tokio::test(start_paused = true)]
 async fn download_file_retries_5xx_then_succeeds() {

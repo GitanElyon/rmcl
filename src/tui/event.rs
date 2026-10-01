@@ -20,7 +20,6 @@ use crate::feedback::progress;
 use crate::instance::InstanceManager;
 
 impl App {
-    /// main loop: poll async results and input at ~60Hz, drawing only when state changes
     pub async fn run(&mut self, terminal: &mut Tui) -> color_eyre::Result<()> {
         let mut last_draw = std::time::Instant::now()
             .checked_sub(Duration::from_secs(1))
@@ -30,7 +29,6 @@ impl App {
         let mut image_redraw_marker = false;
         while !self.exit {
             let redraw_requested = crate::feedback::take_redraw_request();
-            // check if any popup wizard finished and wants to create/import
             if let Some(params) = new_instance::take_result() {
                 self.spawn_create(params);
             }
@@ -42,9 +40,6 @@ impl App {
 
             self.dismiss_expired_errors();
 
-            // drain all the channels from background tasks.
-            // every content type has its own pending queue because they each
-            // get scanned/loaded on separate tokio tasks
             self.drain_pending_instances();
             self.drain_completed_instance_settings_updates();
             self.drain_failed_instance_settings_updates();
@@ -543,8 +538,6 @@ impl App {
         });
     }
 
-    // polls for input with a 16ms timeout (~60fps). only key presses are handled,
-    // releases and repeats are ignored thanks to the enhanced keyboard protocol
     fn handle_events(&mut self) -> color_eyre::Result<bool> {
         match crossterm::event::poll(Duration::from_millis(16)) {
             Ok(true) => match event::read() {
@@ -879,8 +872,6 @@ impl App {
         });
     }
 
-    // pops errors from the front of the queue once they've been visible long enough.
-    // loops because multiple errors could expire in the same frame
     fn dismiss_expired_errors(&self) {
         use crate::config::SETTINGS;
         loop {

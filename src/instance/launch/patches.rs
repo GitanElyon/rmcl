@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// classpath and jvm patches for legacy forge on java 9+.
 // lwjgl3ify ships a patched launchwrapper and retrofuturabootstrap that
 // replace the old URLClassLoader-based launcher with one that works on
-// modern java. this module handles extracting those patches, building
-// the right --add-opens flags, and swapping out the broken log4j jars.
+// modern java.
 
 use std::path::{Path, PathBuf};
 
@@ -19,12 +17,6 @@ pub struct LwjglifyPatches {
     pub extra_args: Vec<String>,
 }
 
-// checks if lwjgl3ify is present in the mods folder, and if so:
-// 1. extracts forge patches from the lwjgl3ify jar
-// 2. prepends them to the classpath so they shadow vanilla launchwrapper
-// 3. parses --add-opens from the patches manifest
-// 4. replaces log4j 2.0-beta9 with prism's patched builds
-// 5. returns the jvm args and overridden main class
 pub async fn apply(
     minecraft_dir: &Path,
     lib_dir: &Path,
@@ -43,7 +35,6 @@ pub async fn apply(
         return None;
     }
 
-    // prepend so patched classes shadow vanilla launchwrapper
     classpath.insert(0, patches_dest.clone());
 
     let mut jvm_args = parse_add_opens(&patches_dest).unwrap_or_default();
@@ -214,7 +205,6 @@ fn add_lwjgl3(lib_dir: &Path, classpath: &mut Vec<PathBuf>) {
             insert_pos += 1;
         }
 
-        // natives
         let natives = if *module == "lwjgl" {
             lib_dir.join(format!(
                 "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-{os_classifier}.jar"
@@ -234,11 +224,8 @@ fn add_lwjgl3(lib_dir: &Path, classpath: &mut Vec<PathBuf>) {
     tracing::info!("Added {} LWJGL 3.3.3 jars to classpath", insert_pos - 1);
 }
 
-// writes a log4j2.xml config that sets the root logger to INFO. this
-// prevents LaunchClassLoader's debug() call from ever firing, which
-// avoids the ThrowableProxy -> SecurityManager -> StackWalker infinite
-// recursion on java 24+. the config is written to .minecraft/ and
-// pointed to via -Dlog4j.configurationFile.
+// Suppresses LaunchClassLoader's debug() call to avoid the
+// ThrowableProxy -> SecurityManager -> StackWalker recursion on Java 24+.
 fn write_log4j_config(minecraft_dir: &Path, jvm_args: &mut Vec<String>) {
     let config_path = minecraft_dir.join(".rmcl-log4j2.xml");
     let config = r#"<?xml version="1.0" encoding="UTF-8"?>

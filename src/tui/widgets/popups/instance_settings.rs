@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// modal editor for settings belonging to the selected Minecraft instance.
-
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,

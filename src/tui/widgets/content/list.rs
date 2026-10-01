@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// generic scrollable list for content items (mods, resource packs, shaders, worlds).
-// supports toggling items on/off by renaming files with .disabled suffix,
-// search filtering, per-instance caching, and directory change detection.
-// also handles minecraft's formatting codes for colored mod names/descriptions
-
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -245,7 +240,6 @@ struct PaginationState {
 
 const REMOVAL_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
-// result from the notify-triggered background diff
 struct WatcherDiff {
     toggled: Vec<(String, bool, std::path::PathBuf)>,
     removed: Vec<String>,
@@ -292,19 +286,15 @@ pub struct ContentListState {
     cache: HashMap<String, CachedList>,
     sort_metadata: RefCell<HashMap<std::path::PathBuf, FileSortMetadata>>,
     filtered_cache: RefCell<Option<CachedSelection>>,
-    // streaming: individual entries arrive here during initial load
     stream_rx: Option<mpsc::Receiver<ContentStreamUpdate>>,
     stream_order: ContentStreamOrder,
     progressive_source_stream: bool,
     staged_source_updates: Option<Vec<ContentStreamUpdate>>,
     source_order_ready: bool,
     preview_count: usize,
-    // file watcher: notify callback spawns background work,
-    // precomputed diff lands here for the UI to pick up
     watcher_diff: Arc<Mutex<Option<WatcherDiff>>>,
     _watcher: Option<notify::RecommendedWatcher>,
     watched_dir: Option<std::path::PathBuf>,
-    // stored for the watcher to scan individual new files
     scan_one_fn: Option<ScanOneFn>,
     content_ext: Option<&'static str>,
     pagination: Option<PaginationState>,
@@ -1175,7 +1165,6 @@ impl ContentListState {
         };
         self.images_dirty |= update.requires_reconcile;
 
-        // apply toggles (enabled/path changes)
         tracing::debug!(
             "Applying content watcher diff for {}: toggled={} removed={} added={}",
             self.loaded_for.as_deref().unwrap_or("<unknown>"),
@@ -1214,7 +1203,6 @@ impl ContentListState {
                 .or_insert_with(std::time::Instant::now);
         }
 
-        // insert new entries in sorted position
         for mut entry in diff.added {
             self.sort_metadata.get_mut().remove(&entry.path);
             let replacement = self.entries.iter().position(|existing| {
@@ -1310,13 +1298,10 @@ impl ContentListState {
         removed
     }
 
-    // starts a notify file watcher on the given directory. changes trigger
-    // a background diff that lands in watcher_diff for drain_watcher to apply.
     pub fn watch_dir(&mut self, dir: std::path::PathBuf) {
         use notify::{RecursiveMode, Watcher};
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        // drop previous watcher
         self._watcher = None;
 
         let watcher_diff = self.watcher_diff.clone();
@@ -1706,9 +1691,6 @@ impl ContentListState {
         }
     }
 
-    // saves current entries to cache before loading new ones, and restores
-    // from cache if this instance was seen before (avoids re-scanning).
-    // content_dir is the actual directory to scan (e.g. .minecraft/mods).
     pub fn start_load(
         &mut self,
         content_dir: &Path,
@@ -1724,7 +1706,6 @@ impl ContentListState {
         self.pending_entry_images.clear();
         self.pending_removals.clear();
 
-        // save current entries to cache
         if let Some(prev) = self.loaded_for.take()
             && !self.entries.is_empty()
         {
@@ -1743,7 +1724,6 @@ impl ContentListState {
             );
         }
 
-        // try cache first
         // files modified while another instance was active become a real problem.
         if let Some(cached) = self.cache.remove(instance_name) {
             self.entries = cached.entries;
@@ -1769,7 +1749,6 @@ impl ContentListState {
             return;
         }
 
-        // no cache, stream entries one by one as each file is scanned
         let stream = self.start_stream(instance_name);
 
         let dir = content_dir.to_path_buf();
@@ -2690,8 +2669,6 @@ fn searchable_spans(
     }
 }
 
-// parses minecraft's section-sign (U+00A7) formatting codes into styled spans.
-// handles colors (0-f), bold (l), strikethrough (m), underline (n), italic (o), reset (r)
 fn parse_mc_text(text: &str, base_style: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut current_style = base_style;
@@ -2976,10 +2953,6 @@ fn watcher_event_handling(kind: &notify::EventKind) -> WatcherEventHandling {
     }
 }
 
-// reads a content directory and builds a stem -> (path, enabled) map.
-// used both by watch_dir to initialize known state and by the watcher
-// thread to detect changes. when ext is empty (worlds), only directories
-// are included.
 fn diff_directory(
     dir: &std::path::Path,
     ext: &str,

@@ -39,9 +39,6 @@ fn parse_mmc_pack_vanilla() {
     assert!(pack.loader().0.is_none());
 }
 
-// builds an in-memory mmc-style pack zip and verifies that
-// extract_mmc_archive copies only the .minecraft/ subtree into the
-// destination, preserving relative paths and skipping siblings.
 #[test]
 fn extract_mmc_archive_copies_minecraft_subtree() {
     use std::io::Write;
@@ -51,9 +48,6 @@ fn extract_mmc_archive_copies_minecraft_subtree() {
     let dest = tmp.path().join("instance/.minecraft");
     std::fs::create_dir_all(&dest).unwrap();
 
-    // Pack/ is the prefix; only .minecraft/ entries should land in dest.
-    // mmc-style pack: a root dir "Pack/" wrapping the .minecraft tree
-    // plus a sibling mmc-pack.json that should NOT be extracted.
     {
         let file = std::fs::File::create(&archive_path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
@@ -74,13 +68,11 @@ fn extract_mmc_archive_copies_minecraft_subtree() {
 
     extract_mmc_archive(&archive_path, &dest).expect("extract");
 
-    // .minecraft/ entries must have been copied with their relative paths
     let options = std::fs::read(dest.join("options.txt")).expect("options.txt");
     assert_eq!(options, b"lang:en_us");
     let modjar = std::fs::read(dest.join("mods/test-mod.jar")).expect("mods/test-mod.jar");
     assert_eq!(modjar, b"jar-bytes");
 
-    // and the sibling outside .minecraft/ must not have been copied
     assert!(
         !dest.join("mmc-pack.json").exists(),
         "mmc-pack.json should not land in the instance dir"

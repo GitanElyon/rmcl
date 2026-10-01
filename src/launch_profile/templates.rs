@@ -1,15 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// template substitution for mojang-style launch arguments. profiles use
-// `${variable_name}` placeholders that the launcher fills in at launch
-// time from the active session: paths, the user's account info, the
-// classpath, the resolved natives directory, and so on.
-//
-// the full set of variables is documented in `TemplateContext`. unknown
-// placeholders are left as-is and logged at `warn` level - that way if
-// mojang adds a new variable in the future, the launcher fails open
-// rather than silently swallowing it.
+// Keep unknown placeholders and warn so future Mojang variables remain visible
+// instead of silently disappearing.
 
 use std::path::Path;
 

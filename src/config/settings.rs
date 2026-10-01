@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// all the config structs that map to sections in config.toml.
-// everything has sane defaults so a blank file (or no file) still works.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -250,7 +247,6 @@ impl Default for Paths {
     }
 }
 
-// expand ~ in paths since toml doesn't do that for us
 pub fn resolve_path(raw: &str) -> PathBuf {
     if let Some(stripped) = raw.strip_prefix("~/") {
         if let Some(home) = dirs_next::home_dir() {

@@ -53,8 +53,6 @@ fn single_disallow_matching_os_disallows() {
 
 #[test]
 fn allow_without_os_match_disallows_by_default() {
-    // explicit allow for windows; we are on linux; nothing matches;
-    // default state remains disallow.
     let rules = vec![Rule {
         action: RuleAction::Allow,
         os: Some(OsCondition {
@@ -95,7 +93,6 @@ fn last_matching_rule_wins_when_allow_then_disallow() {
         features: &features,
     };
     assert!(!evaluate(&rules, &osx_ctx));
-    // and on linux: only the first rule matches → still allow.
     let lin = linux_ctx(&features);
     assert!(evaluate(&rules, &lin));
 }
@@ -136,7 +133,6 @@ fn arch_mismatch_blocks_rule() {
     }];
     let features = FeatureSet::default();
     let ctx = linux_ctx(&features);
-    // we are on linux but x86_64, not arm64 → rule does not match.
     assert!(!evaluate(&rules, &ctx));
 }
 

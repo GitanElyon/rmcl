@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// multimc / prism launcher instance import: mods and configs are bundled
-// in the zip. we install the game + loader normally, then extract the
-// archive contents over it.
-
 use std::path::Path;
 
 use crate::feedback::progress;
@@ -119,7 +115,6 @@ pub async fn execute_import(
     Ok(())
 }
 
-// extracts everything under .minecraft/ from the archive into the instance dir
 fn extract_mmc_archive(
     archive_path: &Path,
     minecraft_dir: &Path,
@@ -239,7 +234,6 @@ fn instance_name_from_cfg(path: &Path) -> Option<String> {
     None
 }
 
-// finds the prefix for the archive: empty for flat zips, "DirName/" for nested
 fn find_archive_prefix(archive: &zip::ZipArchive<std::fs::File>) -> String {
     for name in archive.file_names() {
         if name.ends_with("mmc-pack.json") {

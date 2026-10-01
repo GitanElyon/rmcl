@@ -57,13 +57,6 @@ fn push_and_drain_last_played() {
     assert!(drained.iter().any(|(k, _)| k == "run_test_lp"));
 }
 
-// Removed drain_empty_returns_empty: it relied on no other test pushing
-// to LAST_PLAYED between the two drain calls, which races with the
-// parallel push_and_drain_last_played test. The drain semantics are
-// already covered by push_and_drain_last_played, which asserts a
-// specific entry is present, and the empty-result path is exercised
-// implicitly any time drain runs after that test's cleanup.
-
 #[test]
 fn send_kill_returns_false_for_missing() {
     assert!(!send_kill("run_never_registered_xyz"));
@@ -74,7 +67,6 @@ fn register_and_send_kill() {
     let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
     register_kill("run_test_kill", tx);
     assert!(send_kill("run_test_kill"));
-    // the kill signal itself must arrive, not just report success
     assert!(rx.try_recv().is_ok());
 }
 

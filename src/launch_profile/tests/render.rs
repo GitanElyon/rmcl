@@ -239,12 +239,10 @@ async fn end_to_end_resolve_then_render_modern_forge_shape() {
     let fx = Fixture::new();
     let rendered = render_args(&merged, &fx.rule_ctx(), &fx.template_ctx()).unwrap();
 
-    // child main_class wins after merge
     assert_eq!(
         rendered.main_class,
         "cpw.mods.bootstraplauncher.BootstrapLauncher"
     );
-    // game args: parent first then child
     assert_eq!(
         rendered.game,
         vec![
@@ -256,7 +254,6 @@ async fn end_to_end_resolve_then_render_modern_forge_shape() {
             "forge_client"
         ]
     );
-    // jvm args: parent first then child
     assert_eq!(
         rendered.jvm,
         vec![

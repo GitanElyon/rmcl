@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// handles all downloads from mojang's servers: version manifests,
-// client jars, libraries, and asset objects. this is the core of
-// getting vanilla minecraft onto disk.
-
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -136,9 +132,6 @@ pub async fn fetch_version_manifest(client: &HttpClient) -> Result<VersionManife
     fetch_version_manifest_from(client, MANIFEST_URL).await
 }
 
-// same as fetch_version_manifest but lets the caller pick the URL. exists so
-// integration tests can point at a wiremock server; production callers go
-// through fetch_version_manifest with the upstream Mojang URL.
 pub async fn fetch_version_manifest_from(
     client: &HttpClient,
     url: &str,
@@ -170,7 +163,6 @@ pub async fn fetch_version_meta_with_raw(
     client.get_json_with_raw(&entry.url, "version meta").await
 }
 
-// sha1 of a file as lowercase hex, or None if unreadable.
 fn sha1_hex(path: &Path) -> Option<String> {
     use sha1::Digest;
     use std::io::Read;
@@ -187,7 +179,6 @@ fn sha1_hex(path: &Path) -> Option<String> {
     Some(format!("{:x}", hasher.finalize()))
 }
 
-// true when the cached file matches mojang's recorded size + sha1.
 // guards against partial files left by killed downloads: those used to be
 // trusted forever on the strength of an exists() check alone. size is
 // checked first so truncated files skip the hashing cost.
@@ -282,8 +273,6 @@ pub async fn download_libraries(
         features: &features,
     };
 
-    // matches the directory launch passes as java.library.path
-    // (instance/launch/mod.rs).
     let natives_dir = crate::storage::MetadataPaths::new(meta_dir)
         .versions()
         .join(&meta.id)
@@ -383,9 +372,6 @@ pub async fn download_libraries(
     Ok(())
 }
 
-// relative path of a library artifact inside the shared library cache.
-// upstream usually records it; fall back to deriving it from the maven
-// coordinate when the field is missing/empty.
 fn library_relative_path(library: &Library, recorded_path: &str) -> Option<String> {
     if !recorded_path.is_empty() {
         return Some(recorded_path.to_owned());
@@ -393,8 +379,6 @@ fn library_relative_path(library: &Library, recorded_path: &str) -> Option<Strin
     crate::instance::loader::maven::maven_coord_to_path(&library.name)
 }
 
-// unpacks a natives jar into dest. skips directories, archive entries with
-// traversal paths, and anything matching an `extract.exclude` prefix.
 fn extract_natives(jar: &Path, dest: &Path, exclude: &[String]) -> Result<(), NetError> {
     let file = std::fs::File::open(jar)?;
     let mut archive = zip::ZipArchive::new(file)
@@ -410,7 +394,6 @@ fn extract_natives(jar: &Path, dest: &Path, exclude: &[String]) -> Result<(), Ne
         if entry.is_dir() {
             continue;
         }
-        // enclosed_name is None for absolute paths / .. traversal
         let Some(rel) = entry.enclosed_name() else {
             tracing::warn!(
                 "Skipping unsafe path in natives jar {}: {}",
@@ -443,8 +426,6 @@ pub async fn download_assets(
     download_assets_from(client, meta, meta_dir, ASSETS_BASE_URL).await
 }
 
-// same as download_assets but lets tests point at a wiremock server for the
-// per-asset CDN downloads. the asset index URL still comes from meta.
 pub async fn download_assets_from(
     client: &HttpClient,
     meta: &VersionMeta,
@@ -503,8 +484,6 @@ pub async fn download_assets_from(
         index
     };
 
-    // assets are stored by hash with the first 2 chars as a directory prefix,
-    // e.g. "ab/ab1234..." - same layout mojang uses on their CDN
     let mut downloads = Vec::new();
     for object in asset_index.objects.values() {
         if object.hash.len() < 2 {
@@ -546,9 +525,7 @@ pub async fn download_assets_from(
     result
 }
 
-// bounded parallel downloader. spawns up to MAX_CONCURRENT_DOWNLOADS tasks
-// and feeds new ones in as each completes. collects errors but keeps going
-// so it downloads as much as possible before reporting the first failure.
+// Continue other downloads after one fails; report the first error afterward.
 async fn run_parallel_downloads(
     client: &HttpClient,
     downloads: Vec<(String, PathBuf, String)>,

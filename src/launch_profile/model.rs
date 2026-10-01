@@ -1,12 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// mojang-format launch profile types. mirrors the on-disk JSON schema
-// used by vanilla versions, forge installer output, neoforge installer
-// output, fabric profiles, and quilt profiles. parsing is lossless for
-// the fields we care about; unknown fields are silently dropped (serde
-// default behavior) - which is fine because we write upstream JSON
-// byte-for-byte on the install side.
+// Unknown JSON fields are dropped when parsing, but installer paths write the
+// upstream bytes unchanged, so this model never strips fields from the cache.
 
 use serde::{Deserialize, Serialize};
 

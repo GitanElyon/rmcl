@@ -1,12 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// integration tests for build_launch_invocation - the seam that takes an
-// instance config plus resolved auth credentials and returns the full java
-// invocation that would be spawned. these tests build the expected on-disk
-// fixture layout in a tempdir, call the seam, and assert on the rendered
-// LaunchInvocation. nothing here actually spawns a process.
-
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -17,8 +11,6 @@ use rmcl::instance::launch::{
     LaunchAuth, LaunchError, build_launch_invocation, supports_quick_play,
 };
 use rmcl::instance::models::{InstanceConfig, ModLoader};
-
-// ---------- helpers ----------
 
 const PLAYER: &str = "TestPlayer";
 const PLAYER_UUID: &str = "00000000-0000-0000-0000-000000000001";
@@ -86,11 +78,6 @@ fn fake_java(tmp: &TempDir, major: u32) -> String {
     path.to_string_lossy().into_owned()
 }
 
-// builds the on-disk layout that build_launch_invocation expects:
-//   <tmp>/instances/<name>/minecraft/         (instance dir, created empty)
-//   <tmp>/meta/versions/<game_version>/meta.json
-//   <tmp>/meta/cache/loaders/profiles/         (created empty)
-//   <tmp>/meta/libraries/                     (created empty)
 struct Fixture {
     _tmp: TempDir,
     instances_dir: PathBuf,
@@ -208,8 +195,6 @@ fn platform_classpath_sep() -> &'static str {
     if cfg!(windows) { ";" } else { ":" }
 }
 
-// ---------- vanilla ----------
-
 #[tokio::test]
 async fn vanilla_modern_builds_complete_invocation() {
     let fx = Fixture::new("v1", "1.20.1", modern_vanilla_meta("1.20.1"));
@@ -247,12 +232,10 @@ async fn vanilla_modern_builds_complete_invocation() {
         inv.jvm_args
     );
 
-    // working_dir is <instances_dir>/<name>/minecraft
     assert_eq!(
         inv.working_dir,
         fx.instances_dir.join("v1").join("minecraft")
     );
-    // classpath = the one vanilla lib + the vanilla client jar
     let slf4j = fx
         .meta_dir
         .join("cache/minecraft/libraries/org/slf4j/slf4j-api/2.0.7/slf4j-api-2.0.7.jar");
@@ -339,20 +322,16 @@ async fn vanilla_legacy_args_format_substitutes_tokens() {
 
     assert_eq!(inv.main_class, "net.minecraft.launchwrapper.Launch");
 
-    // legacy format has no upstream jvm args; jvm_args should be just Xms/Xmx
     assert_eq!(inv.jvm_args.len(), 2);
     assert!(inv.jvm_args[0].starts_with("-Xms"));
     assert!(inv.jvm_args[1].starts_with("-Xmx"));
 
-    // game_args should be space-split with substitutions applied
     let joined = inv.game_args.join(" ");
     assert!(joined.contains(&format!("--username {}", PLAYER)));
     assert!(joined.contains(&format!("--uuid {}", PLAYER_UUID)));
     assert!(joined.contains(&format!("--accessToken {}", PLAYER_TOKEN)));
     assert!(joined.contains("--userType msa"));
 }
-
-// ---------- forge ----------
 
 #[tokio::test]
 async fn forge_modern_includes_add_opens() {
@@ -444,7 +423,6 @@ async fn forge_local_lib_dir_preferred_over_meta_dir() {
         "expected local fmlloader on classpath: {:?}",
         inv.classpath
     );
-    // and the meta-dir candidate should not appear
     let meta_candidate = fx
         .meta_dir
         .join("libraries/net/minecraftforge/fmlloader/1.20.1-47.2.0/fmlloader-1.20.1-47.2.0.jar");
@@ -453,8 +431,6 @@ async fn forge_local_lib_dir_preferred_over_meta_dir() {
         "meta-dir candidate should not be on classpath when local exists"
     );
 }
-
-// ---------- fabric ----------
 
 #[tokio::test]
 async fn fabric_implicit_inheritsfrom_resolves() {
@@ -482,7 +458,6 @@ async fn fabric_implicit_inheritsfrom_resolves() {
         inv.main_class,
         "net.fabricmc.loader.impl.launch.knot.KnotClient"
     );
-    // both fabric-loader and vanilla slf4j must appear on the merged classpath
     let fabric_loader = fx.meta_dir.join(
         "cache/minecraft/libraries/net/fabricmc/fabric-loader/0.15.0/fabric-loader-0.15.0.jar",
     );
@@ -500,8 +475,6 @@ async fn fabric_implicit_inheritsfrom_resolves() {
         inv.classpath
     );
 }
-
-// ---------- neoforge ----------
 
 #[tokio::test]
 async fn neoforge_inheritsfrom_resolves() {
@@ -541,8 +514,6 @@ async fn neoforge_inheritsfrom_resolves() {
     );
 }
 
-// ---------- template substitution ----------
-
 #[tokio::test]
 async fn auth_credentials_substituted_in_game_args() {
     let fx = Fixture::new("auth", "1.20.1", modern_vanilla_meta("1.20.1"));
@@ -576,7 +547,6 @@ async fn auth_credentials_substituted_in_game_args() {
 
 #[tokio::test]
 async fn version_type_substituted() {
-    // type = "snapshot" in the fixture; ${version_type} should render that
     let mut meta = modern_vanilla_meta("1.20.1");
     meta["type"] = json!("snapshot");
     let fx = Fixture::new("vt", "1.20.1", meta);
@@ -593,8 +563,6 @@ async fn version_type_substituted() {
     );
 }
 
-// ---------- classpath ----------
-
 #[tokio::test]
 async fn classpath_uses_platform_separator() {
     let fx = Fixture::new("cp", "1.20.1", modern_vanilla_meta("1.20.1"));
@@ -604,7 +572,6 @@ async fn classpath_uses_platform_separator() {
         .await
         .unwrap();
 
-    // with two classpath entries we should see exactly one separator
     assert_eq!(inv.classpath.len(), 2);
     let sep = platform_classpath_sep();
     assert_eq!(inv.classpath_string.matches(sep).count(), 1);
@@ -612,7 +579,6 @@ async fn classpath_uses_platform_separator() {
 
 #[tokio::test]
 async fn rule_disallow_excludes_library() {
-    // a library whose rule always denies must not appear on the classpath
     let mut meta = modern_vanilla_meta("1.20.1");
     meta["libraries"] = json!([
         {
@@ -653,8 +619,6 @@ async fn rule_disallow_excludes_library() {
         inv.classpath
     );
 }
-
-// ---------- memory ----------
 
 #[tokio::test]
 async fn xms_xmx_use_config_memory() {
@@ -707,7 +671,6 @@ async fn instance_launch_options_are_injected() {
 async fn default_memory_used_when_unset() {
     let fx = Fixture::new("memdef", "1.20.1", modern_vanilla_meta("1.20.1"));
     let config = make_config("memdef", "1.20.1", ModLoader::Vanilla);
-    // memory_min and memory_max default to None in make_config
 
     let inv = build_launch_invocation(&config, &fx.instances_dir, &fx.meta_dir, &test_auth(), None)
         .await
@@ -716,8 +679,6 @@ async fn default_memory_used_when_unset() {
     assert!(inv.jvm_args.iter().any(|a| a == "-Xms512M"));
     assert!(inv.jvm_args.iter().any(|a| a == "-Xmx2G"));
 }
-
-// ---------- error paths ----------
 
 #[tokio::test]
 async fn meta_not_found_returns_error() {

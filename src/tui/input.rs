@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// keybindings and input dispatch.
-// the general pattern: check which area is focused, give it first crack at the
-// keypress, and fall through to global bindings if nobody claimed it.
-// vim-style navigation (j/k/g/G) where it makes sense.
-
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -415,8 +410,6 @@ impl App {
             }
         }
 
-        // content area delegates to whichever tab is active.
-        // worlds use the same list navigation without the toggle
         if self.focused == FocusedArea::Content
             && self.content_mode == widgets::content::ContentMode::Installed
             && let Some(state) = self.active_discovery_state_mut()
@@ -956,7 +949,6 @@ impl App {
                     return Ok(());
                 }
 
-                // global keybindings (uppercase = area switch, lowercase = action)
                 match key_event.code {
                     KeyCode::Char('q') => self.exit = true,
                     KeyCode::Esc
@@ -1049,7 +1041,6 @@ impl App {
                             }
                         }
                     }
-                    // shift+enter = open .minecraft folder in file manager
                     KeyCode::Enter
                         if self.focused == FocusedArea::Instances
                             && !self.instances_state.search.active
@@ -1066,7 +1057,6 @@ impl App {
                             }
                         }
                     }
-                    // plain enter = focus the content area for the selected instance
                     KeyCode::Enter
                         if self.focused == FocusedArea::Instances
                             && !self.instances_state.search.active =>
@@ -1110,7 +1100,6 @@ impl App {
                             }
                         }
                     }
-                    // esc = kill running instance. brutal but effective
                     KeyCode::Esc
                         if self.focused == FocusedArea::Instances
                             && !self.instances_state.search.active =>

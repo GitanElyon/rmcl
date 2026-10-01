@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// integration tests for the loader-specific net::* fetchers (forge,
-// fabric, quilt, neoforge). each module's fetch_* function now has a
-// _from variant that lets the test point the HTTP call at a wiremock
-// server; the production constants stay unchanged.
-
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -19,8 +14,6 @@ use rmcl::net::neoforge::{fetch_neoforge_game_versions_from, fetch_neoforge_vers
 use rmcl::net::quilt::{
     fetch_quilt_game_versions_from, fetch_quilt_profile_from, fetch_quilt_versions_from,
 };
-
-// ---------- forge ----------
 
 #[tokio::test]
 async fn forge_fetch_versions_filters_by_prefix() {
@@ -67,11 +60,8 @@ async fn forge_fetch_game_versions_extracts_unique() {
         .expect("forge game versions");
 
     let ids: Vec<&str> = versions.iter().map(|v| v.id.as_str()).collect();
-    // dedup + reverse-sort
     assert_eq!(ids, vec!["1.20.1", "1.19.4"]);
 }
-
-// ---------- fabric ----------
 
 #[tokio::test]
 async fn fabric_fetch_game_versions_parses_response() {
@@ -146,8 +136,6 @@ async fn fabric_fetch_profile_parses_libraries() {
     assert_eq!(profile.libraries[0].url, "https://maven.fabricmc.net/");
 }
 
-// ---------- quilt ----------
-
 #[tokio::test]
 async fn quilt_fetch_game_versions_parses_response() {
     let server = MockServer::start().await;
@@ -207,8 +195,6 @@ async fn quilt_fetch_profile_parses_libraries() {
         "https://maven.quiltmc.org/repository/release/"
     );
 }
-
-// ---------- neoforge ----------
 
 #[tokio::test]
 async fn neoforge_fetch_versions_filters_by_prefix() {
@@ -292,7 +278,6 @@ async fn neoforge_fetch_game_versions_reverse_engineers_mc_versions() {
     assert!(ids.contains(&"26.1.1"));
     assert!(ids.contains(&"1.21"));
     assert!(ids.contains(&"1.20.4"));
-    // both versions should be marked stable (no snapshot flag in maven)
     assert!(versions.iter().all(|v| v.stable));
 }
 
@@ -300,7 +285,6 @@ async fn neoforge_fetch_game_versions_reverse_engineers_mc_versions() {
 async fn neoforge_fetch_versions_rejects_invalid_game_version() {
     let server = MockServer::start().await;
     let url = format!("{}/maven-api", server.uri());
-    // no mock - the function should error out before hitting the network
     let err = fetch_neoforge_versions_from(&HttpClient::new(), &url, "bogus")
         .await
         .expect_err("invalid game version");

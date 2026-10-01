@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// shared network loading for Minecraft and mod-loader version pickers.
-
 use crate::instance::{
     loader::{GameVersion, get_installer},
     models::ModLoader,

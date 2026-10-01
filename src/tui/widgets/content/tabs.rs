@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// the outer frame for the content area: tab bar, keybind footer,
-// and dispatching render calls to the active tab's widget.
-// also renders the instance name/version header with run state indicators.
-
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -357,8 +353,6 @@ pub fn render(
         _ => false,
     };
 
-    // keybinds change depending on which tab is active and whether
-    // the content panel or instances panel has focus
     let kb: Option<&[(&str, &str)]> = if is_focused {
         Some(match (mode, tab) {
             (ContentMode::Discover, _) if discovery_unavailable => {
@@ -1762,8 +1756,6 @@ fn discovery_version_label(version: &crate::net::modrinth::VersionInfo) -> Strin
     version.version_number.clone()
 }
 
-// the header bar above the content tabs, showing instance name, loader info,
-// and a spinner/error indicator when the instance is running or crashed
 pub fn title(
     frame: &mut Frame,
     area: Rect,

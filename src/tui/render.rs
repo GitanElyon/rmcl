@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// layout and rendering. the main frame is split into:
-//   left 20%: instance sidebar
-//   right 80%: title bar + content area + bottom bar (account / details / status)
-// popups and error toasts render on top of everything.
-
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
@@ -165,7 +160,6 @@ impl App {
             widgets::popups::global_settings::render(frame, area, state);
         }
 
-        // error toasts stack from the top, each one below the previous
         let all_errors = error_buffer::peek_all_errors();
         self.sync_error_effects(&all_errors);
         let mut next_y: u16 = 1;
@@ -220,8 +214,6 @@ impl App {
         }
     }
 
-    // full-screen log viewer with search highlighting and auto-scroll.
-    // auto-sticks to the bottom unless the user scrolled up manually
     fn render_log_overlay(&mut self, frame: &mut Frame) {
         use crate::config::theme::{BORDER_STYLE, THEME};
         use crate::tui::logging::get_app_logs;
@@ -322,8 +314,6 @@ impl App {
         );
     }
 
-    // keeps the effect map in sync with current errors: removes effects for
-    // dismissed errors and creates slide-in effects for new ones
     fn sync_error_effects(&mut self, events: &[error_buffer::ErrorEvent]) {
         use crate::config::theme::THEME;
         let theme = THEME.as_ref();
@@ -348,8 +338,6 @@ impl App {
         }
     }
 
-    // drives the slide-in / idle / slide-out state machine for each error toast.
-    // transitions to FadingOut at the configured slide-start time
     fn render_error_effect(
         &mut self,
         frame: &mut Frame,

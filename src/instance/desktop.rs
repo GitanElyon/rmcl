@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// creates OS-native shortcuts for launching instances directly:
-// .desktop files on linux, .bat on windows, .command on macos
-
 use std::path::{Path, PathBuf};
 
 use crate::instance::models::InstanceConfig;
@@ -42,7 +39,6 @@ pub fn icon_path() -> Option<PathBuf> {
     dirs_next::data_dir().map(|d| d.join("rmcl").join("icon.svg"))
 }
 
-// lazily writes the bundled svg icon to disk the first time a shortcut needs it
 fn ensure_icon() -> Option<PathBuf> {
     let path = icon_path()?;
     if std::fs::read(&path).ok().as_deref() == Some(ICON_BYTES) {
@@ -229,7 +225,6 @@ fn quote_windows_arg(value: &str) -> String {
     quoted
 }
 
-// replaces anything that isn't alphanumeric, dash, or underscore with _
 fn sanitize(name: &str) -> String {
     name.chars()
         .map(|c| {

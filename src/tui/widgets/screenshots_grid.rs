@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// responsive grid of screenshot thumbnails rendered directly in the terminal.
-// images load lazily on background threads as they scroll into view,
-// and get converted to terminal graphics via ratatui-image protocols.
-
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -23,8 +19,6 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::config::theme::THEME;
 use crate::instance::screenshots::ScreenshotEntry;
 
-// grid cell sizing constraints in terminal columns.
-// the grid auto-fits columns within these bounds depending on terminal width
 const TARGET_CELL_WIDTH: u16 = 34;
 const MIN_CELL_WIDTH: u16 = 24;
 const MAX_CELL_WIDTH: u16 = 52;
@@ -373,9 +367,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut ScreenshotsState, is_fo
     let cols = target_cols.clamp(min_cols, max_cols);
     let cell_width = area.width / cols as u16;
 
-    // figure out how tall each thumbnail should be in terminal rows.
-    // need the font's pixel aspect ratio to keep screenshots from
-    // looking stretched since terminal cells aren't square
+    // Terminal cells are not square; use the font's aspect ratio to avoid stretching.
     let (img_w, img_h) = state
         .entries
         .first()

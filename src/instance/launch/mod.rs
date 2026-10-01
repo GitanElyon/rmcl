@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// builds the full java command line and spawns minecraft as a child process.
-// handles classpath assembly, auth token injection, and log capture.
-// loader-specific patches live in submodules (e.g. patches.rs for lwjgl3ify).
-
 pub(crate) mod parser;
 mod patches;
 
@@ -300,9 +296,6 @@ async fn migrate_legacy_loader_profile_if_needed(
     Ok(Some(refreshed))
 }
 
-// resolved auth credentials passed into the launch-invocation builder.
-// keeping these as borrowed strs lets callers pass owned strings or string
-// slices without forcing allocation.
 #[derive(Debug, Clone)]
 pub struct LaunchAuth<'a> {
     pub username: &'a str,
@@ -312,9 +305,7 @@ pub struct LaunchAuth<'a> {
     pub user_type: &'a str,
 }
 
-// everything the spawner needs to construct the java command. assembled by
-// build_launch_invocation, consumed by launch(). exposed so integration tests
-// can assert on the rendered invocation without spawning a real process.
+// Exposed so integration tests can inspect the invocation without spawning Java.
 #[derive(Debug, Clone)]
 pub struct LaunchInvocation {
     pub java: String,
@@ -368,11 +359,6 @@ fn validate_quick_play_world(minecraft_dir: &Path, world: &str) -> Result<(), La
     Ok(())
 }
 
-// builds a fully-resolved java invocation for the given instance. reads
-// meta.json and the loader profile from disk, migrates legacy formats if
-// needed (may hit Mojang to refetch), resolves inheritsFrom, applies
-// loader-specific patches, and renders all template arguments. all I/O
-// except auth resolution and process spawning happens here.
 pub async fn build_launch_invocation(
     config: &InstanceConfig,
     instances_dir: &Path,
@@ -555,7 +541,6 @@ pub async fn build_launch_invocation(
         .collect::<Vec<_>>()
         .join(sep);
 
-    // java resolution: instance override > global setting > auto-detect
     let java = config
         .java_path
         .clone()
@@ -739,10 +724,6 @@ fn finish_config_sync(
     }
 }
 
-// resolves auth credentials, then builds the launch invocation and spawns
-// the java process. only thin wrapper logic lives here: token refresh,
-// process spawn, child supervision. all the heavy lifting (profile loading,
-// classpath assembly, template rendering) sits behind build_launch_invocation.
 pub async fn launch(
     config: &InstanceConfig,
     instances_dir: &Path,
@@ -751,7 +732,6 @@ pub async fn launch(
 ) -> Result<(), LaunchError> {
     let name = config.name.clone();
 
-    // resolve auth credentials, refreshing the microsoft token if needed.
     let mut account_store = crate::auth::AccountStore::load();
     let account =
         select_launch_account(&account_store.accounts, config.preferred_account.as_deref());
@@ -919,8 +899,6 @@ pub async fn launch(
     let config_for_post_exit = config.clone();
     let invocation_for_post_exit = invocation.clone();
 
-    // spawn a background task to babysit the child process: capture stdout/stderr
-    // into both the TUI log viewer and a timestamped log file on disk
     tokio::spawn(async move {
         use std::io::Write;
         use std::sync::{Arc, Mutex};
@@ -1004,7 +982,6 @@ pub async fn launch(
         }
         drop(log_tx);
 
-        // wait for either the process to exit naturally or a kill signal from the TUI
         let (code, killed_by_user) = tokio::select! {
             _ = kill_rx => {
                 tracing::info!("[{}] Kill requested, terminating process", name_for_task);

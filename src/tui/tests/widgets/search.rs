@@ -13,7 +13,6 @@ fn confirm_keeps_query_but_deactivates() {
     s.confirm();
     assert!(!s.active);
     assert_eq!(s.query, "ab");
-    // filter should still match
     assert!(s.matches("abc"));
     assert!(!s.matches("xyz"));
     s.activate();
@@ -29,7 +28,6 @@ fn deactivate_clears_query() {
     s.deactivate();
     assert!(!s.active);
     assert!(s.query.is_empty());
-    // with empty query, everything matches
     assert!(s.matches("anything"));
 }
 

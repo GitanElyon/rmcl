@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// mod loader installation. each loader (fabric, forge, neoforge, quilt, vanilla)
-// implements the same trait so the UI can treat them uniformly: pick game version,
-// pick loader version, install. the actual installation strategies differ wildly
-// though (fabric/quilt just download jars, forge/neoforge run a whole java installer).
-
 mod fabric;
 pub mod forge;
 pub mod maven;
@@ -83,8 +78,7 @@ pub trait ModLoaderInstaller: Send + Sync {
     }
 }
 
-// writes raw profile JSON bytes to meta_dir/loader-profiles/<filename>.
-// callers that already have the upstream bytes (fabric/quilt http fetch,
+// Callers that already have the upstream bytes (fabric/quilt http fetch,
 // legacy forge versionInfo extract) use this directly to keep the on-disk
 // file byte-for-byte identical to the source.
 pub(crate) fn save_profile_bytes(

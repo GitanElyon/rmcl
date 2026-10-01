@@ -60,6 +60,28 @@ fn clearing_legacy_progress_keeps_owned_tasks() {
 }
 
 #[test]
+fn owned_tasks_restore_legacy_progress_and_legacy_updates_do_not_cover_them() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    clear();
+    set_action("legacy");
+    set_sub_action("download");
+    set_progress(1, 3);
+    let task = ProgressTask::start("owned");
+    set_progress(2, 3);
+    assert_eq!(
+        PROGRESS.lock().unwrap().current_action.as_deref(),
+        Some("owned")
+    );
+    task.finish();
+    let state = PROGRESS.lock().unwrap();
+    assert_eq!(state.current_action.as_deref(), Some("legacy"));
+    assert_eq!(state.sub_action.as_deref(), Some("download"));
+    assert_eq!(state.progress, Some((2, 3)));
+    drop(state);
+    clear();
+}
+
+#[test]
 fn a_new_legacy_action_does_not_reuse_the_previous_phase_progress() {
     let _guard = TEST_LOCK.lock().unwrap();
     clear();

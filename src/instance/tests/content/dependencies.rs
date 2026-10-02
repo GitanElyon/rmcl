@@ -417,6 +417,17 @@ fn provider(versions: Vec<VersionInfo>) -> FakeProvider {
     }
 }
 
+pub(crate) fn controlled_update_registry(
+    versions: Vec<VersionInfo>,
+    started: tokio::sync::mpsc::UnboundedSender<String>,
+    pauses: HashMap<String, std::sync::Arc<tokio::sync::Semaphore>>,
+) -> ProviderRegistry {
+    let mut provider = provider(versions);
+    provider.compatible_started = Some(started);
+    provider.compatible_pause = pauses;
+    provider.registry()
+}
+
 #[test]
 fn update_checks_prioritize_list_rows_and_publish_before_the_rest_finish() {
     use crate::instance::content::updates::{AvailableUpdate, UpdateSnapshot, scan_with_registry};

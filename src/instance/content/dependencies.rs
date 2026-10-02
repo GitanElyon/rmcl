@@ -1529,4 +1529,4 @@ fn planned_install(
 
 #[cfg(test)]
 #[path = "../tests/content/dependencies.rs"]
-mod tests;
+pub(crate) mod tests;

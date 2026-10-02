@@ -160,16 +160,7 @@ impl App {
             if local_streamed {
                 self.apply_cached_content_manifest();
             }
-            if self.content_update_check_pending
-                && ![
-                    &self.mods_state,
-                    &self.resource_packs_state,
-                    &self.shaders_state,
-                    &self.world_datapacks_state,
-                ]
-                .iter()
-                .any(|state| state.is_scanning())
-            {
+            if self.content_update_check_ready() {
                 self.content_update_check_pending = false;
                 if crate::config::SETTINGS.read().general.check_content_updates {
                     self.spawn_selected_content_update_check();
@@ -423,7 +414,9 @@ impl App {
         let Some(mut result) = result else {
             return;
         };
-        self.reconciliation_for = Some((result.instance_name.clone(), result.instance_created));
+        if result.complete {
+            self.reconciliation_for = Some((result.instance_name.clone(), result.instance_created));
+        }
         if let Some(error) = &result.error {
             tracing::warn!(
                 "Content reconciliation for {} was incomplete: {}",
@@ -490,18 +483,30 @@ impl App {
                 .instances_dir
                 .join(&result.instance_name),
         );
-        let cached =
-            crate::instance::content::updates::UpdateSnapshot::load(&paths.content_updates())
-                .filter(|snapshot| snapshot.applies_to(&selected));
-        let stale = cached
+        if self.content_update_snapshot.is_none() {
+            self.content_update_snapshot =
+                crate::instance::content::updates::UpdateSnapshot::load(&paths.content_updates())
+                    .filter(|snapshot| snapshot.applies_to(&selected))
+                    .map(|snapshot| (result.instance_name.clone(), snapshot));
+        }
+        let stale = self
+            .content_update_snapshot
             .as_ref()
-            .is_none_or(|snapshot| snapshot.is_stale(&result.manifest));
-        self.content_update_snapshot =
-            cached.map(|snapshot| (result.instance_name.clone(), snapshot));
+            .is_none_or(|(_, snapshot)| snapshot.is_stale(&result.manifest));
+        let running = crate::instance::content::updates::is_running(
+            &selected,
+            &result.manifest,
+            &paths.content_updates(),
+        );
         self.content_manifest = Some((result.instance_name.clone(), result.manifest.clone()));
         self.apply_content_update_snapshot();
-        self.content_update_check_pending =
-            stale && crate::config::SETTINGS.read().general.check_content_updates;
+        self.content_update_check_pending |=
+            stale && !running && crate::config::SETTINGS.read().general.check_content_updates;
+    }
+
+    fn content_update_check_ready(&self) -> bool {
+        let active = self.active_installed_content_state();
+        self.content_update_check_pending && !(active.is_scanning() && active.entries.is_empty())
     }
 
     fn apply_cached_content_manifest(&mut self) {
@@ -561,6 +566,15 @@ impl App {
         let Some(snapshot) = snapshot else {
             return;
         };
+        if self
+            .content_manifest
+            .as_ref()
+            .is_some_and(|(name, manifest)| {
+                name == &snapshot.instance_name && !snapshot.snapshot.is_stale(manifest)
+            })
+        {
+            self.content_update_check_pending = false;
+        }
         self.content_update_snapshot = Some((snapshot.instance_name, snapshot.snapshot));
         self.apply_content_update_snapshot();
     }
@@ -1239,6 +1253,12 @@ impl App {
     }
 
     pub(super) fn forget_instance_content(&mut self, instance_name: &str) {
+        crate::instance::content::updates::cancel(Some(
+            &crate::storage::InstancePaths::new(
+                self.instance_manager.instances_dir.join(instance_name),
+            )
+            .content_updates(),
+        ));
         self.settings_state
             .invalidate_java_cache(Some(instance_name));
         self.cached_instance_content

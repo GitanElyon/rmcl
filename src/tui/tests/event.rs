@@ -176,6 +176,334 @@ fn partial_update_snapshots_label_rows_immediately_and_keep_inactive_results() {
     assert!(PENDING_UPDATE_SNAPSHOTS.lock().unwrap().is_empty());
 }
 
+#[test]
+fn update_badges_stream_while_the_content_index_is_still_being_saved() {
+    use crate::instance::content::{manifest, reconcile, updates};
+    use std::{collections::HashMap, sync::Arc};
+
+    fn wait_for(mut ready: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "content work timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    let mut ui = UiHarness::new();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _runtime = runtime.enter();
+    ui.add_instance("Streaming index");
+    ui.app.sync_instance_content();
+    let instance = ui.app.instances_state.selected_instance().unwrap().clone();
+    let paths = crate::storage::InstancePaths::new(ui.instance_path(&instance.name));
+    let minecraft = paths.minecraft();
+    let mut saved = crate::instance::ContentManifest::default();
+    let mut entries = Vec::new();
+    let mut versions = Vec::new();
+    let mut pauses = HashMap::new();
+    for name in ["alpha", "bravo"] {
+        let relative_path = std::path::PathBuf::from("mods").join(format!("{name}.jar"));
+        let path = minecraft.join(&relative_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, name).unwrap();
+        saved.files.push(crate::instance::ContentFileRecord {
+            relative_path,
+            kind: crate::instance::ContentKind::Mod,
+            enabled: true,
+            fingerprint: manifest::fingerprint(&path).unwrap(),
+            resolution: crate::instance::Resolution::Resolved {
+                project: crate::instance::ProviderProject {
+                    provider: "modrinth".to_owned(),
+                    project_id: name.to_owned(),
+                    version_id: format!("{name}-old"),
+                },
+            },
+            provider_aliases: Vec::new(),
+            provider_checks: vec!["modrinth".to_owned(), "curseforge".to_owned()],
+            required_dependencies: Vec::new(),
+            automatic_dependency: false,
+            cleanup_eligible: false,
+        });
+        entries.push(crate::instance::scan_one_mod(&path, name, true));
+        for (suffix, date) in [
+            ("old", "2026-01-01T00:00:00Z"),
+            ("new", "2026-02-01T00:00:00Z"),
+        ] {
+            versions.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": format!("{name}-{suffix}"), "project_id": name,
+                    "name": name, "version_number": suffix,
+                    "date_published": date, "game_versions": ["1.21.1"],
+                    "loaders": ["fabric"], "files": []
+                }))
+                .unwrap(),
+            );
+        }
+        pauses.insert(name.to_owned(), Arc::new(tokio::sync::Semaphore::new(0)));
+    }
+    let mut removed = saved.files[0].clone();
+    removed.relative_path = std::path::PathBuf::from("mods").join("removed.jar");
+    saved.files.push(removed);
+    saved.save(&paths.content_manifest()).unwrap();
+    let stream = ui.app.mods_state.start_stream(&instance.name);
+    let _shader_stream = ui.app.shaders_state.start_stream(&instance.name);
+    updates::PENDING_UPDATE_SNAPSHOTS.lock().unwrap().clear();
+    reconcile::PENDING_RECONCILIATIONS.lock().unwrap().clear();
+    let instances_dir = ui.app.instance_manager.instances_dir.clone();
+    let indexing_instance = instance.clone();
+    let (resume_save, saving) = std::sync::mpsc::channel();
+    let indexing = runtime.spawn(async move {
+        let task = crate::feedback::progress::ProgressTask::start("Preparing content index");
+        let result = reconcile::reconcile(
+            indexing_instance,
+            instances_dir,
+            crate::net::HttpClient::new(),
+            &task,
+            move |result| {
+                reconcile::publish_reconciliation(result);
+                saving.recv().unwrap();
+            },
+        )
+        .await;
+        reconcile::publish_reconciliation(result);
+    });
+    wait_for(|| {
+        !reconcile::PENDING_RECONCILIATIONS
+            .lock()
+            .unwrap()
+            .is_empty()
+    });
+    assert!(!reconcile::PENDING_RECONCILIATIONS.lock().unwrap()[0].complete);
+    ui.app.drain_content_reconciliation();
+    assert_eq!(
+        ui.app.content_update_check_pending,
+        crate::config::SETTINGS.read().general.check_content_updates
+    );
+    assert!(!ui.app.content_update_check_ready());
+    for entry in entries {
+        assert!(stream.send(entry));
+    }
+    ui.app.mods_state.drain_pending();
+    ui.app.apply_cached_content_manifest();
+    assert!(ui.app.content_update_check_ready());
+    assert!(ui.app.mods_state.is_scanning());
+    assert!(ui.app.shaders_state.is_scanning());
+    let priority = ui.app.content_update_priority();
+    let manifest = ui.app.content_manifest.as_ref().unwrap().1.clone();
+    ui.app.content_update_check_pending = false;
+    let (started, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let registry = Arc::new(
+        crate::instance::content::dependencies::tests::controlled_update_registry(
+            versions,
+            started,
+            pauses.clone(),
+        ),
+    );
+    let start_check = |manifest: &crate::instance::ContentManifest, previous| {
+        updates::spawn_with_registry(
+            instance.clone(),
+            manifest.clone(),
+            paths.content_updates(),
+            priority.clone(),
+            previous,
+            registry.clone(),
+        )
+    };
+    let mut wait_for_requests = || {
+        runtime.block_on(async {
+            for _ in 0..2 {
+                tokio::time::timeout(Duration::from_secs(5), requests.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        })
+    };
+    assert!(start_check(&manifest, None));
+    assert!(!start_check(&manifest, None));
+    wait_for_requests();
+    pauses["alpha"].add_permits(1);
+    wait_for(|| !updates::PENDING_UPDATE_SNAPSHOTS.lock().unwrap().is_empty());
+    ui.app.drain_content_update_snapshots();
+    assert_eq!(
+        ui.app.mods_state.entries[0].title_suffix.as_deref(),
+        Some("Update")
+    );
+    assert_eq!(ui.app.mods_state.entries[1].title_suffix, None);
+    assert!(updates::is_running(
+        &instance,
+        &manifest,
+        &paths.content_updates()
+    ));
+    assert_eq!(
+        crate::instance::ContentManifest::load(&paths.content_manifest())
+            .unwrap()
+            .files
+            .len(),
+        3
+    );
+    assert!(
+        reconcile::PENDING_RECONCILIATIONS
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    ui.draw();
+    assert!(ui.screen().contains("Update"));
+    assert_eq!(
+        crate::feedback::progress::PROGRESS.lock().unwrap().progress,
+        Some((1, 2))
+    );
+
+    resume_save.send(()).unwrap();
+    runtime.block_on(indexing).unwrap();
+    wait_for(|| {
+        !reconcile::PENDING_RECONCILIATIONS
+            .lock()
+            .unwrap()
+            .is_empty()
+    });
+    assert!(reconcile::PENDING_RECONCILIATIONS.lock().unwrap()[0].complete);
+    assert_eq!(
+        crate::instance::ContentManifest::load(&paths.content_manifest())
+            .unwrap()
+            .files
+            .len(),
+        2
+    );
+    ui.app.drain_content_reconciliation();
+    assert!(!ui.app.content_update_check_pending);
+    assert_eq!(
+        ui.app.mods_state.entries[0].title_suffix.as_deref(),
+        Some("Update")
+    );
+    assert_eq!(ui.app.mods_state.entries[1].title_suffix, None);
+    assert_eq!(
+        ui.app
+            .content_update_snapshot
+            .as_ref()
+            .unwrap()
+            .1
+            .checked_at,
+        0
+    );
+    pauses["bravo"].add_permits(1);
+    wait_for(|| !updates::is_running(&instance, &manifest, &paths.content_updates()));
+    ui.app.content_update_check_pending = true;
+    ui.app.drain_content_update_snapshots();
+    assert!(!ui.app.content_update_check_pending);
+    assert!(
+        ui.app
+            .mods_state
+            .entries
+            .iter()
+            .all(|entry| entry.title_suffix.as_deref() == Some("Update"))
+    );
+
+    ui.app
+        .content_update_snapshot
+        .as_mut()
+        .unwrap()
+        .1
+        .checked_at = 0;
+    reconcile::publish_reconciliation(reconcile::ReconcileResult {
+        instance_name: instance.name.clone(),
+        instance_created: instance.created,
+        manifest: manifest.clone(),
+        complete: true,
+        error: None,
+    });
+    ui.app.drain_content_reconciliation();
+    assert!(ui.app.content_update_check_pending);
+    let previous = ui.app.content_update_snapshot.as_ref().unwrap().1.clone();
+    assert!(start_check(&manifest, Some(previous)));
+    wait_for_requests();
+
+    let mut changed = manifest.clone();
+    changed.files[1].resolution = crate::instance::Resolution::Resolved {
+        project: crate::instance::ProviderProject {
+            provider: "modrinth".to_owned(),
+            project_id: "bravo".to_owned(),
+            version_id: "bravo-new".to_owned(),
+        },
+    };
+    changed.save(&paths.content_manifest()).unwrap();
+    reconcile::publish_reconciliation(reconcile::ReconcileResult {
+        instance_name: instance.name.clone(),
+        instance_created: instance.created,
+        manifest: changed.clone(),
+        complete: true,
+        error: None,
+    });
+    ui.app.drain_content_reconciliation();
+    assert!(ui.app.content_update_check_ready());
+    let previous = ui.app.content_update_snapshot.as_ref().unwrap().1.clone();
+    assert!(start_check(&changed, Some(previous)));
+    wait_for_requests();
+    pauses["bravo"].add_permits(1);
+    wait_for(|| !updates::PENDING_UPDATE_SNAPSHOTS.lock().unwrap().is_empty());
+    ui.app.drain_content_update_snapshots();
+    assert_eq!(
+        ui.app.mods_state.entries[0].title_suffix.as_deref(),
+        Some("Update")
+    );
+    assert_eq!(ui.app.mods_state.entries[1].title_suffix, None);
+    assert!(updates::is_running(
+        &instance,
+        &changed,
+        &paths.content_updates()
+    ));
+    assert_eq!(
+        ui.app
+            .content_update_snapshot
+            .as_ref()
+            .unwrap()
+            .1
+            .checked_at,
+        0
+    );
+    pauses["alpha"].add_permits(1);
+    wait_for(|| !updates::is_running(&instance, &changed, &paths.content_updates()));
+    ui.app.drain_content_update_snapshots();
+    assert!(
+        ui.app
+            .content_update_snapshot
+            .as_ref()
+            .unwrap()
+            .1
+            .matches_manifest(&changed)
+    );
+    assert!(
+        updates::UpdateSnapshot::load(&paths.content_updates())
+            .unwrap()
+            .matches_manifest(&changed)
+    );
+    assert!(!ui.app.content_update_check_pending);
+    let previous = ui.app.content_update_snapshot.as_ref().unwrap().1.clone();
+    assert!(start_check(&changed, Some(previous)));
+    wait_for_requests();
+    assert!(updates::is_running(
+        &instance,
+        &changed,
+        &paths.content_updates()
+    ));
+    ui.app.forget_instance_content(&instance.name);
+    assert!(!updates::is_running(
+        &instance,
+        &changed,
+        &paths.content_updates()
+    ));
+    assert!(updates::PENDING_UPDATE_SNAPSHOTS.lock().unwrap().is_empty());
+    assert!(requests.try_recv().is_err());
+}
+
 fn key_kind(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
     KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind)
 }
@@ -744,6 +1072,7 @@ fn launcher_config_save_process() {
         .save_launcher_settings(config)
         .unwrap();
     wait_for_java(&mut ui, "jdk17", "10G");
+    wait_for_edited_config(&mut ui, true);
 
     theme.theme = "dracula".to_owned();
     theme.border_style = crate::config::theme::BorderStyle::Thick;

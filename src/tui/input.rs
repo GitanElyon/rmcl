@@ -2357,6 +2357,7 @@ impl App {
     }
 
     pub(super) fn reset_discovery_states(&mut self) {
+        crate::instance::content::updates::cancel(None);
         self.reconciliation_for = None;
         for cached in self.cached_instance_content.values_mut() {
             cached.reconciliation_for = None;
@@ -2397,18 +2398,26 @@ impl App {
             manifest.clone(),
             path,
             self.content_update_priority(),
+            self.content_update_snapshot
+                .as_ref()
+                .map(|(_, snapshot)| snapshot.clone()),
         );
     }
 
-    pub(super) fn content_update_priority(&self) -> Vec<crate::instance::ProviderProject> {
-        let active = match self.content_tab {
+    pub(super) fn active_installed_content_state(
+        &self,
+    ) -> &widgets::content::list::ContentListState {
+        match self.content_tab {
             widgets::content::ContentTab::ResourcePacks => &self.resource_packs_state,
             widgets::content::ContentTab::Shaders => &self.shaders_state,
             widgets::content::ContentTab::Worlds => &self.world_datapacks_state,
             _ => &self.mods_state,
-        };
+        }
+    }
+
+    pub(super) fn content_update_priority(&self) -> Vec<crate::instance::ProviderProject> {
         [
-            active,
+            self.active_installed_content_state(),
             &self.mods_state,
             &self.resource_packs_state,
             &self.shaders_state,

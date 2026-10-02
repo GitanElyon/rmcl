@@ -20,6 +20,7 @@ pub struct ReconcileResult {
     pub instance_name: String,
     pub instance_created: chrono::DateTime<chrono::Utc>,
     pub manifest: ContentManifest,
+    pub complete: bool,
     pub error: Option<String>,
 }
 
@@ -118,14 +119,15 @@ async fn reconcile_worker() {
         };
         let instance = (job.instance.name.clone(), job.instance.created);
         let rerun_job = job.clone();
-        let result = reconcile(job, &task).await;
-        if let Ok(mut results) = PENDING_RECONCILIATIONS.lock() {
-            results.retain(|pending| {
-                (pending.instance_name.as_str(), pending.instance_created)
-                    != (instance.0.as_str(), instance.1)
-            });
-            results.push(result);
-        }
+        let result = reconcile(
+            job.instance,
+            job.instances_dir,
+            job.client,
+            &task,
+            publish_reconciliation,
+        )
+        .await;
+        publish_reconciliation(result);
         if let Ok(mut coordinator) = RECONCILE_COORDINATOR.lock() {
             if coordinator.rerun.remove(&instance) {
                 coordinator.queue.push_back(rerun_job);
@@ -133,16 +135,27 @@ async fn reconcile_worker() {
                 coordinator.scheduled.remove(&instance);
             }
         }
+    }
+}
+
+pub(crate) fn publish_reconciliation(result: ReconcileResult) {
+    if let Ok(mut results) = PENDING_RECONCILIATIONS.lock() {
+        results.retain(|pending| {
+            pending.instance_name != result.instance_name
+                || pending.instance_created != result.instance_created
+        });
+        results.push(result);
         crate::feedback::request_redraw();
     }
 }
 
-async fn reconcile(job: ReconcileJob, task: &ProgressTask) -> ReconcileResult {
-    let ReconcileJob {
-        instance,
-        instances_dir,
-        client,
-    } = job;
+pub(crate) async fn reconcile(
+    instance: InstanceConfig,
+    instances_dir: PathBuf,
+    client: crate::net::HttpClient,
+    task: &ProgressTask,
+    mut publish: impl FnMut(ReconcileResult),
+) -> ReconcileResult {
     let instance_name = instance.name;
     let instance_created = instance.created;
     task.set_action("Checking content");
@@ -187,9 +200,16 @@ async fn reconcile(job: ReconcileJob, task: &ProgressTask) -> ReconcileResult {
                 )
                 .await
             };
-            task.set_action("Saving content index");
-            task.set_sub_action("Validating content files");
+            task.set_action("Validating content files");
+            task.set_sub_action("Rechecking local files");
             task.set_progress(0, inventory.manifest.files.len() as u64);
+            publish(ReconcileResult {
+                instance_name: instance_name.clone(),
+                instance_created,
+                manifest: inventory.manifest.clone(),
+                complete: false,
+                error: None,
+            });
             let save_progress = task.handle();
             let saved = tokio::task::spawn_blocking(move || {
                 save_reconciled_manifest(
@@ -216,6 +236,7 @@ async fn reconcile(job: ReconcileJob, task: &ProgressTask) -> ReconcileResult {
                 instance_name,
                 instance_created,
                 manifest: saved.unwrap_or_default(),
+                complete: true,
                 error,
             }
         }
@@ -223,12 +244,14 @@ async fn reconcile(job: ReconcileJob, task: &ProgressTask) -> ReconcileResult {
             instance_name,
             instance_created,
             manifest: ContentManifest::default(),
+            complete: true,
             error: Some(error.to_string()),
         },
         Err(error) => ReconcileResult {
             instance_name,
             instance_created,
             manifest: ContentManifest::default(),
+            complete: true,
             error: Some(error.to_string()),
         },
     }

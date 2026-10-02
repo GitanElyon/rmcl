@@ -83,6 +83,24 @@ pub struct BulkUpdatePlan {
 pub static PENDING_UPDATE_SNAPSHOTS: LazyLock<Arc<Mutex<Vec<PendingUpdateSnapshot>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
 
+struct RunningCheck {
+    instance: InstanceConfig,
+    inventory: Vec<ProviderProject>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl RunningCheck {
+    fn matches(&self, instance: &InstanceConfig, manifest: &ContentManifest) -> bool {
+        self.instance.created == instance.created
+            && self.instance.game_version == instance.game_version
+            && self.instance.loader == instance.loader
+            && self.inventory == resolved_inventory(manifest)
+    }
+}
+
+static RUNNING_CHECKS: LazyLock<Mutex<HashMap<std::path::PathBuf, RunningCheck>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 impl UpdateSnapshot {
     pub fn load(path: &std::path::Path) -> Option<Self> {
         std::fs::read(path)
@@ -124,29 +142,121 @@ pub fn spawn(
     manifest: ContentManifest,
     path: std::path::PathBuf,
     priority: Vec<ProviderProject>,
+    previous: Option<UpdateSnapshot>,
 ) {
-    tokio::spawn(async move {
-        let previous =
-            UpdateSnapshot::load(&path).filter(|previous| previous.applies_to(&instance));
-        let registry = Arc::new(super::provider::ProviderRegistry::configured(
+    spawn_with_registry(
+        instance,
+        manifest,
+        path,
+        priority,
+        previous,
+        Arc::new(super::provider::ProviderRegistry::configured(
             crate::net::HttpClient::new(),
-        ));
+        )),
+    );
+}
+
+pub(crate) fn is_running(
+    instance: &InstanceConfig,
+    manifest: &ContentManifest,
+    path: &std::path::Path,
+) -> bool {
+    RUNNING_CHECKS.lock().is_ok_and(|checks| {
+        checks
+            .get(path)
+            .is_some_and(|check| !check.task.is_finished() && check.matches(instance, manifest))
+    })
+}
+
+pub(crate) fn cancel(path: Option<&std::path::Path>) {
+    if let Ok(mut checks) = RUNNING_CHECKS.lock() {
+        checks.retain(|check_path, check| {
+            if path.is_none_or(|path| path == check_path) {
+                check.task.abort();
+                if let Ok(mut pending) = PENDING_UPDATE_SNAPSHOTS.lock() {
+                    pending.retain(|pending| {
+                        pending.instance_name != check.instance.name
+                            || pending.instance_created != check.instance.created
+                    });
+                }
+                false
+            } else {
+                true
+            }
+        });
+    }
+}
+
+pub(crate) fn spawn_with_registry(
+    instance: InstanceConfig,
+    manifest: ContentManifest,
+    path: std::path::PathBuf,
+    priority: Vec<ProviderProject>,
+    previous: Option<UpdateSnapshot>,
+    registry: Arc<super::provider::ProviderRegistry>,
+) -> bool {
+    let Ok(mut checks) = RUNNING_CHECKS.lock() else {
+        return false;
+    };
+    if let Some(check) = checks.get(&path) {
+        if !check.task.is_finished() && check.matches(&instance, &manifest) {
+            return false;
+        }
+        check.task.abort();
+    }
+    let check_path = path.clone();
+    let check_instance = instance.clone();
+    let inventory = resolved_inventory(&manifest);
+    let task = tokio::spawn(async move {
+        let previous = previous
+            .or_else(|| UpdateSnapshot::load(&path))
+            .filter(|previous| previous.applies_to(&instance));
         let snapshot = scan_with_registry(
             &instance,
             &manifest,
             &priority,
             registry,
             previous.as_ref(),
-            |snapshot| publish_snapshot(&instance, snapshot.clone()),
+            |snapshot| publish_current_snapshot(&instance, snapshot.clone(), &path, false),
         )
         .await;
-        if let Ok(bytes) = serde_json::to_vec_pretty(&snapshot)
-            && let Err(error) = crate::storage::write_atomic(&path, &bytes)
-        {
-            tracing::debug!("Could not cache content update snapshot: {error}");
-        }
-        publish_snapshot(&instance, snapshot);
+        publish_current_snapshot(&instance, snapshot, &path, true);
     });
+    checks.insert(
+        check_path,
+        RunningCheck {
+            instance: check_instance,
+            inventory,
+            task,
+        },
+    );
+    true
+}
+
+fn publish_current_snapshot(
+    instance: &InstanceConfig,
+    snapshot: UpdateSnapshot,
+    path: &std::path::Path,
+    complete: bool,
+) {
+    let Ok(checks) = RUNNING_CHECKS.lock() else {
+        return;
+    };
+    if checks
+        .get(path)
+        .is_none_or(|check| check.task.id() != tokio::task::id())
+    {
+        return;
+    }
+    // Hold the check registry through persistence and publication so a replaced
+    // worker cannot overwrite its successor's snapshot.
+    if complete
+        && let Ok(bytes) = serde_json::to_vec_pretty(&snapshot)
+        && let Err(error) = crate::storage::write_atomic(path, &bytes)
+    {
+        tracing::debug!("Could not cache content update snapshot: {error}");
+    }
+    publish_snapshot(instance, snapshot);
 }
 
 fn publish_snapshot(instance: &InstanceConfig, snapshot: UpdateSnapshot) {

@@ -424,6 +424,68 @@ fn any_version_filter_requests_all_project_versions() {
 }
 
 #[test]
+fn empty_filtered_versions_fall_back_to_the_version_picker() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.filters.game_version = GameVersionFilter::Current;
+    state
+        .list
+        .entries
+        .push(project_entry(project("project"), None));
+    state.list.list_state.selected = Some(0);
+    let request = state.begin_versions().unwrap();
+    assert!(!request.all_game_versions);
+
+    let mut fallback = version("new");
+    fallback.game_versions = vec!["1.21.4".to_owned()];
+    DiscoveryState::push_action_result(
+        &request.pending,
+        DiscoveryActionResult::VersionsUnfiltered {
+            request_id: request.request_id,
+            project_id: request.project_id,
+            result: Ok(vec![fallback]),
+        },
+    );
+    state.drain_pending();
+
+    let popup = state.version_popup.as_ref().unwrap();
+    assert!(!popup.loading);
+    assert!(popup.selecting_minecraft_version);
+    assert_eq!(popup.minecraft_versions, ["1.21.4"]);
+    assert_eq!(popup.versions.len(), 1);
+    assert!(state.select_minecraft_version());
+    let popup = state.version_popup.as_ref().unwrap();
+    assert_eq!(popup.selected_minecraft_version.as_deref(), Some("1.21.4"));
+    assert_eq!(popup.visible_versions().count(), 1);
+}
+
+#[test]
+fn unfiltered_fallback_without_any_versions_keeps_the_empty_state() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.filters.game_version = GameVersionFilter::Current;
+    state
+        .list
+        .entries
+        .push(project_entry(project("project"), None));
+    state.list.list_state.selected = Some(0);
+    let request = state.begin_versions().unwrap();
+
+    DiscoveryState::push_action_result(
+        &request.pending,
+        DiscoveryActionResult::VersionsUnfiltered {
+            request_id: request.request_id,
+            project_id: request.project_id,
+            result: Ok(Vec::new()),
+        },
+    );
+    state.drain_pending();
+
+    let popup = state.version_popup.as_ref().unwrap();
+    assert!(!popup.loading);
+    assert!(!popup.selecting_minecraft_version);
+    assert!(popup.versions.is_empty());
+}
+
+#[test]
 fn specific_version_filter_is_kept_for_project_versions() {
     let mut state = DiscoveryState::new(ContentKind::Mod);
     state.filters.game_version = GameVersionFilter::Specific(std::collections::BTreeMap::from([(

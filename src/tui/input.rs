@@ -2026,49 +2026,66 @@ impl App {
             let registry = crate::instance::content::provider::ProviderRegistry::configured(
                 crate::net::HttpClient::new(),
             );
+            let primary_version = if request.game_version_overrides.len() == 1 {
+                request.game_version_overrides[0].clone()
+            } else if request.all_game_versions {
+                String::new()
+            } else {
+                instance.game_version.clone()
+            };
+            let current_version_id = request.current_version_id.clone();
+            let mut fallback = false;
             let result = match registry.get(&request.provider) {
-                Some(provider) => match provider
-                    .compatible_versions(
+                Some(provider) => {
+                    let mut primary = widgets::content::discovery::fetch_popup_versions(
+                        provider,
                         &request.project_id,
                         kind,
-                        if request.game_version_overrides.len() == 1 {
-                            &request.game_version_overrides[0]
-                        } else if request.all_game_versions {
-                            ""
-                        } else {
-                            &instance.game_version
-                        },
+                        &primary_version,
                         instance.loader,
+                        current_version_id.as_deref(),
                     )
-                    .await
-                {
-                    Ok(mut versions) => {
-                        if request.game_version_overrides.len() > 1 {
-                            versions.retain(|version| {
-                                version.game_versions.iter().any(|game_version| {
-                                    request.game_version_overrides.contains(game_version)
-                                })
-                            });
-                        }
-                        if let Some(current) = request.current_version_id.as_deref()
-                            && !versions.iter().any(|version| version.id == current)
-                            && let Ok(version) = provider.version(current).await
-                        {
-                            versions.push(version);
-                        }
-                        if let Ok(bytes) = serde_json::to_vec_pretty(&versions) {
-                            let _ = crate::storage::write_atomic(&version_cache, &bytes);
-                        }
-                        Ok(versions)
-                    }
-                    Err(error) => match std::fs::read(&version_cache)
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                    .await;
+                    if let Ok(versions) = &mut primary
+                        && request.game_version_overrides.len() > 1
                     {
-                        Some(versions) => Ok(versions),
-                        None => Err(error.to_string()),
-                    },
-                },
+                        versions.retain(|version| {
+                            version.game_versions.iter().any(|game_version| {
+                                request.game_version_overrides.contains(game_version)
+                            })
+                        });
+                    }
+                    if let Ok(versions) = &primary
+                        && let Ok(bytes) = serde_json::to_vec_pretty(versions)
+                    {
+                        let _ = crate::storage::write_atomic(&version_cache, &bytes);
+                    }
+                    match primary {
+                        // The list facet matched but no file fits this
+                        // version/loader: retry unfiltered so the popup offers
+                        // the version picker instead of a dead end.
+                        Ok(versions) if versions.is_empty() && !request.all_game_versions => {
+                            fallback = true;
+                            widgets::content::discovery::fetch_popup_versions(
+                                provider,
+                                &request.project_id,
+                                kind,
+                                "",
+                                instance.loader,
+                                current_version_id.as_deref(),
+                            )
+                            .await
+                        }
+                        Ok(versions) => Ok(versions),
+                        Err(error) => match std::fs::read(&version_cache)
+                            .ok()
+                            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                        {
+                            Some(versions) => Ok(versions),
+                            None => Err(error),
+                        },
+                    }
+                }
                 None => Err(format!(
                     "{} content provider is unavailable",
                     request.provider
@@ -2076,10 +2093,18 @@ impl App {
             };
             widgets::content::DiscoveryState::push_action_result(
                 &request.pending,
-                widgets::content::discovery::DiscoveryActionResult::Versions {
-                    request_id: request.request_id,
-                    project_id: request.project_id,
-                    result,
+                if fallback {
+                    widgets::content::discovery::DiscoveryActionResult::VersionsUnfiltered {
+                        request_id: request.request_id,
+                        project_id: request.project_id,
+                        result,
+                    }
+                } else {
+                    widgets::content::discovery::DiscoveryActionResult::Versions {
+                        request_id: request.request_id,
+                        project_id: request.project_id,
+                        result,
+                    }
                 },
             );
         });

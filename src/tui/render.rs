@@ -217,9 +217,18 @@ impl App {
         }
     }
 
+    pub(super) fn overlay_filtered_lines(&self) -> Vec<String> {
+        crate::tui::logging::get_app_logs()
+            .into_iter()
+            .filter(|line| self.log_overlay_search.matches(line))
+            .filter(|line| {
+                !super::widgets::logs_viewer::level_hidden(&self.log_hidden_levels, line)
+            })
+            .collect()
+    }
+
     fn render_log_overlay(&mut self, frame: &mut Frame) {
         use crate::config::theme::{BORDER_STYLE, THEME};
-        use crate::tui::logging::get_app_logs;
         use ratatui::{
             layout::{Alignment, Margin},
             style::{Modifier, Style},
@@ -233,15 +242,13 @@ impl App {
 
         frame.render_widget(Clear, overlay);
 
-        let all_lines = get_app_logs();
-        let filtered: Vec<&String> = all_lines
-            .iter()
-            .filter(|l| self.log_overlay_search.matches(l))
-            .collect();
+        let filtered = self.overlay_filtered_lines();
 
         let visible_height = overlay.height.saturating_sub(2) as usize;
-        let was_at_bottom =
-            self.log_overlay_scroll >= self.log_overlay_max_scroll.saturating_sub(1);
+        self.log_overlay_page = visible_height;
+        // Only follow new lines when pinned to the very bottom; being even
+        // one line up means the user is reading history.
+        let was_at_bottom = self.log_overlay_scroll >= self.log_overlay_max_scroll;
         self.log_overlay_max_scroll = filtered.len().saturating_sub(visible_height);
         if was_at_bottom || self.log_overlay_scroll > self.log_overlay_max_scroll {
             self.log_overlay_scroll = self.log_overlay_max_scroll;
@@ -250,17 +257,28 @@ impl App {
             ratatui::widgets::ScrollbarState::new(self.log_overlay_max_scroll)
                 .position(self.log_overlay_scroll);
 
+        let title = if self.log_hidden_levels.is_empty() {
+            " Logs ".to_owned()
+        } else {
+            format!(" Logs · {} hidden ", self.log_hidden_levels.len())
+        };
         let mut block = Block::bordered()
             .title_top(
-                Line::from(" Logs ").style(
+                Line::from(title).style(
                     Style::default()
                         .fg(theme.text())
                         .add_modifier(Modifier::BOLD),
                 ),
             )
             .title_bottom(
-                crate::tui::widgets::popups::keybind_line(&[("O", " close"), ("/", " search")])
-                    .alignment(Alignment::Right),
+                crate::tui::widgets::popups::keybind_line(&[
+                    ("O", " close"),
+                    ("f", " filter"),
+                    ("y", " copy"),
+                    ("PgUp/PgDn", " page"),
+                    ("/", " search"),
+                ])
+                .alignment(Alignment::Right),
             )
             .border_type(BORDER_STYLE.to_border_type())
             .border_style(Style::default().fg(theme.accent()))
@@ -272,22 +290,22 @@ impl App {
 
         let inner = block.inner(overlay);
         frame.render_widget(block, overlay);
+        self.log_overlay_inner = inner;
 
         let search = &self.log_overlay_search;
+        let selected = self
+            .log_selection
+            .map(|(from, to)| (from.min(to), from.max(to)));
         let styled: Vec<Line> = filtered
             .iter()
+            .enumerate()
             .skip(self.log_overlay_scroll)
             .take(visible_height)
-            .map(|line| {
-                let style = if line.contains("ERROR") || line.contains("FATAL") {
-                    Style::default().fg(theme.error())
-                } else if line.contains("WARN") {
-                    Style::default().fg(theme.warning())
-                } else if line.contains("DEBUG") || line.contains("TRACE") {
-                    Style::default().fg(theme.text_dim())
-                } else {
-                    Style::default().fg(theme.text())
-                };
+            .map(|(index, line)| {
+                let mut style = super::widgets::logs_viewer::line_level_style(line);
+                if selected.is_some_and(|(from, to)| index >= from && index <= to) {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
                 search.highlight_line(line, style)
             })
             .collect();
@@ -305,6 +323,14 @@ impl App {
             scrollbar_area,
             &mut self.log_overlay_scrollbar,
         );
+        if self.log_filter_open {
+            super::widgets::logs_viewer::render_level_filter(
+                frame,
+                overlay,
+                self.log_filter_selected,
+                &self.log_hidden_levels,
+            );
+        }
     }
 
     fn sync_error_effects(&mut self, events: &[error_buffer::ErrorEvent]) {

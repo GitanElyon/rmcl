@@ -471,6 +471,7 @@ pub async fn plan_bulk(
     minecraft_dir: &std::path::Path,
     requests: Vec<UpdateRequest>,
     conflicts: Vec<UpdateConflict>,
+    progress: Option<&crate::feedback::progress::ProgressTaskHandle>,
 ) -> BulkUpdatePlan {
     let registry = crate::instance::content::provider::ProviderRegistry::configured(
         crate::net::HttpClient::new(),
@@ -482,6 +483,7 @@ pub async fn plan_bulk(
         minecraft_dir,
         requests,
         conflicts,
+        progress,
     )
     .await
 }
@@ -493,9 +495,16 @@ pub(super) async fn plan_bulk_with_registry(
     minecraft_dir: &std::path::Path,
     mut requests: Vec<UpdateRequest>,
     mut conflicts: Vec<UpdateConflict>,
+    progress: Option<&crate::feedback::progress::ProgressTaskHandle>,
 ) -> BulkUpdatePlan {
     loop {
         let request_count = requests.len();
+        if let Some(progress) = progress
+            && request_count > 0
+        {
+            progress.set_progress(0, request_count as u64);
+        }
+        let mut completed = 0;
         let projected_manifest = project_updates(manifest, minecraft_dir, &requests);
         let mut accepted = Vec::new();
         let mut survivors = Vec::new();
@@ -505,6 +514,13 @@ pub(super) async fn plan_bulk_with_registry(
             optional_dependencies: 0,
         };
         for request in requests {
+            if let Some(progress) = progress {
+                progress.set_sub_action(format!(
+                    "Checking {} ({}/{request_count})",
+                    request.title,
+                    completed + 1
+                ));
+            }
             let root = InstallRoot {
                 provider: request.update.installed.provider.clone(),
                 project_id: request.update.installed.project_id.clone(),
@@ -541,6 +557,10 @@ pub(super) async fn plan_bulk_with_registry(
                         installed_path: request.installed_path,
                         reason: error.to_string(),
                     });
+                    completed += 1;
+                    if let Some(progress) = progress {
+                        progress.set_progress(completed, request_count as u64);
+                    }
                     continue;
                 }
             };
@@ -562,11 +582,19 @@ pub(super) async fn plan_bulk_with_registry(
                         installed_path: request.installed_path,
                         reason: error.to_string(),
                     });
+                    completed += 1;
+                    if let Some(progress) = progress {
+                        progress.set_progress(completed, request_count as u64);
+                    }
                     continue;
                 }
             }
             accepted.push(plan);
             survivors.push(request);
+            completed += 1;
+            if let Some(progress) = progress {
+                progress.set_progress(completed, request_count as u64);
+            }
         }
         if survivors.len() != request_count {
             requests = survivors;

@@ -9,8 +9,8 @@ use super::local::{current_fingerprint, directory_fingerprint_metadata, relative
 use crate::feedback::progress::{ProgressTask, ProgressTaskHandle};
 use crate::instance::InstanceConfig;
 use crate::instance::content::manifest::{
-    ContentFileRecord, ContentKind, ContentLock, ContentManifest, ProviderProject, Resolution,
-    fingerprint, fingerprint_metadata,
+    ContentFileRecord, ContentKind, ContentLock, ContentManifest, ManifestError, ProviderProject,
+    Resolution, fingerprint, fingerprint_metadata,
 };
 use crate::instance::content::provider::{FingerprintQuery, ProviderRegistry};
 use crate::storage::InstancePaths;
@@ -224,6 +224,22 @@ pub(crate) async fn reconcile(
             .unwrap_or_else(|error| {
                 Err(std::io::Error::other(format!("Content save task failed: {error}")).into())
             });
+            if matches!(saved, Err(ManifestError::Busy(_))) {
+                // Another operation (for example a reinstall commit) holds the
+                // manifest lock. It triggers its own reconciliation when done,
+                // so stay silent instead of warning on every reinstall.
+                tracing::debug!(
+                    "Content reconciliation for {instance_name} deferred: manifest busy"
+                );
+                let manifest = ContentManifest::load(&paths.content_manifest()).unwrap_or_default();
+                return ReconcileResult {
+                    instance_name,
+                    instance_created,
+                    manifest,
+                    complete: true,
+                    error: None,
+                };
+            }
             let error = match (resolution_result, &saved) {
                 (Ok(()), Ok(_)) => None,
                 (Err(error), Ok(_)) => Some(error.to_string()),
@@ -240,13 +256,31 @@ pub(crate) async fn reconcile(
                 error,
             }
         }
-        Ok(Err(error)) => ReconcileResult {
-            instance_name,
-            instance_created,
-            manifest: ContentManifest::default(),
-            complete: true,
-            error: Some(error.to_string()),
-        },
+        Ok(Err(error)) => {
+            if error
+                .downcast_ref::<ManifestError>()
+                .is_some_and(|error| matches!(error, ManifestError::Busy(_)))
+            {
+                tracing::debug!(
+                    "Content reconciliation for {instance_name} deferred: manifest busy"
+                );
+                let manifest = ContentManifest::load(&paths.content_manifest()).unwrap_or_default();
+                return ReconcileResult {
+                    instance_name,
+                    instance_created,
+                    manifest,
+                    complete: true,
+                    error: None,
+                };
+            }
+            ReconcileResult {
+                instance_name,
+                instance_created,
+                manifest: ContentManifest::default(),
+                complete: true,
+                error: Some(error.to_string()),
+            }
+        }
         Err(error) => ReconcileResult {
             instance_name,
             instance_created,

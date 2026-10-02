@@ -89,4 +89,30 @@ mod tests {
         assert_eq!(badge_cell.bg, theme.success());
         assert_eq!(badge_cell.fg, theme.background());
     }
+
+    #[test]
+    fn version_popup_installed_badge_keeps_colors_on_selection() {
+        let theme = THEME.as_ref();
+        let area = Rect::new(0, 0, 30, 2);
+        let mut buffer = Buffer::empty(area);
+        let items = vec![
+            ListItem::new(Line::from(vec![Span::raw("1.11.3")])),
+            ListItem::new(Line::from(vec![
+                Span::raw("1.11.2  "),
+                Span::styled(
+                    " Installed ",
+                    Style::default()
+                        .fg(theme.background())
+                        .bg(theme.success())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])),
+        ];
+
+        render_styled(items, 1, area, &mut buffer);
+
+        let badge_cell = buffer.cell((10, 1)).unwrap();
+        assert_eq!(badge_cell.bg, theme.success());
+        assert_eq!(badge_cell.fg, theme.background());
+    }
 }

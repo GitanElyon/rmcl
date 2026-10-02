@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-use crossterm::event::{KeyCode, MouseEventKind};
+use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use std::path::{Path, PathBuf};
 
 use super::harness::UiHarness;
@@ -770,6 +770,158 @@ fn switching_instances_discards_another_instances_update_review() {
     ui.key(KeyCode::Enter);
 
     assert!(ui.app.content_update_popup.is_none());
+}
+
+#[test]
+fn checking_popup_locks_input_until_cancelled() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("A");
+    ui.app.content_update_popup = Some(crate::tui::widgets::content::update::State::checking(
+        "A".to_owned(),
+        ContentKind::Mod,
+        None,
+        Vec::new(),
+    ));
+    ui.app.focused = FocusedArea::Content;
+
+    ui.key(KeyCode::Tab);
+    assert!(ui.app.content_update_popup.is_some());
+    assert_eq!(ui.app.content_tab, ContentTab::Mods);
+    ui.draw();
+    assert!(ui.screen().contains("Preparing updates"));
+
+    ui.key(KeyCode::Esc);
+    assert!(ui.app.content_update_popup.is_none());
+}
+
+#[test]
+fn log_overlay_pages_and_stays_put_while_reading_history() {
+    use crate::tui::logging::{clear_app_logs, push_app_log};
+    let mut ui = UiHarness::new();
+    clear_app_logs();
+    for index in 0..40 {
+        push_app_log(format!("12:00:{index:02}:INFO:rmcl: line {index}"));
+    }
+    ui.app.focused = FocusedArea::OverviewExpanded;
+    ui.draw();
+    // 30-row terminal: overlay 28 rows, minus border = 26 visible lines.
+    assert_eq!(ui.app.log_overlay_max_scroll, 14);
+    assert_eq!(ui.app.log_overlay_scroll, 14);
+
+    ui.key(KeyCode::PageUp);
+    assert_eq!(ui.app.log_overlay_scroll, 0);
+    ui.key(KeyCode::PageDown);
+    assert_eq!(ui.app.log_overlay_scroll, 14);
+    for _ in 0..5 {
+        ui.key(KeyCode::Char('k'));
+    }
+    assert_eq!(ui.app.log_overlay_scroll, 9);
+    for index in 40..45 {
+        push_app_log(format!("12:01:{index:02}:INFO:rmcl: line {index}"));
+    }
+    ui.draw();
+    assert_eq!(ui.app.log_overlay_max_scroll, 19);
+    assert_eq!(ui.app.log_overlay_scroll, 9);
+
+    ui.key(KeyCode::End);
+    ui.draw();
+    assert_eq!(ui.app.log_overlay_scroll, 19);
+    push_app_log("12:02:00:INFO:rmcl: latest".to_owned());
+    ui.draw();
+    assert_eq!(ui.app.log_overlay_scroll, 20);
+    clear_app_logs();
+}
+
+#[test]
+fn log_overlay_level_filter_opens_toggles_and_closes() {
+    use crate::instance::launch::parser::LogLevel;
+    let mut ui = UiHarness::new();
+    ui.app.focused = FocusedArea::OverviewExpanded;
+
+    ui.key(KeyCode::Char('f'));
+    assert!(ui.app.log_filter_open);
+    ui.draw();
+    assert!(ui.screen().contains("Log levels"));
+    ui.key(KeyCode::Enter);
+    assert_eq!(ui.app.log_hidden_levels, vec![LogLevel::Error]);
+    ui.draw();
+    assert!(ui.screen().contains("1 hidden"));
+    ui.key(KeyCode::Esc);
+    assert!(!ui.app.log_filter_open);
+    assert_eq!(ui.app.log_hidden_levels, vec![LogLevel::Error]);
+}
+
+#[test]
+fn mouse_drag_selects_viewer_lines_for_yank() {
+    use crate::instance::logs::files::LogFileEntry;
+    use crossterm::event::KeyModifiers;
+    let mut ui = UiHarness::new();
+    ui.add_instance("A");
+    ui.app.focused = FocusedArea::Content;
+    ui.app.content_tab = ContentTab::Logs;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("a.log");
+    std::fs::write(&path, "alpha\nbeta\ngamma").unwrap();
+    ui.app.logs_state.entries = vec![LogFileEntry {
+        name: "a.log".to_owned(),
+        path,
+    }];
+    ui.app.logs_state.list_state.selected = Some(0);
+    ui.app.logs_state.loaded_for = Some("A".to_owned());
+    ui.app.logs_state.viewer_lines =
+        vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()];
+    ui.draw();
+    let area = ui.app.logs_state.viewer_area;
+    assert!(area.height >= 3);
+    let click = |kind, row| MouseEvent {
+        kind,
+        column: area.x + 2,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Down(MouseButton::Left), area.y));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Drag(MouseButton::Left), area.y + 1));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Up(MouseButton::Left), area.y + 1));
+    assert_eq!(ui.app.logs_state.selection, Some((0, 1)));
+    assert!(!ui.app.logs_state.selecting);
+}
+
+#[test]
+fn mouse_drag_selects_overlay_lines_for_yank() {
+    use crate::tui::logging::{clear_app_logs, push_app_log};
+    use crossterm::event::KeyModifiers;
+    let mut ui = UiHarness::new();
+    clear_app_logs();
+    for index in 0..10 {
+        push_app_log(format!("12:00:{index:02}:INFO:rmcl: line {index}"));
+    }
+    ui.app.focused = FocusedArea::OverviewExpanded;
+    ui.draw();
+    let area = ui.app.log_overlay_inner;
+    assert!(area.height >= 3);
+    let click = |kind, row| MouseEvent {
+        kind,
+        column: area.x + 2,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Down(MouseButton::Left), area.y));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Drag(MouseButton::Left), area.y + 2));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Up(MouseButton::Left), area.y + 2));
+    assert_eq!(ui.app.log_selection, Some((0, 2)));
+    ui.key(KeyCode::Char('y'));
+    assert!(
+        crate::feedback::errors::peek_all_errors()
+            .iter()
+            .any(|event| event.message.contains("Copied 3 line(s)"))
+    );
+    clear_app_logs();
 }
 
 #[test]

@@ -3859,6 +3859,7 @@ name = "rmcl"
 version = "0.5.1"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "clap",
  "color-eyre",

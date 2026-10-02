@@ -1709,6 +1709,7 @@ async fn rejected_bulk_roots_are_removed_from_survivor_projections() {
         minecraft,
         requests,
         Vec::new(),
+        None,
     )
     .await;
     assert_eq!(plan.roots.len(), 1);
@@ -1763,6 +1764,7 @@ async fn accepted_bulk_dependencies_keep_actual_old_ownership_and_replace_files(
         &minecraft,
         requests,
         Vec::new(),
+        None,
     )
     .await;
     assert!(plan.conflicts.is_empty());

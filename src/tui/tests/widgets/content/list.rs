@@ -1205,6 +1205,47 @@ fn incompatible_installed_version_renders_red_footer() {
 }
 
 #[test]
+fn warning_descriptions_render_in_warning_color() {
+    let mut conflict = entry("Voxy");
+    conflict.description =
+        "Other selected updates require different versions of Sodium.".to_owned();
+    let mut state = ContentListState {
+        entries: vec![conflict],
+        warning_descriptions: true,
+        ..ContentListState::default()
+    };
+    state.rebuild_display_metadata();
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 5)).unwrap();
+    terminal
+        .draw(|frame| {
+            super::render(
+                frame,
+                frame.area(),
+                &mut state,
+                true,
+                "Loading...",
+                "Empty",
+                &picker,
+                false,
+                true,
+            );
+        })
+        .unwrap();
+
+    let theme = crate::config::theme::THEME.as_ref();
+    let buffer = terminal.backend().buffer().clone();
+    let description_color = (0..buffer.area.height).find_map(|y| {
+        let row = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_owned())
+            .collect::<String>();
+        row.find("Other selected")
+            .map(|start| buffer[(u16::try_from(start).unwrap(), y)].fg)
+    });
+    assert_eq!(description_color, Some(theme.warning()));
+}
+
+#[test]
 fn multiline_rendering_uses_the_space_beside_large_icons() {
     let mut world = entry("World");
     world.world_details = Some(WorldDetails {

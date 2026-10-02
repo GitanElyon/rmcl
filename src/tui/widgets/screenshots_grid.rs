@@ -290,9 +290,13 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut ScreenshotsState) -> bool {
                 .get(state.selected)
                 .and_then(|index| state.entries.get(*index))
                 && let Some(dir) = entry.path.parent()
-                && let Err(e) = open::that_detached(dir)
+                && let Err(error) = open::that_detached(dir)
             {
-                tracing::error!("Failed to open directory: {}", e);
+                tracing::error!("Failed to open directory: {}", error);
+                crate::feedback::errors::push_message(
+                    tracing::Level::ERROR,
+                    format!("Could not open {}: {error}", dir.display()),
+                );
             }
             true
         }
@@ -300,9 +304,13 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut ScreenshotsState) -> bool {
             if let Some(entry) = filtered
                 .get(state.selected)
                 .and_then(|index| state.entries.get(*index))
-                && let Err(e) = open::that_detached(&entry.path)
+                && let Err(error) = open::that_detached(&entry.path)
             {
-                tracing::error!("Failed to open file: {}", e);
+                tracing::error!("Failed to open file: {}", error);
+                crate::feedback::errors::push_message(
+                    tracing::Level::ERROR,
+                    format!("Could not open {}: {error}", entry.path.display()),
+                );
             }
             true
         }

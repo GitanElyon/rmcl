@@ -24,6 +24,9 @@ impl App {
             }
             return;
         }
+        if self.handle_log_selection_mouse(event) {
+            return;
+        }
         if event.kind != MouseEventKind::Down(MouseButton::Left) {
             return;
         }
@@ -58,6 +61,135 @@ impl App {
         }
     }
 
+    fn handle_log_selection_mouse(&mut self, event: MouseEvent) -> bool {
+        use ratatui::layout::Position;
+        let at = Position::new(event.column, event.row);
+        if self.focused == FocusedArea::OverviewExpanded && !self.log_filter_open {
+            let area = self.log_overlay_inner;
+            match event.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if area.is_empty() || !area.contains(at) {
+                        return false;
+                    }
+                    let count = self.overlay_filtered_lines().len();
+                    if count == 0 {
+                        return false;
+                    }
+                    let index = (self.log_overlay_scroll
+                        + usize::from(event.row.saturating_sub(area.y)))
+                    .min(count - 1);
+                    self.log_selecting = true;
+                    self.log_selection = Some((index, index));
+                    true
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if !self.log_selecting {
+                        return false;
+                    }
+                    let count = self.overlay_filtered_lines().len();
+                    if count == 0 {
+                        return false;
+                    }
+                    let relative = usize::from(event.row.saturating_sub(area.y))
+                        .min(usize::from(area.height.saturating_sub(1)));
+                    let index = (self.log_overlay_scroll + relative).min(count - 1);
+                    if let Some(selection) = self.log_selection.as_mut() {
+                        selection.1 = index;
+                    }
+                    true
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if !self.log_selecting {
+                        return false;
+                    }
+                    self.log_selecting = false;
+                    true
+                }
+                _ => false,
+            }
+        } else if self.focused == FocusedArea::Content
+            && self.content_tab == widgets::content::ContentTab::Logs
+            && !self.logs_state.filter_open
+        {
+            let area = self.logs_state.viewer_area;
+            match event.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if area.is_empty() || !area.contains(at) {
+                        return false;
+                    }
+                    let count = widgets::logs_viewer::filtered_viewer_line_count(&self.logs_state);
+                    if count == 0 {
+                        return false;
+                    }
+                    let index = (self.logs_state.viewer_scroll
+                        + usize::from(event.row.saturating_sub(area.y)))
+                    .min(count - 1);
+                    self.logs_state.selecting = true;
+                    self.logs_state.selection = Some((index, index));
+                    true
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if !self.logs_state.selecting {
+                        return false;
+                    }
+                    let count = widgets::logs_viewer::filtered_viewer_line_count(&self.logs_state);
+                    if count == 0 {
+                        return false;
+                    }
+                    let relative = usize::from(event.row.saturating_sub(area.y))
+                        .min(usize::from(area.height.saturating_sub(1)));
+                    let index = (self.logs_state.viewer_scroll + relative).min(count - 1);
+                    if let Some(selection) = self.logs_state.selection.as_mut() {
+                        selection.1 = index;
+                    }
+                    true
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if !self.logs_state.selecting {
+                        return false;
+                    }
+                    self.logs_state.selecting = false;
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    fn yank_overlay_selection(&mut self) {
+        let Some((from, to)) = self
+            .log_selection
+            .map(|(first, second)| (first.min(second), first.max(second)))
+        else {
+            error_buffer::push_message(
+                tracing::Level::INFO,
+                "Drag across log lines to select them, then press y to copy",
+            );
+            return;
+        };
+        let lines = self.overlay_filtered_lines();
+        if lines.is_empty() {
+            return;
+        }
+        let end = to.min(lines.len() - 1);
+        if from > end {
+            return;
+        }
+        match widgets::logs_viewer::copy_to_clipboard(&lines[from..=end].join("\n")) {
+            Some((count, false)) => error_buffer::push_message(
+                tracing::Level::INFO,
+                format!("Copied {count} line(s) to the clipboard"),
+            ),
+            Some((count, true)) => error_buffer::push_message(
+                tracing::Level::WARN,
+                format!("Copied the first {count} lines; the selection was truncated"),
+            ),
+            None => {}
+        }
+    }
+
     pub(super) fn handle_key_event(&mut self, key_event: KeyEvent) -> color_eyre::Result<()> {
         if self.content_update_popup.as_ref().is_some_and(|update| {
             update.phase != widgets::content::update::Phase::Applying
@@ -66,8 +198,9 @@ impl App {
                     .selected_instance()
                     .map(|instance| instance.name.as_str())
                     != Some(update.instance_name.as_str())
-        }) {
-            self.content_update_popup = None;
+        }) && let Some(popup) = self.content_update_popup.take()
+        {
+            popup.cancel();
             return Ok(());
         }
         if self
@@ -165,10 +298,40 @@ impl App {
 
         // log overlay eats all input when open, including its own search sub-mode
         if self.focused == FocusedArea::OverviewExpanded {
+            if self.log_filter_open {
+                match key_event.code {
+                    KeyCode::Esc | KeyCode::Char('f') => {
+                        self.log_filter_open = false;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.log_filter_selected = (self.log_filter_selected + 1).min(
+                            crate::tui::widgets::logs_viewer::LOG_LEVEL_FILTER_ORDER.len() - 1,
+                        );
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.log_filter_selected = self.log_filter_selected.saturating_sub(1);
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        crate::tui::widgets::logs_viewer::toggle_hidden_level(
+                            &mut self.log_hidden_levels,
+                            self.log_filter_selected,
+                        );
+                        self.log_selection = None;
+                        self.log_overlay_scroll = 0;
+                    }
+                    KeyCode::Char('r') => {
+                        self.log_hidden_levels.clear();
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
             if self.log_overlay_search.active {
                 match key_event.code {
                     KeyCode::Enter => {
                         self.log_overlay_search.confirm();
+                        self.log_selection = None;
+                        self.log_overlay_scroll = 0;
                     }
                     KeyCode::Esc => {
                         self.log_overlay_search.deactivate();
@@ -185,6 +348,10 @@ impl App {
             }
             match key_event.code {
                 KeyCode::Char('O') | KeyCode::Esc => {
+                    if self.log_selection.take().is_some() {
+                        self.log_selecting = false;
+                        return Ok(());
+                    }
                     self.focused = self.pre_overlay_focused;
                     self.log_overlay_search.deactivate();
                     return Ok(());
@@ -199,16 +366,37 @@ impl App {
                     self.log_overlay_scroll = self.log_overlay_scroll.saturating_sub(1);
                     return Ok(());
                 }
-                KeyCode::Char('G') => {
+                KeyCode::Char('G') | KeyCode::End => {
                     self.log_overlay_scroll = self.log_overlay_max_scroll;
                     return Ok(());
                 }
-                KeyCode::Char('g') => {
+                KeyCode::Char('g') | KeyCode::Home => {
                     self.log_overlay_scroll = 0;
+                    return Ok(());
+                }
+                KeyCode::PageDown => {
+                    let page = self.log_overlay_page.max(1);
+                    self.log_overlay_scroll =
+                        (self.log_overlay_scroll + page).min(self.log_overlay_max_scroll);
+                    return Ok(());
+                }
+                KeyCode::PageUp => {
+                    let page = self.log_overlay_page.max(1);
+                    self.log_overlay_scroll = self.log_overlay_scroll.saturating_sub(page);
                     return Ok(());
                 }
                 KeyCode::Char('/') => {
                     self.log_overlay_search.activate();
+                    return Ok(());
+                }
+                KeyCode::Char('f') => {
+                    self.log_filter_open = true;
+                    self.log_filter_selected = 0;
+                    return Ok(());
+                }
+                KeyCode::Char('y') => {
+                    self.log_selecting = false;
+                    self.yank_overlay_selection();
                     return Ok(());
                 }
                 _ => {
@@ -1088,8 +1276,12 @@ impl App {
                                 .instances_dir
                                 .join(&instance.name)
                                 .join(crate::storage::MINECRAFT_DIR_NAME);
-                            if let Err(e) = open::that_detached(&dir) {
-                                tracing::error!("Failed to open instance directory: {}", e);
+                            if let Err(error) = open::that_detached(&dir) {
+                                tracing::error!("Failed to open instance directory: {}", error);
+                                error_buffer::push_message(
+                                    tracing::Level::ERROR,
+                                    format!("Could not open {}: {error}", dir.display()),
+                                );
                             }
                         }
                     }
@@ -1521,15 +1713,14 @@ impl App {
         {
             return;
         }
-        let state = widgets::content::update::State::checking(
+        let mut state = widgets::content::update::State::checking(
             instance.name.clone(),
             kind,
             target_world.clone(),
             source_entries,
         );
         let pending = state.pending.clone();
-        self.content_update_popup = Some(state);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let progress = crate::feedback::progress::ProgressTask::start("Preparing updates");
             let snapshot = cached_snapshot.expect("checked above");
             let target_directory = target_world
@@ -1581,6 +1772,7 @@ impl App {
                 &paths.minecraft(),
                 requests,
                 conflicts,
+                Some(&progress.handle()),
             )
             .await;
             progress.finish();
@@ -1591,6 +1783,8 @@ impl App {
                 crate::feedback::request_redraw();
             }
         });
+        state.abort_handle = Some(task.abort_handle());
+        self.content_update_popup = Some(state);
     }
 
     fn handle_content_update_key(&mut self, key_event: KeyEvent) {
@@ -1598,8 +1792,11 @@ impl App {
             return;
         };
         match (state.phase, key_event.code) {
-            (widgets::content::update::Phase::Checking, KeyCode::Esc)
-            | (widgets::content::update::Phase::Review, KeyCode::Esc)
+            (widgets::content::update::Phase::Checking, KeyCode::Esc) => {
+                state.cancel();
+                self.content_update_popup = None;
+            }
+            (widgets::content::update::Phase::Review, KeyCode::Esc)
             | (widgets::content::update::Phase::Conflicts, KeyCode::Esc) => {
                 self.content_update_popup = None;
             }

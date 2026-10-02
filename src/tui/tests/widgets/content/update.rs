@@ -89,6 +89,8 @@ fn update_review_reuses_content_rows() {
         .unwrap();
 
     insta::assert_snapshot!(terminal.backend());
+    assert_eq!(state.list.entries[0].title_suffix, None);
+    assert!(!state.list.warning_descriptions);
 }
 
 #[test]
@@ -118,4 +120,5 @@ fn update_conflicts_explain_why_the_item_was_not_updated() {
         state.list.entries[0].description,
         "Other selected updates require different versions of Library.\nThis mod was left unchanged; update it separately with v."
     );
+    assert!(state.list.warning_descriptions);
 }

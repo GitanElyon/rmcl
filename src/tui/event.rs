@@ -57,8 +57,9 @@ impl App {
                         .selected_instance()
                         .map(|instance| instance.name.as_str())
                         != Some(update.instance_name.as_str())
-            }) {
-                self.content_update_popup = None;
+            }) && let Some(popup) = self.content_update_popup.take()
+            {
+                popup.cancel();
             }
             let content_update_completed = self.content_update_popup.as_mut().and_then(|update| {
                 update.drain();
@@ -1272,7 +1273,9 @@ impl App {
         }
         super::app::CachedInstanceContent::default().swap(self);
         self.content_for = None;
-        self.content_update_popup = None;
+        if let Some(popup) = self.content_update_popup.take() {
+            popup.cancel();
+        }
         self.provider_conflict = None;
     }
 

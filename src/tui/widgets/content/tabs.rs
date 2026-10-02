@@ -453,6 +453,9 @@ pub fn render(
                 if logs_state.viewer_focused {
                     &[
                         ("j/k", " scroll"),
+                        ("PgUp/PgDn", " page"),
+                        ("f", " filter"),
+                        ("y", " copy"),
                         ("g/G", " top/bottom"),
                         ("d", " delete"),
                         ("Esc", " back"),
@@ -464,6 +467,8 @@ pub fn render(
                         ("j/k", " navigate"),
                         ("⏎", " view"),
                         ("d", " delete"),
+                        ("Shift+⏎", " open dir"),
+                        ("f", " filter"),
                         ("h/l", " tabs"),
                         ("/", " search"),
                         ("Tab", " discovery"),
@@ -1624,7 +1629,9 @@ pub(crate) fn render_version_popup(
                 .style(Style::default().fg(THEME.as_ref().text_dim()))
                 .render(area, buffer);
             } else {
-                crate::tui::widgets::popups::select_list::render(
+                // render_styled preserves the badge spans: highlight only adds
+                // bold instead of painting fg/bg over the whole row.
+                crate::tui::widgets::popups::select_list::render_styled(
                     items.clone(),
                     selected,
                     area,

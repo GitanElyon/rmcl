@@ -276,6 +276,7 @@ pub struct ContentListState {
     images_dirty: bool,
     display_metadata: HashMap<String, DisplayMetadata>,
     pub search: crate::tui::widgets::search::SearchState,
+    pub warning_descriptions: bool,
     filter_search: bool,
     sort_metadata: RefCell<HashMap<std::path::PathBuf, FileSortMetadata>>,
     filtered_cache: RefCell<Option<CachedSelection>>,
@@ -329,6 +330,7 @@ impl Default for ContentListState {
             images_dirty: true,
             display_metadata: HashMap::new(),
             search: crate::tui::widgets::search::SearchState::default(),
+            warning_descriptions: false,
             filter_search: true,
             sort_metadata: RefCell::new(HashMap::new()),
             filtered_cache: RefCell::new(None),
@@ -2003,9 +2005,13 @@ fn handle_key_inner(
         KeyCode::Enter if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
             if let Some(&real_idx) = state.list_state.selected.and_then(|i| filtered.get(i))
                 && let Some(dir) = state.entries[real_idx].path.parent()
-                && let Err(e) = open::that_detached(dir)
+                && let Err(error) = open::that_detached(dir)
             {
-                tracing::error!("Failed to open directory: {}", e);
+                tracing::error!("Failed to open directory: {}", error);
+                crate::feedback::errors::push_message(
+                    tracing::Level::ERROR,
+                    format!("Could not open {}: {error}", dir.display()),
+                );
             }
             true
         }
@@ -2089,6 +2095,7 @@ pub fn render(
     let local_game_version = state.local_game_version.clone();
     let filtered_rows = &filtered;
     let search = &state.search;
+    let warning_descriptions = state.warning_descriptions;
     let ready_image_stems: HashSet<String> = state.image_protocols.keys().cloned().collect();
 
     let builder = ListBuilder::new(move |context| {
@@ -2119,7 +2126,7 @@ pub fn render(
             theme.stripe()
         };
 
-        let (name_style, description_style, background) = match (enabled, show_selected) {
+        let (name_style, mut description_style, background) = match (enabled, show_selected) {
             (true, true) => (
                 Style::default()
                     .fg(theme.accent())
@@ -2149,6 +2156,9 @@ pub fn render(
                 stripe_bg,
             ),
         };
+        if warning_descriptions {
+            description_style = Style::default().fg(theme.warning());
+        }
         let title_suffix_color = world_details
             .and_then(|details| details.game_mode)
             .map(world_game_mode_color)

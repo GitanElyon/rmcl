@@ -9,6 +9,8 @@ use std::time::Instant;
 use ratatui::{
     Frame,
     layout::{Constraint, Margin},
+    style::Style,
+    widgets::{Paragraph, Widget},
 };
 
 use crate::instance::ContentKind;
@@ -39,6 +41,7 @@ pub struct State {
     pub target_world: Option<(String, PathBuf)>,
     pub completed: bool,
     pub applied: bool,
+    pub abort_handle: Option<tokio::task::AbortHandle>,
     pub list: super::list::ContentListState,
     source_entries: HashMap<PathBuf, ContentEntry>,
 }
@@ -60,11 +63,18 @@ impl State {
             target_world,
             completed: false,
             applied: false,
+            abort_handle: None,
             list: super::list::ContentListState::default(),
             source_entries: entries
                 .into_iter()
                 .map(|entry| (entry.path.clone(), entry))
                 .collect(),
+        }
+    }
+
+    pub fn cancel(&self) {
+        if let Some(handle) = &self.abort_handle {
+            handle.abort();
         }
     }
 
@@ -116,7 +126,10 @@ impl State {
     }
 
     pub fn visible(&self) -> bool {
-        matches!(self.phase, Phase::Conflicts | Phase::Review) && !self.completed
+        matches!(
+            self.phase,
+            Phase::Checking | Phase::Conflicts | Phase::Review
+        ) && !self.completed
     }
 
     pub fn has_updates(&self) -> bool {
@@ -164,7 +177,8 @@ impl State {
                 .flat_map(|plan| plan.roots.iter())
                 .map(|root| {
                     let mut entry = self.entry_for(&root.installed_path, &root.title);
-                    entry.title_suffix = Some("Update".to_owned());
+                    // Every row here is an update; a badge would repeat the popup title.
+                    entry.title_suffix = None;
                     entry.footer_label = None;
                     entry.footer_change = Some((
                         root.current_version.clone(),
@@ -175,6 +189,7 @@ impl State {
                 .collect(),
             Phase::Checking | Phase::Applying => Vec::new(),
         };
+        self.list.warning_descriptions = matches!(self.phase, Phase::Conflicts);
         self.list.set_entries(entries);
     }
 
@@ -211,13 +226,35 @@ pub fn render(frame: &mut Frame, state: &mut State, picker: &ratatui_image::pick
     if !state.visible() {
         return;
     }
+    let theme = crate::config::theme::THEME.as_ref();
+    if state.phase == Phase::Checking {
+        let area = frame.area().centered(
+            Constraint::Percentage(40),
+            Constraint::Length(5.min(frame.area().height.saturating_sub(4))),
+        );
+        let popup = PopupFrame {
+            title: crate::tui::widgets::styled_title("Preparing updates", false),
+            border_color: theme.accent(),
+            bg: Some(theme.surface()),
+            keybinds: Some(crate::tui::widgets::popups::keybind_line(&[(
+                "Esc", " cancel",
+            )])),
+            search_line: None,
+            content: Box::new(|area, buffer| {
+                Paragraph::new("Resolving dependencies…")
+                    .style(Style::default().fg(crate::config::theme::THEME.as_ref().text_dim()))
+                    .render(area, buffer);
+            }),
+        };
+        frame.render_widget(popup, area);
+        return;
+    }
     let count = state.list.entries.len() as u16;
     let height = count.saturating_mul(3).saturating_add(2).clamp(5, 20);
     let area = frame.area().centered(
         Constraint::Percentage(60),
         Constraint::Length(height.min(frame.area().height.saturating_sub(4))),
     );
-    let theme = crate::config::theme::THEME.as_ref();
     let (title, keybinds) = match state.phase {
         Phase::Conflicts => (
             "Updates needing attention",

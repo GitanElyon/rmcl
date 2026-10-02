@@ -27,7 +27,14 @@ pub fn get_app_logs() -> Vec<String> {
     APP_LOG_LINES.lock().map(|l| l.clone()).unwrap_or_default()
 }
 
-fn push_app_log(line: String) {
+#[cfg(test)]
+pub(crate) fn clear_app_logs() {
+    if let Ok(mut lines) = APP_LOG_LINES.lock() {
+        lines.clear();
+    }
+}
+
+pub(crate) fn push_app_log(line: String) {
     if let Ok(mut lines) = APP_LOG_LINES.lock() {
         lines.push(line);
         if lines.len() > 5000 {

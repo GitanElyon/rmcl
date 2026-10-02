@@ -144,6 +144,51 @@ fn job(name: &str) -> ReconcileJob {
     }
 }
 
+#[tokio::test]
+async fn busy_manifest_defers_reconciliation_without_an_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let instances_dir = temp.path().join("instances");
+    let paths = crate::storage::InstancePaths::new(instances_dir.join("Busy"));
+    let path = paths.minecraft().join("mods/example.jar");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"example").unwrap();
+    let mut record = resolved_record();
+    record.relative_path = PathBuf::from("mods/example.jar");
+    record.fingerprint = fingerprint(&path).unwrap();
+    ContentManifest {
+        version: 1,
+        files: vec![record],
+    }
+    .save(&paths.content_manifest())
+    .unwrap();
+    // Hold the manifest lock the way an install commit does.
+    let _lock = ContentLock::acquire(&paths.content_manifest()).unwrap();
+    assert!(
+        reconcile_inventory(
+            &paths.content_manifest(),
+            &paths.minecraft(),
+            24,
+            512,
+            &NoopProgress,
+        )
+        .is_err()
+    );
+
+    let task = crate::feedback::progress::ProgressTask::start("test reconcile");
+    let result = super::reconcile(
+        job("Busy").instance,
+        instances_dir,
+        crate::net::HttpClient::new(),
+        &task,
+        |_| {},
+    )
+    .await;
+
+    assert!(result.complete);
+    assert!(result.error.is_none());
+    assert_eq!(result.manifest.files.len(), 1);
+}
+
 #[test]
 fn coordinator_queues_instances_once_and_preserves_order() {
     let mut coordinator = ReconcileCoordinator::default();

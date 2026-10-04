@@ -531,9 +531,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut LogsState, is_focused: 
             Paragraph::new("Loading logs...").style(Style::default().fg(theme.text_dim())),
             area,
         );
-        if state.filter_open {
-            render_level_filter(frame, area, state.filter_selected, &state.level_filters);
-        }
         return;
     }
 
@@ -545,9 +542,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut LogsState, is_focused: 
             Paragraph::new("No logs yet.").style(Style::default().fg(theme.text_dim())),
             area,
         );
-        if state.filter_open {
-            render_level_filter(frame, area, state.filter_selected, &state.level_filters);
-        }
         return;
     }
 
@@ -670,9 +664,6 @@ fn render_viewer(frame: &mut Frame, area: Rect, state: &mut LogsState) {
     }
 
     if lines.is_empty() {
-        if state.filter_open {
-            render_level_filter(frame, area, state.filter_selected, &state.level_filters);
-        }
         return;
     }
 
@@ -694,10 +685,6 @@ fn render_viewer(frame: &mut Frame, area: Rect, state: &mut LogsState) {
         .collect();
 
     frame.render_widget(Paragraph::new(styled_lines), area);
-
-    if state.filter_open {
-        render_level_filter(frame, area, state.filter_selected, &state.level_filters);
-    }
 
     let scrollbar_area = Rect {
         x: area.x + area.width.saturating_sub(0),
@@ -878,22 +865,12 @@ pub(crate) fn copy_to_clipboard(text: &str) -> Option<(usize, bool)> {
     Some((count, truncated))
 }
 
-pub(crate) fn render_level_filter(
-    frame: &mut Frame,
-    area: Rect,
-    selected: usize,
-    filters: &LevelFilters,
-) {
+pub(crate) fn render_level_filter(frame: &mut Frame, selected: usize, filters: &LevelFilters) {
     use ratatui::layout::Constraint;
     use ratatui::widgets::Widget;
     let theme = THEME.as_ref();
-    let keybinds = super::popups::keybind_line(&[
-        ("j/k", " navigate"),
-        ("Enter", " toggle"),
-        ("r", " reset"),
-        ("Esc", " close"),
-    ]);
-    let popup = area.centered(
+    let keybinds = super::popups::keybind_line(&[("r", " reset"), ("Esc", " close")]);
+    let popup = frame.area().centered(
         Constraint::Length((keybinds.width() as u16 + 2).max(26)),
         Constraint::Length(7),
     );
@@ -943,7 +920,11 @@ pub(crate) fn render_level_filter(
         keybinds: Some(keybinds),
         search_line: None,
         content: Box::new(move |area, buffer| {
-            Paragraph::new(rows.clone()).render(area, buffer);
+            for (line, row_area) in rows.iter().zip(area.rows()) {
+                Paragraph::new(line.clone())
+                    .style(line.style)
+                    .render(row_area, buffer);
+            }
         }),
     };
     frame.render_widget(frame_widget, popup);
@@ -965,8 +946,8 @@ fn log_level_style(level: LogLevel) -> Style {
     match level {
         LogLevel::Error => Style::default().fg(theme.error()),
         LogLevel::Warn => Style::default().fg(theme.warning()),
-        LogLevel::Debug => Style::default().fg(theme.info()),
-        LogLevel::Trace => Style::default().fg(theme.text_dim()),
+        LogLevel::Debug => Style::default().fg(theme.text_dim()),
+        LogLevel::Trace => Style::default().fg(theme.border()),
         LogLevel::Info => Style::default().fg(theme.text()),
     }
 }

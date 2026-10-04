@@ -985,6 +985,7 @@ fn mouse_drag_selects_overlay_characters_for_yank_and_escape_closes() {
 #[test]
 fn log_level_popup_does_not_delete_logs_or_leave_on_tab() {
     use crate::instance::logs::files::LogFileEntry;
+    use ratatui::layout::{Constraint, Rect};
     let mut ui = UiHarness::new();
     ui.add_instance("A");
     ui.app.focused = FocusedArea::Content;
@@ -995,6 +996,7 @@ fn log_level_popup_does_not_delete_logs_or_leave_on_tab() {
         path: ui.instance_path("A").join("a.log"),
     });
     ui.app.logs_state.list_state.selected = Some(0);
+    ui.app.logs_state.viewer_lines = vec!["12:00:00:INFO:rmcl: hello".to_owned()];
     ui.key(KeyCode::Char('f'));
     ui.key(KeyCode::Char('d'));
     assert_eq!(ui.app.focused, FocusedArea::Content);
@@ -1004,12 +1006,24 @@ fn log_level_popup_does_not_delete_logs_or_leave_on_tab() {
     ui.draw();
     assert!(ui.screen().contains("· Error"));
     assert!(ui.screen().contains("[Esc] close"));
+    let popup = Rect::new(0, 0, 100, 30).centered(Constraint::Length(26), Constraint::Length(7));
+    assert_eq!(
+        ui.screen()
+            .lines()
+            .nth(popup.y as usize)
+            .unwrap()
+            .chars()
+            .skip(popup.x as usize + 2)
+            .take(12)
+            .collect::<String>(),
+        " Log levels "
+    );
     ui.key(KeyCode::Esc);
     assert!(!ui.app.logs_state.filter_open);
 }
 
 #[test]
-fn selected_unlinked_content_explains_why_versions_are_unavailable() {
+fn selected_unlinked_content_shows_only_the_badge() {
     let mut ui = UiHarness::new();
     ui.add_instance("A");
     let minecraft = ui
@@ -1037,10 +1051,8 @@ fn selected_unlinked_content_explains_why_versions_are_unavailable() {
     ui.app.focused = FocusedArea::Content;
     ui.draw();
     assert!(ui.screen().contains("Unlinked"));
-    assert!(
-        ui.screen()
-            .contains("No online source linked; version switching unavailable.")
-    );
+    assert!(!ui.screen().contains("No online source linked"));
+    assert!(!ui.screen().contains("version switching unavailable"));
     ui.key(KeyCode::Char('v'));
     assert!(ui.app.mods_discovery_state.version_popup.is_none());
 

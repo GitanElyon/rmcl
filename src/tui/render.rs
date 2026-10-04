@@ -147,6 +147,23 @@ impl App {
 
         if self.focused == FocusedArea::OverviewExpanded {
             self.render_log_overlay(frame);
+            if self.log_filter_open {
+                widgets::logs_viewer::render_level_filter(
+                    frame,
+                    self.log_filter_selected,
+                    &self.log_level_filters,
+                );
+            }
+        } else if load_content
+            && self.content_tab == widgets::content::ContentTab::Logs
+            && self.instances_state.selected_instance().is_some()
+            && self.logs_state.filter_open
+        {
+            widgets::logs_viewer::render_level_filter(
+                frame,
+                self.logs_state.filter_selected,
+                &self.logs_state.level_filters,
+            );
         }
 
         if self.focused == FocusedArea::InstanceSettings
@@ -328,14 +345,6 @@ impl App {
             scrollbar_area,
             &mut self.log_overlay_scrollbar,
         );
-        if self.log_filter_open {
-            super::widgets::logs_viewer::render_level_filter(
-                frame,
-                overlay,
-                self.log_filter_selected,
-                &self.log_level_filters,
-            );
-        }
     }
 
     fn sync_error_effects(&mut self, events: &[error_buffer::ErrorEvent]) {

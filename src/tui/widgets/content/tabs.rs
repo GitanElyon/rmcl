@@ -352,16 +352,6 @@ pub fn render(
         }
         _ => false,
     };
-    let selected_unlinked = mode == ContentMode::Installed
-        && match tab {
-            ContentTab::Mods => mods_state.selected_is_unlinked(),
-            ContentTab::ResourcePacks => resource_packs_state.selected_is_unlinked(),
-            ContentTab::Shaders => shaders_state.selected_is_unlinked(),
-            ContentTab::Worlds if open_world_datapacks.is_some() => {
-                world_datapacks_state.selected_is_unlinked()
-            }
-            _ => false,
-        };
 
     let kb: Option<&[(&str, &str)]> = if is_focused {
         Some(match (mode, tab) {
@@ -551,20 +541,8 @@ pub fn render(
         area.width.saturating_sub(2),
     ));
 
-    let mut content_area = block.inner(area);
+    let content_area = block.inner(area);
     frame.render_widget(block, area);
-    if is_focused && selected_unlinked && content_area.height > 1 {
-        content_area.height -= 1;
-        frame.render_widget(
-            Paragraph::new(" No online source linked; version switching unavailable.")
-                .style(Style::default().fg(theme.text_dim())),
-            Rect {
-                y: content_area.bottom(),
-                height: 1,
-                ..content_area
-            },
-        );
-    }
 
     let downloadable_state = match tab {
         ContentTab::Mods => Some((mods_state, mods_discovery_state)),

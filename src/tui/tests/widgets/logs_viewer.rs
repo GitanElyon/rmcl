@@ -113,11 +113,11 @@ fn log_levels_share_one_color_mapping_in_viewer_and_overlay() {
     }
     assert_eq!(
         line_level_style("12:17:28:DEBUG:rmcl::net: fetching").fg,
-        Some(theme.info())
+        Some(theme.text_dim())
     );
     assert_eq!(
         line_level_style("12:17:28:TRACE:rmcl::net: fetching").fg,
-        Some(theme.text_dim())
+        Some(theme.border())
     );
     assert_ne!(
         log_level_style(LogLevel::Debug).fg,
@@ -226,6 +226,23 @@ fn level_filter_panel_cycles_neutral_include_exclude_resets_and_closes() {
     assert_eq!(state.level_filters, [None; 5]);
     assert!(handle_key(&press(KeyCode::Esc), &mut state));
     assert!(!state.filter_open);
+}
+
+#[test]
+fn level_filter_highlight_reaches_the_popup_right_edge() {
+    use ratatui::layout::Constraint;
+    let _guard = crate::tests::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+    let popup = Rect::new(0, 0, 80, 20).centered(Constraint::Length(26), Constraint::Length(7));
+    terminal
+        .draw(|frame| render_level_filter(frame, 0, &[None; 5]))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let theme = THEME.as_ref();
+    assert_eq!(buffer[(popup.right() - 2, popup.y + 1)].bg, theme.stripe());
+    assert_eq!(buffer[(popup.right() - 2, popup.y + 2)].bg, theme.surface());
 }
 
 #[test]

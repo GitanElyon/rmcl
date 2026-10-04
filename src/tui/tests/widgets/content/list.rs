@@ -1424,7 +1424,7 @@ fn unlinked_badge_is_subdued_and_requires_a_completed_unmatched_lookup() {
     });
     state.apply_manifest(&manifest, &minecraft, ContentKind::Mod);
     state.apply_update_snapshot(None);
-    assert!(state.selected_is_unlinked());
+    assert!(state.unlinked_paths.contains(&state.entries[0].path));
     let picker = ratatui_image::picker::Picker::halfblocks();
     let theme = crate::config::theme::THEME.as_ref();
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 4)).unwrap();
@@ -1447,9 +1447,9 @@ fn unlinked_badge_is_subdued_and_requires_a_completed_unmatched_lookup() {
         let buffer = terminal.backend().buffer();
         let row = (0..50).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
         let x = row.find("Unlinked").expect("unlinked badge") as u16;
-        assert_eq!(buffer[(x, 0)].fg, theme.text_dim());
-        assert_eq!(buffer[(x, 0)].bg, theme.surface());
-        assert!(!buffer[(x, 0)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(x, 0)].fg, theme.background());
+        assert_eq!(buffer[(x, 0)].bg, theme.text_dim());
+        assert!(buffer[(x, 0)].modifier.contains(Modifier::BOLD));
         assert!(terminal.backend().to_string().contains("1.0.0"));
     }
     for resolution in [
@@ -1471,7 +1471,7 @@ fn unlinked_badge_is_subdued_and_requires_a_completed_unmatched_lookup() {
     ] {
         manifest.files[0].resolution = resolution;
         state.apply_manifest(&manifest, &minecraft, ContentKind::Mod);
-        assert!(!state.selected_is_unlinked());
+        assert!(state.unlinked_paths.is_empty());
     }
     state.apply_manifest(&ContentManifest::default(), &minecraft, ContentKind::Mod);
     assert!(state.unlinked_paths.is_empty());

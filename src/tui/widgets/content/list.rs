@@ -1650,12 +1650,6 @@ impl ContentListState {
             .is_some_and(|entry| entry.provider_project.is_some())
     }
 
-    pub(crate) fn selected_is_unlinked(&self) -> bool {
-        self.selected_entry().is_some_and(|entry| {
-            entry.provider_project.is_none() && self.unlinked_paths.contains(&entry.path)
-        })
-    }
-
     pub(crate) fn clamp_selected_index(&mut self) {
         let count = self.filtered_indices().len();
         self.list_state.selected =
@@ -2206,7 +2200,7 @@ pub fn render(
                 }
             });
         let title_suffix_style = if title_suffix == Some("Unlinked") {
-            Style::default().fg(theme.text_dim()).bg(theme.surface())
+            crate::tui::widgets::status_badge_style(theme.text_dim())
         } else {
             crate::tui::widgets::status_badge_style(title_suffix_color)
         };

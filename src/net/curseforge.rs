@@ -64,6 +64,13 @@ struct Mod {
     logo: Option<Logo>,
     #[serde(default)]
     categories: Vec<Category>,
+    #[serde(default)]
+    authors: Vec<Author>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Author {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -390,17 +397,7 @@ async fn search(
     }
     let mut metadata = std::collections::HashMap::new();
     for project in &projects {
-        metadata.insert(
-            project.id.to_string(),
-            DiscoveryMetadata {
-                categories: project
-                    .categories
-                    .iter()
-                    .map(|category| category.slug.clone())
-                    .collect(),
-                ..DiscoveryMetadata::default()
-            },
-        );
+        metadata.insert(project.id.to_string(), discovery_metadata(project));
     }
     Ok(DiscoveryResults {
         received,
@@ -408,6 +405,22 @@ async fn search(
         metadata,
         projects: projects.into_iter().filter_map(discovery_project).collect(),
     })
+}
+
+fn discovery_metadata(project: &Mod) -> DiscoveryMetadata {
+    DiscoveryMetadata {
+        authors: project
+            .authors
+            .iter()
+            .map(|author| author.name.clone())
+            .collect(),
+        categories: project
+            .categories
+            .iter()
+            .map(|category| category.slug.clone())
+            .collect(),
+        ..DiscoveryMetadata::default()
+    }
 }
 
 fn search_version_params(game_versions: &[String]) -> Vec<String> {

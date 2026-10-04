@@ -249,6 +249,7 @@ fn filters_match_environment_and_include_exclude_categories() {
         versions: vec!["1.21.1".to_owned()],
         client_side: "required".to_owned(),
         server_side: "unsupported".to_owned(),
+        ..Default::default()
     };
     assert!(filters.matches(Some(&metadata)));
     let excluded_version = crate::net::modrinth::DiscoveryMetadata {
@@ -707,6 +708,664 @@ fn matching_titles_with_different_slugs_remain_distinct() {
 }
 
 #[test]
+fn project_identity_matches_short_and_full_title_slugs_but_not_partial_words() {
+    assert_eq!(
+        project_identity_parts("Iris Shaders", "iris"),
+        project_identity_parts("IRIS Shaders!", "iris-shaders")
+    );
+    assert_eq!(
+        project_identity_parts("Example Shader Pack", "example-shader"),
+        project_identity_parts("Example Shader Pack", "example_shader_pack")
+    );
+    assert_ne!(
+        project_identity_parts("Sodium", "sod"),
+        project_identity_parts("Sodium", "sodium")
+    );
+    assert_ne!(
+        project_identity_parts("Iris Shaders", ""),
+        project_identity_parts("Iris Shaders", "iris")
+    );
+}
+
+#[test]
+fn project_identity_matches_name_acronyms_but_preserves_other_qualifiers() {
+    assert_eq!(
+        project_identity_parts("Faster Iris Shadow Mapper [FISM]", "fism"),
+        project_identity_parts("Faster Iris Shadow Mapper", "faster-iris-shadow-mapper")
+    );
+    assert_eq!(
+        project_identity_parts("Just Enough Items (JEI)", "jei"),
+        project_identity_parts("Just Enough Items", "just-enough-items")
+    );
+    for title in ["Example Mod [Fabric]", "Example Mod (Fork)"] {
+        assert_ne!(
+            project_identity_parts(title, "example-mod"),
+            project_identity_parts("Example Mod", "example-mod")
+        );
+    }
+}
+
+#[test]
+fn project_identity_matches_numbered_titles_only_when_the_slug_confirms_the_base_name() {
+    assert_eq!(
+        project_identity_parts("AmbientSounds", "ambientsounds"),
+        project_identity_parts("AmbientSounds 6", "ambientsounds")
+    );
+    assert_eq!(
+        project_identity_parts("Example Mod", "example-mod"),
+        project_identity_parts("Example Mod 12", "example_mod")
+    );
+    for (title, slug) in [
+        ("Example Mod 2", "example-mod-2"),
+        ("Example Mod 2", "example-mod-reforged"),
+        ("Example Mod 2", "example"),
+        ("Example 2 Mod", "example-mod"),
+        ("Example Mod 2", ""),
+    ] {
+        assert_ne!(
+            project_identity_parts(title, slug),
+            project_identity_parts("Example Mod", "example-mod")
+        );
+    }
+}
+
+fn iris_project(provider: &str) -> DiscoveryProject {
+    DiscoveryProject {
+        id: if provider == "modrinth" {
+            "YL57xq9U"
+        } else {
+            "455508"
+        }
+        .to_owned(),
+        slug: if provider == "modrinth" {
+            "iris"
+        } else {
+            "irisshaders"
+        }
+        .to_owned(),
+        title: "Iris Shaders".to_owned(),
+        ..project("")
+    }
+}
+
+fn discovery_page(projects: Vec<DiscoveryProject>) -> DiscoveryResults {
+    DiscoveryResults {
+        received: projects.len(),
+        total_hits: projects.len(),
+        projects,
+        metadata: HashMap::new(),
+    }
+}
+
+fn discovery_corpus_page(value: &serde_json::Value) -> DiscoveryResults {
+    let field = |name| value[name].as_str().unwrap().to_owned();
+    let project = DiscoveryProject {
+        id: field("id"),
+        slug: field("slug"),
+        title: field("title"),
+        description: field("description"),
+        ..project("")
+    };
+    let metadata = crate::net::modrinth::DiscoveryMetadata {
+        authors: serde_json::from_value(value["authors"].clone()).unwrap(),
+        ..Default::default()
+    };
+    let mut page = discovery_page(vec![project.clone()]);
+    page.metadata.insert(project.id, metadata);
+    page
+}
+
+fn discovery_corpus() -> serde_json::Value {
+    serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/discovery_pairs.json"
+    )))
+    .unwrap()
+}
+
+#[test]
+fn provider_merge_matches_the_live_shared_source_corpus() {
+    let corpus = discovery_corpus();
+    let mut misses = Vec::new();
+    for pair in corpus["pairs"].as_array().unwrap() {
+        for preferred in ["modrinth", "curseforge"] {
+            let merged = merge_provider_results(
+                vec![
+                    ("modrinth", discovery_corpus_page(&pair["modrinth"])),
+                    ("curseforge", discovery_corpus_page(&pair["curseforge"])),
+                ],
+                preferred,
+                Vec::new(),
+            );
+            if merged.projects.len() != 1 {
+                misses.push(format!(
+                    "{preferred}: {} / {}",
+                    pair["modrinth"]["title"], pair["curseforge"]["title"]
+                ));
+            } else {
+                assert_eq!(merged.projects[0].provider, preferred);
+                assert_eq!(merged.sources.len(), 2);
+                assert_eq!(merged.sources[0].0, merged.sources[1].0);
+            }
+        }
+    }
+    assert!(
+        misses.is_empty(),
+        "Unmerged source-verified pairs: {misses:#?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "hits live Modrinth and CurseForge discovery APIs across all content types"]
+async fn live_provider_merging_matches_source_verified_pairs() {
+    use crate::instance::content::provider::{
+        DiscoverySearchFilters, DiscoverySort, ProviderRegistry,
+    };
+    let corpus = discovery_corpus();
+    let client = crate::net::HttpClient::new();
+    let registry = ProviderRegistry::configured(client);
+    let filters = DiscoverySearchFilters::default();
+    let mut instance = instance("live-corpus", "1.21.1");
+    instance.loader = ModLoader::Vanilla;
+    let mut observed = 0;
+    let mut checked = 0;
+    for (label, kind, modpacks, limit) in [
+        ("mod", ContentKind::Mod, false, 200),
+        ("resourcepack", ContentKind::ResourcePack, false, 100),
+        ("shader", ContentKind::Shader, false, 100),
+        ("modpack", ContentKind::ResourcePack, true, 100),
+        ("datapack", ContentKind::DataPack, false, 100),
+    ] {
+        let fetch = |provider: &'static str| {
+            let instance = &instance;
+            let filters = &filters;
+            let provider = registry
+                .get(provider)
+                .expect("discovery provider unavailable");
+            async move {
+                let mut combined = discovery_page(Vec::new());
+                for offset in (0..limit).step_by(100) {
+                    let page = if modpacks {
+                        provider
+                            .search_modpacks(
+                                "",
+                                filters,
+                                DiscoverySort::Downloads,
+                                false,
+                                offset,
+                                100,
+                            )
+                            .await
+                    } else {
+                        provider
+                            .search(
+                                kind,
+                                "",
+                                instance,
+                                filters,
+                                DiscoverySort::Downloads,
+                                false,
+                                offset,
+                                100,
+                            )
+                            .await
+                    }
+                    .unwrap();
+                    combined.projects.extend(page.projects);
+                    combined.metadata.extend(page.metadata);
+                    combined.received += page.received;
+                    combined.total_hits = page.total_hits;
+                }
+                assert!(
+                    combined
+                        .metadata
+                        .values()
+                        .any(|metadata| !metadata.authors.is_empty())
+                );
+                combined
+            }
+        };
+        let (modrinth, curseforge) = tokio::join!(fetch("modrinth"), fetch("curseforge"));
+        observed += modrinth.projects.len() + curseforge.projects.len();
+        for preferred in ["modrinth", "curseforge"] {
+            let merged = merge_provider_results(
+                vec![
+                    ("modrinth", modrinth.clone()),
+                    ("curseforge", curseforge.clone()),
+                ],
+                preferred,
+                Vec::new(),
+            );
+            for pair in corpus["pairs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|pair| pair["kind"] == label)
+            {
+                let find = |provider, id: &serde_json::Value| {
+                    merged.identities.iter().find(|identity| {
+                        identity.provider == provider && identity.project_id == id.as_str().unwrap()
+                    })
+                };
+                if let (Some(left), Some(right)) = (
+                    find("modrinth", &pair["modrinth"]["id"]),
+                    find("curseforge", &pair["curseforge"]["id"]),
+                ) {
+                    assert_eq!(
+                        left.stem, right.stem,
+                        "{label}: {} / {}",
+                        pair["modrinth"]["title"], pair["curseforge"]["title"]
+                    );
+                    assert_eq!(
+                        merged
+                            .projects
+                            .iter()
+                            .find(|project| project.stem == left.stem)
+                            .unwrap()
+                            .provider,
+                        preferred
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        checked > 0,
+        "No source-verified pairs remain in the live sample"
+    );
+    println!(
+        "Live discovery: {observed} listings; {} source-verified pairs checked with both preferences",
+        checked / 2
+    );
+}
+
+#[test]
+fn provider_merge_does_not_conflate_different_projects_in_the_corpus() {
+    let corpus = discovery_corpus();
+    let pairs = corpus["pairs"].as_array().unwrap();
+    for (left_index, left) in pairs.iter().enumerate() {
+        for (right_index, right) in pairs.iter().enumerate() {
+            if left_index == right_index || left["kind"] != right["kind"] {
+                continue;
+            }
+            let merged = merge_provider_results(
+                vec![
+                    ("modrinth", discovery_corpus_page(&left["modrinth"])),
+                    ("curseforge", discovery_corpus_page(&right["curseforge"])),
+                ],
+                "modrinth",
+                Vec::new(),
+            );
+            assert_eq!(
+                merged.projects.len(),
+                2,
+                "Conflated {} and {}",
+                left["modrinth"]["title"],
+                right["curseforge"]["title"]
+            );
+        }
+    }
+    for provider in ["modrinth", "curseforge"] {
+        let mut pages = std::collections::BTreeMap::<String, DiscoveryResults>::new();
+        for pair in pairs {
+            let page = discovery_corpus_page(&pair[provider]);
+            let combined = pages
+                .entry(pair["kind"].as_str().unwrap().to_owned())
+                .or_insert_with(|| discovery_page(Vec::new()));
+            combined.projects.extend(page.projects);
+            combined.metadata.extend(page.metadata);
+        }
+        for page in pages.into_values() {
+            let count = page.projects.len();
+            let merged = merge_provider_results(vec![(provider, page)], provider, Vec::new());
+            assert_eq!(
+                merged.projects.len(),
+                count,
+                "Same-provider projects must not be merged"
+            );
+        }
+    }
+}
+
+#[test]
+fn provider_merge_retains_all_corpus_aliases_across_pages_and_repeated_hits() {
+    let corpus = discovery_corpus();
+    for pair in corpus["pairs"].as_array().unwrap() {
+        for preferred in ["modrinth", "curseforge"] {
+            for first_provider in ["modrinth", "curseforge"] {
+                let next_provider = if first_provider == "modrinth" {
+                    "curseforge"
+                } else {
+                    "modrinth"
+                };
+                let first = merge_provider_results(
+                    vec![(first_provider, discovery_corpus_page(&pair[first_provider]))],
+                    preferred,
+                    Vec::new(),
+                );
+                let stem = first.projects[0].stem.clone();
+                let next = merge_provider_results(
+                    vec![(next_provider, discovery_corpus_page(&pair[next_provider]))],
+                    preferred,
+                    first.identities,
+                );
+                assert_eq!(next.identities.len(), 2);
+                assert!(
+                    next.identities.iter().all(|identity| identity.stem == stem),
+                    "Lost aliases for {}",
+                    pair["modrinth"]["title"]
+                );
+                assert_eq!(next.projects.len(), usize::from(next_provider == preferred));
+                if next_provider == preferred {
+                    assert_eq!(next.projects[0].provider, preferred);
+                }
+                let repeated = merge_provider_results(
+                    vec![(first_provider, discovery_corpus_page(&pair[first_provider]))],
+                    preferred,
+                    next.identities,
+                );
+                assert!(
+                    repeated.projects.is_empty(),
+                    "Repeated provider IDs must not create another row"
+                );
+                assert_eq!(repeated.identities.len(), 2);
+            }
+        }
+    }
+}
+
+#[test]
+fn provider_merge_keeps_authored_forks_and_ambiguous_matches_separate() {
+    let mut original = project("sodium");
+    original.title = "Sodium".to_owned();
+    let mut fork = project("sodium-reforged");
+    fork.title = "Sodium".to_owned();
+    let authored_page = |projects: Vec<DiscoveryProject>| {
+        let mut page = discovery_page(projects);
+        for project in &page.projects {
+            page.metadata.insert(
+                project.id.clone(),
+                crate::net::modrinth::DiscoveryMetadata {
+                    authors: vec!["Creator".to_owned()],
+                    ..Default::default()
+                },
+            );
+        }
+        page
+    };
+    let forked = merge_provider_results(
+        vec![
+            ("modrinth", authored_page(vec![original.clone()])),
+            ("curseforge", authored_page(vec![fork])),
+        ],
+        "modrinth",
+        Vec::new(),
+    );
+    assert_eq!(forked.projects.len(), 2);
+
+    for (name, slug, other_name, other_slug) in [
+        ("Odium", "odium", "Odium", "sodium"),
+        ("Example", "example", "Example 2", "example-2"),
+        ("Same Name", "first-project", "Same Name", "second-project"),
+        ("", "first", "", "second"),
+        ("Same Name", "", "Same Name", ""),
+    ] {
+        let mut first = project("first-id");
+        first.title = name.to_owned();
+        first.slug = slug.to_owned();
+        let mut second = project("second-id");
+        second.title = other_name.to_owned();
+        second.slug = other_slug.to_owned();
+        let merged = merge_provider_results(
+            vec![
+                ("modrinth", authored_page(vec![first])),
+                ("curseforge", authored_page(vec![second])),
+            ],
+            "modrinth",
+            Vec::new(),
+        );
+        assert_eq!(
+            merged.projects.len(),
+            2,
+            "Conflated {name}/{slug} and {other_name}/{other_slug}"
+        );
+    }
+
+    let mut collision = original.clone();
+    collision.id = "another-project".to_owned();
+    let mut fallback = original.clone();
+    fallback.id = "fallback".to_owned();
+    let ambiguous = merge_provider_results(
+        vec![
+            ("modrinth", authored_page(vec![original, collision])),
+            ("curseforge", authored_page(vec![fallback])),
+        ],
+        "modrinth",
+        Vec::new(),
+    );
+    assert_eq!(
+        ambiguous.projects.len(),
+        3,
+        "An ambiguous match must not hide either project"
+    );
+}
+
+#[test]
+fn discovery_caches_matching_metadata_and_restores_it_for_pagination() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let corpus = discovery_corpus();
+    let pair = corpus["pairs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pair| {
+            project_identity(&discovery_corpus_page(&pair["modrinth"]).projects[0])
+                != project_identity(&discovery_corpus_page(&pair["curseforge"]).projects[0])
+        })
+        .unwrap();
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    let instance = instance("corpus", "1.21.1");
+    let first = state.begin_search(&instance);
+    let merged = merge_provider_results(
+        vec![("curseforge", discovery_corpus_page(&pair["curseforge"]))],
+        "modrinth",
+        Vec::new(),
+    );
+    for entry in merged.projects {
+        first.stream.upsert(provider_project_entry(
+            entry.project,
+            &entry.provider,
+            entry.stem,
+            None,
+        ));
+    }
+    drain_discovery_rows(&mut state);
+    DiscoveryState::push_provider_result(
+        &first.pending,
+        first.generation,
+        0,
+        Ok(DiscoveryPageResult {
+            received: 1,
+            total_hits: 10,
+            identities: merged.identities,
+        }),
+        merged.sources,
+    );
+    state.drain_pending();
+    state.sort = crate::instance::content::provider::DiscoverySort::Popular;
+    let _other = state.begin_search(&instance);
+    state.sort = crate::instance::content::provider::DiscoverySort::Relevance;
+    let restored = state.begin_search(&instance);
+    assert!(restored.cached);
+    let next = state.begin_next_page().unwrap();
+    assert_eq!(next.known_projects.len(), 1);
+    let merged = merge_provider_results(
+        vec![("modrinth", discovery_corpus_page(&pair["modrinth"]))],
+        "modrinth",
+        next.known_projects,
+    );
+    for entry in merged.projects {
+        next.stream.upsert(provider_project_entry(
+            entry.project,
+            &entry.provider,
+            entry.stem,
+            None,
+        ));
+    }
+    drain_discovery_rows(&mut state);
+    DiscoveryState::push_provider_result(
+        &next.pending,
+        next.generation,
+        next.offset,
+        Ok(DiscoveryPageResult {
+            received: 1,
+            total_hits: 10,
+            identities: merged.identities,
+        }),
+        merged.sources,
+    );
+    state.drain_pending();
+    assert_eq!(state.list.entries.len(), 1);
+    assert_eq!(state.sources.values().next().unwrap().len(), 2);
+    assert_eq!(state.identities.len(), 2);
+}
+
+#[test]
+fn provider_merge_prefers_one_iris_result_despite_different_slugs() {
+    for preferred in ["modrinth", "curseforge"] {
+        let merged = merge_provider_results(
+            vec![
+                ("modrinth", discovery_page(vec![iris_project("modrinth")])),
+                (
+                    "curseforge",
+                    discovery_page(vec![iris_project("curseforge")]),
+                ),
+            ],
+            preferred,
+            Vec::new(),
+        );
+
+        assert_eq!(merged.projects.len(), 1);
+        assert_eq!(merged.projects[0].provider, preferred);
+        assert_eq!(merged.projects[0].project.id, iris_project(preferred).id);
+        assert_eq!(merged.sources.len(), 2);
+        assert_eq!(merged.sources[0].0, merged.sources[1].0);
+    }
+}
+
+#[test]
+fn provider_merge_matches_fism_with_its_expanded_name() {
+    let mut modrinth = project("nSRLvOHG");
+    modrinth.title = "Faster Iris Shadow Mapper [FISM]".to_owned();
+    modrinth.slug = "fism".to_owned();
+    let mut curseforge = project("1571926");
+    curseforge.title = "Faster Iris Shadow Mapper".to_owned();
+    curseforge.slug = "faster-iris-shadow-mapper".to_owned();
+    let merged = merge_provider_results(
+        vec![
+            ("modrinth", discovery_page(vec![modrinth])),
+            ("curseforge", discovery_page(vec![curseforge])),
+        ],
+        "modrinth",
+        Vec::new(),
+    );
+
+    assert_eq!(merged.projects.len(), 1);
+    assert_eq!(merged.projects[0].project.id, "nSRLvOHG");
+    assert_eq!(merged.sources.len(), 2);
+    assert_eq!(merged.sources[0].0, merged.sources[1].0);
+}
+
+#[test]
+fn provider_merge_prefers_one_ambientsounds_result_despite_the_numbered_title() {
+    let mut modrinth = project("fM515JnW");
+    modrinth.title = "AmbientSounds".to_owned();
+    modrinth.slug = "ambientsounds".to_owned();
+    modrinth.description = "#listentonature".to_owned();
+    let mut curseforge = modrinth.clone();
+    curseforge.id = "254284".to_owned();
+    curseforge.title = "AmbientSounds 6".to_owned();
+
+    for (preferred, expected) in [("modrinth", &modrinth), ("curseforge", &curseforge)] {
+        let merged = merge_provider_results(
+            vec![
+                ("modrinth", discovery_page(vec![modrinth.clone()])),
+                ("curseforge", discovery_page(vec![curseforge.clone()])),
+            ],
+            preferred,
+            Vec::new(),
+        );
+
+        assert_eq!(merged.projects.len(), 1);
+        assert_eq!(merged.projects[0].provider, preferred);
+        assert_eq!(merged.projects[0].project.id, expected.id);
+        assert_eq!(merged.sources.len(), 2);
+        assert_eq!(merged.sources[0].0, merged.sources[1].0);
+    }
+}
+
+#[test]
+fn provider_merge_matches_iris_slug_aliases_across_pages() {
+    for preferred in ["modrinth", "curseforge"] {
+        let fallback = if preferred == "modrinth" {
+            "curseforge"
+        } else {
+            "modrinth"
+        };
+        for first_provider in [preferred, fallback] {
+            let first = merge_provider_results(
+                vec![(
+                    first_provider,
+                    discovery_page(vec![iris_project(first_provider)]),
+                )],
+                preferred,
+                Vec::new(),
+            );
+            let entry = &first.projects[0];
+            let known = first.identities;
+            let next_provider = if first_provider == preferred {
+                fallback
+            } else {
+                preferred
+            };
+            let next = merge_provider_results(
+                vec![(
+                    next_provider,
+                    discovery_page(vec![iris_project(next_provider)]),
+                )],
+                preferred,
+                known,
+            );
+
+            assert_eq!(next.sources[0].0, entry.stem);
+            if first_provider == preferred {
+                assert!(next.projects.is_empty());
+            } else {
+                assert_eq!(next.projects.len(), 1);
+                assert_eq!(next.projects[0].stem, entry.stem);
+                assert_eq!(next.projects[0].provider, preferred);
+            }
+        }
+    }
+}
+
+#[test]
+fn provider_merge_keeps_same_provider_slug_aliases_separate() {
+    let first = iris_project("modrinth");
+    let mut second = iris_project("curseforge");
+    second.id = "another-project".to_owned();
+    let merged = merge_provider_results(
+        vec![("modrinth", discovery_page(vec![first, second]))],
+        "modrinth",
+        Vec::new(),
+    );
+
+    assert_eq!(merged.projects.len(), 2);
+    assert_ne!(merged.projects[0].stem, merged.projects[1].stem);
+}
+
+#[test]
 fn provider_merge_preserves_ranking_and_appends_fallbacks() {
     let mut modrinth_first = project("mr-first");
     modrinth_first.title = "Shared".to_owned();
@@ -739,7 +1398,7 @@ fn provider_merge_preserves_ranking_and_appends_fallbacks() {
             ),
         ],
         "modrinth",
-        HashMap::new(),
+        Vec::new(),
     );
 
     assert_eq!(
@@ -772,7 +1431,7 @@ fn provider_merge_keeps_same_provider_title_collisions() {
             },
         )],
         "modrinth",
-        HashMap::new(),
+        Vec::new(),
     );
 
     assert_eq!(merged.projects.len(), 2);
@@ -783,8 +1442,12 @@ fn provider_merge_keeps_same_provider_title_collisions() {
 fn provider_merge_keeps_the_preferred_project_across_pages() {
     let mut fallback = project("shared");
     fallback.title = "Shared".to_owned();
-    let identity = project_identity(&fallback);
-    let known = HashMap::from([(identity, ("shared".to_owned(), "modrinth".to_owned()))]);
+    let known = vec![DiscoveryIdentity {
+        stem: "shared".to_owned(),
+        provider: "modrinth".to_owned(),
+        project_id: "shared".to_owned(),
+        keys: project_match_keys(&fallback, &[]),
+    }];
 
     let merged = merge_provider_results(
         vec![(
@@ -829,7 +1492,7 @@ fn provider_merge_uses_the_longest_provider_result_range() {
             ),
         ],
         "modrinth",
-        HashMap::new(),
+        Vec::new(),
     );
 
     assert_eq!(merged.total_hits, 200);
@@ -852,6 +1515,7 @@ fn version_popup_switches_to_the_other_provider() {
         Ok(DiscoveryPageResult {
             received: 1,
             total_hits: 1,
+            ..Default::default()
         }),
         vec![
             (
@@ -1839,6 +2503,7 @@ fn stale_search_result_is_ignored() {
         Ok(DiscoveryPageResult {
             received: 20,
             total_hits: 99,
+            ..Default::default()
         }),
     );
 
@@ -1876,6 +2541,7 @@ fn next_page_prefetches_before_selection_reaches_the_end() {
         Ok(DiscoveryPageResult {
             received: PAGE_SIZE,
             total_hits: 300,
+            ..Default::default()
         }),
     );
     state.drain_pending();
@@ -1913,6 +2579,7 @@ fn large_page_fills_a_tall_viewport_without_another_request() {
         Ok(DiscoveryPageResult {
             received: PAGE_SIZE,
             total_hits: 300,
+            ..Default::default()
         }),
     );
     state.drain_pending();
@@ -2034,6 +2701,7 @@ async fn filtered_refresh_waits_for_finished_icons_before_switching_rows() {
         Ok(DiscoveryPageResult {
             received: 8,
             total_hits: 8,
+            ..Default::default()
         }),
     );
     state.drain_pending();
@@ -2084,6 +2752,7 @@ fn discovery_activity_tracks_search_pages_and_icon_loading() {
         Ok(DiscoveryPageResult {
             received: 1,
             total_hits: 100,
+            ..Default::default()
         }),
     );
     state.drain_pending();
@@ -2129,6 +2798,7 @@ fn rapidly_cycling_a_category_discards_superseded_rows_and_results() {
         Ok(DiscoveryPageResult {
             received: 10,
             total_hits: 100,
+            ..Default::default()
         }),
     );
     state.drain_pending();
@@ -2165,6 +2835,7 @@ fn rapidly_cycling_a_category_discards_superseded_rows_and_results() {
         Ok(DiscoveryPageResult {
             received: 1,
             total_hits: 1,
+            ..Default::default()
         }),
     );
     state.drain_pending();
@@ -2198,6 +2869,7 @@ fn discovery_restores_cached_sort_and_continues_pagination() {
         Ok(DiscoveryPageResult {
             received: 2,
             total_hits: 20,
+            ..Default::default()
         }),
     );
     state.drain_pending();
@@ -2220,6 +2892,7 @@ fn discovery_restores_cached_sort_and_continues_pagination() {
         Ok(DiscoveryPageResult {
             received: 3,
             total_hits: 99,
+            ..Default::default()
         }),
     );
     state.drain_pending();
@@ -2256,6 +2929,7 @@ fn pagination_continues_across_multiple_pages() {
         Ok(DiscoveryPageResult {
             received: PAGE_SIZE,
             total_hits: 300,
+            ..Default::default()
         }),
     );
     state.drain_pending();
@@ -2284,6 +2958,7 @@ fn pagination_continues_across_multiple_pages() {
         Ok(DiscoveryPageResult {
             received: PAGE_SIZE,
             total_hits: 300,
+            ..Default::default()
         }),
     );
     state.drain_pending();
@@ -2319,6 +2994,7 @@ fn permanent_pagination_failure_stops_without_discarding_loaded_entries() {
         Ok(DiscoveryPageResult {
             received: PAGE_SIZE,
             total_hits: 300,
+            ..Default::default()
         }),
     );
     state.drain_pending();
@@ -2351,6 +3027,7 @@ fn transient_pagination_failure_retries_the_same_offset_after_a_delay() {
         Ok(DiscoveryPageResult {
             received: PAGE_SIZE,
             total_hits: 300,
+            ..Default::default()
         }),
     );
     state.drain_pending();

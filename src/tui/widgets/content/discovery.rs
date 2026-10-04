@@ -183,9 +183,19 @@ pub struct DiscoveryPageError {
     pub retryable: bool,
 }
 
+#[derive(Default)]
 pub struct DiscoveryPageResult {
     pub received: usize,
     pub total_hits: usize,
+    pub(crate) identities: Vec<DiscoveryIdentity>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DiscoveryIdentity {
+    stem: String,
+    provider: String,
+    project_id: String,
+    keys: Vec<String>,
 }
 
 pub(crate) struct MergedDiscoveryProject {
@@ -199,6 +209,7 @@ pub(crate) struct MergedDiscoveryResults {
     pub sources: Vec<(String, crate::instance::ProviderProject)>,
     pub received: usize,
     pub total_hits: usize,
+    pub identities: Vec<DiscoveryIdentity>,
 }
 
 pub struct DiscoveryRequest {
@@ -209,7 +220,7 @@ pub struct DiscoveryRequest {
     pub stream: ContentStream,
     pub reconcile: bool,
     pub cached_icons: std::collections::HashMap<(String, String), Vec<u8>>,
-    pub known_projects: std::collections::HashMap<String, (String, String)>,
+    pub(crate) known_projects: Vec<DiscoveryIdentity>,
     pub sort: crate::instance::content::provider::DiscoverySort,
     pub reversed: bool,
     pub filters: DiscoveryFilters,
@@ -264,6 +275,7 @@ struct DiscoverySearchKey {
 struct CachedDiscoverySearch {
     entries: Vec<ContentEntry>,
     sources: std::collections::HashMap<String, Vec<crate::instance::ProviderProject>>,
+    identities: Vec<DiscoveryIdentity>,
     total_hits: usize,
     next_offset: usize,
     exhausted: bool,
@@ -628,6 +640,7 @@ pub(crate) fn spawn_provider_search(
             Ok(DiscoveryPageResult {
                 received,
                 total_hits,
+                identities: merged.identities,
             })
         };
         DiscoveryState::push_provider_result(&pending, generation, offset, result, merged_sources);
@@ -957,6 +970,7 @@ pub struct DiscoveryState {
     project_pages: std::collections::HashMap<(String, String), crate::net::modrinth::ProjectInfo>,
     project_images: std::collections::HashMap<(String, String, String), image::DynamicImage>,
     sources: std::collections::HashMap<String, Vec<crate::instance::ProviderProject>>,
+    identities: Vec<DiscoveryIdentity>,
     pub project_page: Option<ProjectPageState>,
     pub version_popup: Option<VersionPopupState>,
     pending_orphan_cleanup: Option<Vec<PathBuf>>,
@@ -1179,6 +1193,7 @@ impl DiscoveryState {
             project_pages: std::collections::HashMap::new(),
             project_images: std::collections::HashMap::new(),
             sources: std::collections::HashMap::new(),
+            identities: Vec::new(),
             project_page: None,
             version_popup: None,
             pending_orphan_cleanup: None,
@@ -1409,6 +1424,7 @@ impl DiscoveryState {
                 CachedDiscoverySearch {
                     entries: self.list.entries.clone(),
                     sources: self.sources.clone(),
+                    identities: self.identities.clone(),
                     total_hits: self.total_hits,
                     next_offset: self.next_offset,
                     exhausted: self.exhausted,
@@ -1443,6 +1459,7 @@ impl DiscoveryState {
         self.project_page = None;
         self.version_popup = None;
         self.sources.clear();
+        self.identities.clear();
         let reconcile = cached.is_none()
             && self.context.as_deref() == Some(context.as_str())
             && !self.list.entries.is_empty();
@@ -1462,6 +1479,7 @@ impl DiscoveryState {
             self.list.clamp_selected_index();
             self.list.loading = false;
             self.sources = cached.sources;
+            self.identities = cached.identities;
             self.total_hits = cached.total_hits;
             self.next_offset = cached.next_offset;
             self.exhausted = cached.exhausted;
@@ -1493,7 +1511,7 @@ impl DiscoveryState {
             stream,
             reconcile,
             cached_icons,
-            known_projects: std::collections::HashMap::new(),
+            known_projects: Vec::new(),
             sort: self.sort,
             reversed: self.sort_reversed,
             filters: self.filters.clone(),
@@ -1508,18 +1526,7 @@ impl DiscoveryState {
         self.page_loading = true;
         self.retry_page_at = None;
         let list = self.preparing_list.as_ref().unwrap_or(&self.list);
-        let known_projects = list
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let source = entry.provider_project.as_ref()?;
-                let slug = entry.source_slug.as_deref()?;
-                Some((
-                    project_identity_parts(&entry.name, slug),
-                    (entry.file_stem.clone(), source.provider.clone()),
-                ))
-            })
-            .collect();
+        let known_projects = self.identities.clone();
         let cached_icons = cached_icons(
             list.entries.iter().chain(
                 self.cached_searches
@@ -2418,6 +2425,7 @@ impl DiscoveryState {
             self.list.loading = false;
             match pending.result {
                 Ok(result) => {
+                    self.identities = result.identities;
                     self.total_hits = result.total_hits;
                     self.next_offset = pending.offset.saturating_add(result.received);
                     self.exhausted = result.received == 0 || self.next_offset >= self.total_hits;
@@ -3124,21 +3132,198 @@ pub(crate) fn project_identity(project: &DiscoveryProject) -> String {
 }
 
 fn project_identity_parts(title: &str, slug: &str) -> String {
-    // hiding unrelated projects while still matching normal cross-provider copies.
-    let normalize = |value: &str| {
+    let normalize = normalized_project_text;
+    let acronym = |value: &str| {
         value
-            .chars()
-            .filter(|character| character.is_alphanumeric())
+            .split(|character: char| !character.is_alphanumeric())
+            .filter_map(|word| word.chars().next())
             .flat_map(char::to_lowercase)
             .collect::<String>()
     };
-    format!("{}:{}", normalize(title), normalize(slug))
+    let title = title.trim();
+    // Strip explicit name acronyms, not qualifiers such as [Fabric] or (Fork).
+    let title = title
+        .strip_suffix(']')
+        .and_then(|name| name.rsplit_once('['))
+        .or_else(|| {
+            title
+                .strip_suffix(')')
+                .and_then(|name| name.rsplit_once('('))
+        })
+        .filter(|(name, suffix)| {
+            !normalize(suffix).is_empty() && normalize(suffix) == acronym(name)
+        })
+        .map(|(name, _)| name)
+        .unwrap_or(title);
+    let mut slug_key = normalize(slug);
+    // A title-only version suffix is an alias only if the slug is the full base name.
+    let title = title
+        .rsplit_once(char::is_whitespace)
+        .filter(|(name, number)| {
+            !slug_key.is_empty()
+                && !number.is_empty()
+                && number.bytes().all(|byte| byte.is_ascii_digit())
+                && normalize(name) == slug_key
+        })
+        .map(|(name, _)| name)
+        .unwrap_or(title);
+    let title_key = normalize(title);
+    // Providers may use a short name, acronym, or full title as the slug.
+    // Require whole title words so partial names and fork suffixes stay distinct.
+    let mut prefix = String::new();
+    if !slug_key.is_empty()
+        && (slug_key == acronym(title)
+            || title
+                .split(|character: char| !character.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .any(|word| {
+                    prefix.push_str(&normalize(word));
+                    prefix == slug_key
+                }))
+    {
+        slug_key.clone_from(&title_key);
+    }
+    format!("{title_key}:{slug_key}")
+}
+
+fn normalized_project_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn project_match_keys(project: &DiscoveryProject, authors: &[String]) -> Vec<String> {
+    let slug = normalized_project_text(&project.slug);
+    if slug.is_empty() || normalized_project_text(&project.title).is_empty() {
+        return Vec::new();
+    }
+    let mut keys = vec![format!("name-slug:{}", project_identity(project))];
+    let description = normalized_project_text(&project.description);
+    // A substantial identical summary and slug also work when creator usernames differ.
+    if description.len() >= 32 {
+        keys.push(format!("summary-slug:{slug}:{description}"));
+    }
+
+    let mut title = project.title.trim();
+    loop {
+        let bracket = title
+            .strip_suffix(']')
+            .and_then(|name| name.rsplit_once('['))
+            .or_else(|| {
+                title
+                    .strip_suffix(')')
+                    .and_then(|name| name.rsplit_once('('))
+            });
+        let Some((name, suffix)) = bracket else { break };
+        let words = suffix
+            .split(|character: char| !character.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>();
+        if words.is_empty()
+            || !words.iter().all(|word| {
+                matches!(
+                    word.to_ascii_lowercase().as_str(),
+                    "fabric"
+                        | "forge"
+                        | "neo"
+                        | "neoforge"
+                        | "quilt"
+                        | "and"
+                        | "mod"
+                        | "mods"
+                        | "shader"
+                        | "shaders"
+                        | "resource"
+                        | "texture"
+                        | "data"
+                        | "pack"
+                        | "packs"
+                )
+            })
+        {
+            break;
+        }
+        title = name.trim_end();
+    }
+    while let Some((name, suffix)) = title.rsplit_once(char::is_whitespace) {
+        if !matches!(
+            suffix.to_ascii_lowercase().as_str(),
+            "mod"
+                | "mods"
+                | "shader"
+                | "shaders"
+                | "resource"
+                | "texture"
+                | "data"
+                | "pack"
+                | "packs"
+        ) {
+            break;
+        }
+        title = name.trim_end();
+    }
+    let identity = project_identity_parts(title, &project.slug);
+    let name = identity.split_once(':').unwrap().0;
+    let words = title
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(normalized_project_text)
+        .collect::<Vec<_>>();
+    let acronym = words
+        .iter()
+        .filter_map(|word| word.chars().next())
+        .collect::<String>();
+    let short_slug = [
+        "shaders",
+        "shader",
+        "resourcepack",
+        "texturepack",
+        "datapack",
+        "mods",
+        "mod",
+    ]
+    .iter()
+    .find_map(|suffix| slug.strip_suffix(suffix).filter(|base| !base.is_empty()))
+    .unwrap_or(&slug);
+    for author in authors {
+        let author = normalized_project_text(author);
+        if author.is_empty() {
+            continue;
+        }
+        keys.push(format!("author-slug:{author}:{slug}"));
+        let authorless_slug = short_slug.strip_prefix(&author);
+        let aliases = [
+            Some(short_slug),
+            authorless_slug,
+            authorless_slug.and_then(|slug| slug.strip_prefix('s')),
+        ];
+        // Same creator and name, but only when the slug actually belongs to that name.
+        // This admits short/possessive slugs without swallowing similarly named forks.
+        if !name.is_empty()
+            && aliases.into_iter().flatten().any(|alias| {
+                !alias.is_empty()
+                    && (alias == name
+                        || alias == acronym
+                        || (1..=words.len()).any(|count| {
+                            alias == words[..count].concat()
+                                || alias == words[words.len() - count..].concat()
+                        }))
+            })
+        {
+            keys.push(format!("author-name:{author}:{name}"));
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 pub(crate) fn merge_provider_results(
     mut pages: Vec<(&str, DiscoveryResults)>,
     preferred: &str,
-    known_projects: std::collections::HashMap<String, (String, String)>,
+    mut identities: Vec<DiscoveryIdentity>,
 ) -> MergedDiscoveryResults {
     pages.sort_by_key(|(provider, _)| *provider != preferred);
     let received = pages
@@ -3153,48 +3338,79 @@ pub(crate) fn merge_provider_results(
         .unwrap_or(0);
     let mut projects = Vec::new();
     let mut sources = Vec::new();
-    let mut primary_stems = known_projects;
-    let mut used_stems = primary_stems
-        .values()
-        .map(|(stem, _)| stem.clone())
+    let mut used_stems = identities
+        .iter()
+        .map(|identity| identity.stem.clone())
         .collect::<std::collections::HashSet<_>>();
 
     for (provider, page) in pages {
         for project in page.projects {
-            let identity = project_identity(&project);
+            let authors = page
+                .metadata
+                .get(&project.id)
+                .map(|metadata| metadata.authors.as_slice())
+                .unwrap_or_default();
+            let keys = project_match_keys(&project, authors);
             let project_id = project.id.clone();
-            let existing = primary_stems.get(&identity).cloned();
-            let duplicate_stem = existing
-                .as_ref()
-                .filter(|(_, existing_provider)| existing_provider != provider)
-                .map(|(stem, _)| stem.clone());
-            if let Some((stem, existing_provider)) = existing
-                && provider == preferred
-                && existing_provider != preferred
-            {
-                projects.push(MergedDiscoveryProject {
-                    stem: stem.clone(),
-                    provider: provider.to_owned(),
-                    project: project.clone(),
+            let same_project = identities
+                .iter()
+                .position(|known| known.provider == provider && known.project_id == project_id);
+            let duplicate_stem = same_project
+                .map(|index| identities[index].stem.clone())
+                .or_else(|| {
+                    let candidates = identities
+                        .iter()
+                        .filter(|known| {
+                            known.provider != provider
+                                && known.keys.iter().any(|key| keys.contains(key))
+                                && !identities.iter().any(|other| {
+                                    other.stem == known.stem && other.provider == provider
+                                })
+                        })
+                        .map(|known| known.stem.as_str())
+                        .collect::<std::collections::HashSet<_>>();
+                    if candidates.len() > 1 {
+                        tracing::debug!(
+                            provider,
+                            project_id,
+                            "Ambiguous cross-provider match; keeping projects separate"
+                        );
+                    }
+                    (candidates.len() == 1)
+                        .then(|| candidates.into_iter().next().unwrap().to_owned())
                 });
-                primary_stems.insert(identity.clone(), (stem, provider.to_owned()));
-            }
             let stem = duplicate_stem.unwrap_or_else(|| {
+                let identity = project_identity(&project);
                 let mut stem = identity.clone();
                 if !used_stems.insert(stem.clone()) {
                     stem = format!("{identity}:{provider}:{}", project.id);
                     used_stems.insert(stem.clone());
                 }
-                primary_stems
-                    .entry(identity)
-                    .or_insert_with(|| (stem.clone(), provider.to_owned()));
+                stem
+            });
+            if !identities.iter().any(|known| {
+                known.stem == stem && (known.provider == preferred || known.provider == provider)
+            }) {
                 projects.push(MergedDiscoveryProject {
                     stem: stem.clone(),
                     provider: provider.to_owned(),
                     project,
                 });
-                stem
-            });
+            }
+            if let Some(index) = same_project {
+                for key in keys {
+                    if !identities[index].keys.contains(&key) {
+                        identities[index].keys.push(key);
+                    }
+                }
+            } else {
+                identities.push(DiscoveryIdentity {
+                    stem: stem.clone(),
+                    provider: provider.to_owned(),
+                    project_id: project_id.clone(),
+                    keys,
+                });
+            }
             sources.push((
                 stem,
                 crate::instance::ProviderProject {
@@ -3211,6 +3427,7 @@ pub(crate) fn merge_provider_results(
         sources,
         received,
         total_hits,
+        identities,
     }
 }
 

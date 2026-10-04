@@ -220,6 +220,7 @@ fn discovered_modpack_becomes_visible_after_its_icon_is_decoded() {
                 crate::tui::widgets::content::discovery::DiscoveryPageResult {
                     received: 1,
                     total_hits: 1,
+                    ..Default::default()
                 },
             ),
         );

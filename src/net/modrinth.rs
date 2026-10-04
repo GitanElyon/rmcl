@@ -140,6 +140,7 @@ pub struct DiscoveryResults {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DiscoveryMetadata {
+    pub authors: Vec<String>,
     pub categories: Vec<String>,
     pub versions: Vec<String>,
     pub client_side: String,
@@ -159,6 +160,8 @@ struct DiscoverySearchHit {
     slug: String,
     title: String,
     description: String,
+    #[serde(default)]
+    author: String,
     #[serde(default)]
     downloads: i64,
     #[serde(default)]
@@ -287,6 +290,10 @@ fn discovery_results(results: DiscoverySearchResponse) -> DiscoveryResults {
             metadata.insert(
                 hit.project_id.clone(),
                 DiscoveryMetadata {
+                    authors: (!hit.author.trim().is_empty())
+                        .then(|| hit.author.clone())
+                        .into_iter()
+                        .collect(),
                     categories: hit.categories.clone(),
                     versions: hit.versions.clone(),
                     client_side: hit.client_side.clone(),

@@ -1,0 +1,1882 @@
+{
+  "collected": "2026-10-04",
+  "sample_size": 1108,
+  "evidence": "These pairs have matching public source URLs; source URLs are not passed to the matcher.",
+  "pairs": [
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/FabricMC/fabric",
+      "curseforge_source_url": "https://github.com/FabricMC/fabric",
+      "modrinth": {
+        "id": "P7dR8mSH",
+        "slug": "fabric-api",
+        "title": "Fabric API",
+        "description": "Lightweight and modular API providing common hooks and intercompatibility measures utilized by mods using the Fabric toolchain.",
+        "authors": [
+          "modmuss50"
+        ]
+      },
+      "curseforge": {
+        "id": "306612",
+        "slug": "fabric-api",
+        "title": "Fabric API",
+        "description": "Core API library for the Fabric toolchain",
+        "authors": [
+          "modmuss50",
+          "sfPlayer1"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/CaffeineMC/sodium",
+      "curseforge_source_url": "https://github.com/CaffeineMC/sodium",
+      "modrinth": {
+        "id": "AANobbMI",
+        "slug": "sodium",
+        "title": "Sodium",
+        "description": "A high-performance rendering engine replacement for Minecraft, which greatly improves frame rates and reduces micro-stutter.",
+        "authors": [
+          "jellysquid3"
+        ]
+      },
+      "curseforge": {
+        "id": "394468",
+        "slug": "sodium",
+        "title": "Sodium",
+        "description": "The fastest and most compatible rendering optimization mod for Minecraft. Now available for both NeoForge and Fabric!",
+        "authors": [
+          "JellySquid"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/IrisShaders/Iris",
+      "curseforge_source_url": "https://github.com/IrisShaders/Iris",
+      "modrinth": {
+        "id": "YL57xq9U",
+        "slug": "iris",
+        "title": "Iris Shaders",
+        "description": "A modern shader pack loader for Minecraft intended to be compatible with existing OptiFine shader packs",
+        "authors": [
+          "coderbot"
+        ]
+      },
+      "curseforge": {
+        "id": "455508",
+        "slug": "irisshaders",
+        "title": "Iris Shaders",
+        "description": "A modern shaders mod for Minecraft intended to be compatible with existing Optifine shaders",
+        "authors": [
+          "coderbot",
+          "IMS21"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/shedaniel/ClothConfig/",
+      "curseforge_source_url": "https://github.com/shedaniel/ClothConfig",
+      "modrinth": {
+        "id": "9s6osm5g",
+        "slug": "cloth-config",
+        "title": "Cloth Config API",
+        "description": "Configuration Library for Minecraft Mods",
+        "authors": [
+          "shedaniel"
+        ]
+      },
+      "curseforge": {
+        "id": "348521",
+        "slug": "cloth-config",
+        "title": "Cloth Config API (Fabric/Forge/NeoForge)",
+        "description": "Config Screen API for Minecraft",
+        "authors": [
+          "shedaniel",
+          "LinkieIsBetterThanK9"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/malte0811/FerriteCore",
+      "curseforge_source_url": "https://github.com/malte0811/FerriteCore",
+      "modrinth": {
+        "id": "uXXizFIs",
+        "slug": "ferrite-core",
+        "title": "FerriteCore",
+        "description": "Memory usage optimizations",
+        "authors": [
+          "malte0811"
+        ]
+      },
+      "curseforge": {
+        "id": "429235",
+        "slug": "ferritecore",
+        "title": "FerriteCore ((Neo)Forge)",
+        "description": "Memory usage optimizations",
+        "authors": [
+          "malte0811"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/RaphiMC/ImmediatelyFast",
+      "curseforge_source_url": "https://github.com/RaphiMC/ImmediatelyFast",
+      "modrinth": {
+        "id": "5ZwdcRci",
+        "slug": "immediatelyfast",
+        "title": "ImmediatelyFast",
+        "description": "Speed up immediate mode rendering in Minecraft",
+        "authors": [
+          "RaphiMC"
+        ]
+      },
+      "curseforge": {
+        "id": "686911",
+        "slug": "immediatelyfast",
+        "title": "ImmediatelyFast",
+        "description": "Speed up immediate mode rendering in Minecraft",
+        "authors": [
+          "RaphiMC"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/isXander/YetAnotherConfigLib",
+      "curseforge_source_url": "https://github.com/isXander/YetAnotherConfigLib",
+      "modrinth": {
+        "id": "1eAoo2KR",
+        "slug": "yacl",
+        "title": "YetAnotherConfigLib (YACL)",
+        "description": "A builder-based configuration library for Minecraft!",
+        "authors": [
+          "isxander"
+        ]
+      },
+      "curseforge": {
+        "id": "667299",
+        "slug": "yacl",
+        "title": "YetAnotherConfigLib",
+        "description": "A builder-based configuration library for Minecraft.",
+        "authors": [
+          "isXander"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Traben-0/Entity_Model_Features",
+      "curseforge_source_url": "https://github.com/Traben-0/Entity_Model_Features",
+      "modrinth": {
+        "id": "4I1XuqiY",
+        "slug": "entity-model-features",
+        "title": "[EMF] Entity Model Features",
+        "description": "EMF is an, OptiFine format, Custom Entity Model replacement mod available for Fabric and Forge.",
+        "authors": [
+          "Traben"
+        ]
+      },
+      "curseforge": {
+        "id": "844662",
+        "slug": "entity-model-features",
+        "title": "[EMF] Entity Model Features [Fabric & Forge]",
+        "description": "EMF is an, OptiFine format, Custom Entity Model replacement mod available for Fabric and Forge.",
+        "authors": [
+          "Traben"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/squeek502/AppleSkin",
+      "curseforge_source_url": "https://github.com/squeek502/AppleSkin",
+      "modrinth": {
+        "id": "EsAfCjCV",
+        "slug": "appleskin",
+        "title": "AppleSkin",
+        "description": "Food/hunger-related HUD improvements",
+        "authors": [
+          "squeek502"
+        ]
+      },
+      "curseforge": {
+        "id": "248787",
+        "slug": "appleskin",
+        "title": "AppleSkin",
+        "description": "Adds some useful information about food/hunger to the HUD",
+        "authors": [
+          "squeek502"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/mezz/JustEnoughItems",
+      "curseforge_source_url": "https://github.com/mezz/JustEnoughItems",
+      "modrinth": {
+        "id": "u6dRKJwZ",
+        "slug": "jei",
+        "title": "Just Enough Items (JEI)",
+        "description": "View Items and Recipes",
+        "authors": [
+          "mezz"
+        ]
+      },
+      "curseforge": {
+        "id": "238222",
+        "slug": "jei",
+        "title": "Just Enough Items (JEI)",
+        "description": "View Items and Recipes",
+        "authors": [
+          "mezz"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/embeddedt/ModernFix",
+      "curseforge_source_url": "https://github.com/embeddedt/ModernFix",
+      "modrinth": {
+        "id": "nmDcB62a",
+        "slug": "modernfix",
+        "title": "ModernFix",
+        "description": "All-in-one mod that improves performance, reduces memory usage, and fixes many bugs. Compatible with all your favorite performance mods!",
+        "authors": [
+          "embeddedt"
+        ]
+      },
+      "curseforge": {
+        "id": "790626",
+        "slug": "modernfix",
+        "title": "ModernFix",
+        "description": "All-in-one mod that improves performance, reduces memory usage, and fixes many bugs. Compatible with all your favorite performance mods!",
+        "authors": [
+          "embeddedt"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/bernie-g/geckolib",
+      "curseforge_source_url": "https://github.com/bernie-g/geckolib",
+      "modrinth": {
+        "id": "8BmcQJ2H",
+        "slug": "geckolib",
+        "title": "Geckolib",
+        "description": "A 3D animation library for entities, blocks, items, armor, and more!",
+        "authors": [
+          "Gecko"
+        ]
+      },
+      "curseforge": {
+        "id": "388172",
+        "slug": "geckolib",
+        "title": "GeckoLib",
+        "description": "A 3D animation library for entities, blocks, items, armor, and more!",
+        "authors": [
+          "Gecko",
+          "EliotL"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/henkelmax/simple-voice-chat",
+      "curseforge_source_url": "https://github.com/henkelmax/simple-voice-chat",
+      "modrinth": {
+        "id": "9eGKb6K1",
+        "slug": "simple-voice-chat",
+        "title": "Simple Voice Chat",
+        "description": "A working voice chat in Minecraft!",
+        "authors": [
+          "henkelmax"
+        ]
+      },
+      "curseforge": {
+        "id": "416089",
+        "slug": "simple-voice-chat",
+        "title": "Simple Voice Chat",
+        "description": "A working voice chat in Minecraft!",
+        "authors": [
+          "henkelmax"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Snownee/Jade",
+      "curseforge_source_url": "https://github.com/Snownee/Jade",
+      "modrinth": {
+        "id": "nvQzSEkH",
+        "slug": "jade",
+        "title": "Jade 🔍",
+        "description": "Shows information about what you are looking at. (Hwyla/Waila fork for Minecraft 1.16+)",
+        "authors": [
+          "Snownee"
+        ]
+      },
+      "curseforge": {
+        "id": "324717",
+        "slug": "jade",
+        "title": "Jade 🔍",
+        "description": "Shows information about what you are looking at. (Hwyla/WAILA fork for Minecraft 1.16+)",
+        "authors": [
+          "Snownee"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Keksuccino/FancyMenu",
+      "curseforge_source_url": "https://github.com/Keksuccino/FancyMenu",
+      "modrinth": {
+        "id": "Wq5SjeWM",
+        "slug": "fancymenu",
+        "title": "FancyMenu",
+        "description": "Customize Minecraft's menus with ease!",
+        "authors": [
+          "Keksuccino"
+        ]
+      },
+      "curseforge": {
+        "id": "367706",
+        "slug": "fancymenu",
+        "title": "FancyMenu",
+        "description": "Customize Minecraft's menus with ease!",
+        "authors": [
+          "Keksuccino"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Serilum/Collective",
+      "curseforge_source_url": "https://github.com/Serilum/Collective",
+      "modrinth": {
+        "id": "e0M1UDsY",
+        "slug": "collective",
+        "title": "Collective",
+        "description": "🎓 Collective is a shared library with common code for all of Serilum's mods.",
+        "authors": [
+          "Serilum"
+        ]
+      },
+      "curseforge": {
+        "id": "342584",
+        "slug": "collective",
+        "title": "Collective",
+        "description": "🎓 Collective is a shared library with common code for all of Serilum's mods.",
+        "authors": [
+          "Serilum"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Fuzss/puzzleslib",
+      "curseforge_source_url": "https://github.com/Fuzss/puzzleslib",
+      "modrinth": {
+        "id": "QAGBst4M",
+        "slug": "puzzles-lib",
+        "title": "Puzzles Lib",
+        "description": "Why is it called Puzzles? That's the puzzle.",
+        "authors": [
+          "Fuzs"
+        ]
+      },
+      "curseforge": {
+        "id": "495476",
+        "slug": "puzzles-lib",
+        "title": "Puzzles Lib",
+        "description": "Why is it called Puzzles? That's the puzzle.",
+        "authors": [
+          "Fuzs"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Keksuccino/Konkrete",
+      "curseforge_source_url": "https://github.com/Keksuccino/Konkrete",
+      "modrinth": {
+        "id": "J81TRJWm",
+        "slug": "konkrete",
+        "title": "Konkrete",
+        "description": "Just another boring library mod.",
+        "authors": [
+          "Keksuccino"
+        ]
+      },
+      "curseforge": {
+        "id": "410295",
+        "slug": "konkrete",
+        "title": "Konkrete",
+        "description": "Just another boring library mod.",
+        "authors": [
+          "Keksuccino"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/TwelveIterations/Balm",
+      "curseforge_source_url": "https://github.com/TwelveIterations/Balm",
+      "modrinth": {
+        "id": "MBAkmtvl",
+        "slug": "balm",
+        "title": "Balm",
+        "description": "Abstraction Layer for Multi-Loader Mods",
+        "authors": [
+          "BlayTheNinth"
+        ]
+      },
+      "curseforge": {
+        "id": "531761",
+        "slug": "balm",
+        "title": "Balm",
+        "description": "Abstraction Layer for Multi-Loader Mods",
+        "authors": [
+          "BlayTheNinth"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/YaLTeR/MouseTweaks",
+      "curseforge_source_url": "https://github.com/YaLTeR/MouseTweaks",
+      "modrinth": {
+        "id": "aC3cM3Vq",
+        "slug": "mouse-tweaks",
+        "title": "Mouse Tweaks",
+        "description": "Enhances inventory management by adding various functions to the mouse buttons. ",
+        "authors": [
+          "YaLTeR"
+        ]
+      },
+      "curseforge": {
+        "id": "60089",
+        "slug": "mouse-tweaks",
+        "title": "Mouse Tweaks",
+        "description": "Enhances inventory management by adding various functions to the mouse buttons.",
+        "authors": [
+          "YaLTeR"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Aizistral-Studios/No-Chat-Reports",
+      "curseforge_source_url": "https://github.com/Aizistral-Studios/No-Chat-Reports",
+      "modrinth": {
+        "id": "qQyHxfxd",
+        "slug": "no-chat-reports",
+        "title": "No Chat Reports",
+        "description": "Makes chat unreportable (where possible)",
+        "authors": [
+          "Aizistral"
+        ]
+      },
+      "curseforge": {
+        "id": "634062",
+        "slug": "no-chat-reports",
+        "title": "No Chat Reports",
+        "description": "Makes chat unreportable (where possible)",
+        "authors": [
+          "Aizistral"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/henkelmax/sound-physics-remastered",
+      "curseforge_source_url": "https://github.com/henkelmax/sound-physics-remastered",
+      "modrinth": {
+        "id": "qyVF9oeo",
+        "slug": "sound-physics-remastered",
+        "title": "Sound Physics Remastered",
+        "description": "A Minecraft mod that provides realistic sound attenuation, reverberation, and absorption through blocks.",
+        "authors": [
+          "henkelmax"
+        ]
+      },
+      "curseforge": {
+        "id": "535489",
+        "slug": "sound-physics-remastered",
+        "title": "Sound Physics Remastered",
+        "description": "A Minecraft mod that provides realistic sound attenuation, reverberation, and absorption through blocks.",
+        "authors": [
+          "henkelmax"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/CreativeMD/CreativeCore",
+      "curseforge_source_url": "https://github.com/CreativeMD/CreativeCore",
+      "modrinth": {
+        "id": "OsZiaDHq",
+        "slug": "creativecore",
+        "title": "CreativeCore",
+        "description": "A core mod",
+        "authors": [
+          "creativemd"
+        ]
+      },
+      "curseforge": {
+        "id": "257814",
+        "slug": "creativecore",
+        "title": "CreativeCore",
+        "description": "a core mod",
+        "authors": [
+          "CreativeMD"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/thedarkcolour/KotlinForForge",
+      "curseforge_source_url": "https://github.com/thedarkcolour/KotlinForForge",
+      "modrinth": {
+        "id": "ordsPcFz",
+        "slug": "kotlin-for-forge",
+        "title": "Kotlin for Forge",
+        "description": "Adds a Kotlin language loader and provides some optional utilities.",
+        "authors": [
+          "thedarkcolour"
+        ]
+      },
+      "curseforge": {
+        "id": "351264",
+        "slug": "kotlin-for-forge",
+        "title": "Kotlin for Forge",
+        "description": "Adds a Kotlin language loader and provides some optional utilities.",
+        "authors": [
+          "thedarkcolour"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Keksuccino/Melody",
+      "curseforge_source_url": "https://github.com/Keksuccino/Melody",
+      "modrinth": {
+        "id": "CVT4pFB2",
+        "slug": "melody",
+        "title": "Melody",
+        "description": "OpenAL-based library mod for playing background music.",
+        "authors": [
+          "Keksuccino"
+        ]
+      },
+      "curseforge": {
+        "id": "938643",
+        "slug": "melody",
+        "title": "Melody",
+        "description": "OpenAL-based library mod for playing background music.",
+        "authors": [
+          "Keksuccino"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/dzwdz/chat_heads",
+      "curseforge_source_url": "https://github.com/dzwdz/chat_heads",
+      "modrinth": {
+        "id": "Wb5oqrBJ",
+        "slug": "chat-heads",
+        "title": "Chat Heads",
+        "description": "See who you're chatting with!",
+        "authors": [
+          "dzwdz"
+        ]
+      },
+      "curseforge": {
+        "id": "407206",
+        "slug": "chat-heads",
+        "title": "Chat Heads",
+        "description": "See who are you chatting with!",
+        "authors": [
+          "dzwdz"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Glitchfiend/TerraBlender/",
+      "curseforge_source_url": "https://github.com/Glitchfiend/TerraBlender/",
+      "modrinth": {
+        "id": "kkmrDlKT",
+        "slug": "terrablender",
+        "title": "TerraBlender",
+        "description": "A library mod for adding biomes in a simple and compatible manner!",
+        "authors": [
+          "Adubbz"
+        ]
+      },
+      "curseforge": {
+        "id": "563928",
+        "slug": "terrablender",
+        "title": "TerraBlender (Forge)",
+        "description": "A library mod for adding biomes in a simple and compatible manner!",
+        "authors": [
+          "TheAdubbz"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/jaredlll08/searchables",
+      "curseforge_source_url": "https://github.com/jaredlll08/searchables",
+      "modrinth": {
+        "id": "fuuu3xnx",
+        "slug": "searchables",
+        "title": "Searchables",
+        "description": "Searchables is a library mod that adds helper methods that allow for searching and filtering elements based on components, as well as offering built in auto-complete functionality.",
+        "authors": [
+          "jaredlll08"
+        ]
+      },
+      "curseforge": {
+        "id": "858542",
+        "slug": "searchables",
+        "title": "Searchables",
+        "description": "Searchables is a library mod that adds helper methods that allow for searching and filtering elements based on components, as well as offering built in auto-complete functionality.",
+        "authors": [
+          "Jaredlll08"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/jaredlll08/Controlling",
+      "curseforge_source_url": "https://github.com/jaredlll08/Controlling",
+      "modrinth": {
+        "id": "xv94TkTM",
+        "slug": "controlling",
+        "title": "Controlling",
+        "description": "Adds a search bar to the Key-Bindings menu",
+        "authors": [
+          "jaredlll08"
+        ]
+      },
+      "curseforge": {
+        "id": "250398",
+        "slug": "controlling",
+        "title": "Controlling",
+        "description": "Adds a search bar to the Key-Bindings menu",
+        "authors": [
+          "Jaredlll08"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/jaredlll08/Clumps",
+      "curseforge_source_url": "https://github.com/jaredlll08/Clumps",
+      "modrinth": {
+        "id": "Wnxd13zP",
+        "slug": "clumps",
+        "title": "Clumps",
+        "description": "Clumps XP orbs together to reduce lag",
+        "authors": [
+          "jaredlll08"
+        ]
+      },
+      "curseforge": {
+        "id": "256717",
+        "slug": "clumps",
+        "title": "Clumps",
+        "description": "Clumps XP orbs together to reduce lag",
+        "authors": [
+          "Jaredlll08"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/CreativeMD/AmbientSounds",
+      "curseforge_source_url": "https://github.com/CreativeMD/AmbientSounds",
+      "modrinth": {
+        "id": "fM515JnW",
+        "slug": "ambientsounds",
+        "title": "AmbientSounds",
+        "description": "#listentonature",
+        "authors": [
+          "creativemd"
+        ]
+      },
+      "curseforge": {
+        "id": "254284",
+        "slug": "ambientsounds",
+        "title": "AmbientSounds 6",
+        "description": "#listentonature",
+        "authors": [
+          "CreativeMD"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Darkhax-Minecraft/Enchantment-Descriptions",
+      "curseforge_source_url": "https://github.com/Darkhax-Minecraft/Enchantment-Descriptions",
+      "modrinth": {
+        "id": "UVtY3ZAC",
+        "slug": "enchantment-descriptions",
+        "title": "Enchantment Descriptions",
+        "description": "Provides a way to get enchantment descriptions from enchanted books.",
+        "authors": [
+          "Darkhax"
+        ]
+      },
+      "curseforge": {
+        "id": "250419",
+        "slug": "enchantment-descriptions",
+        "title": "Enchantment Descriptions",
+        "description": "Adds in-game descriptions for enchantments to tooltips.",
+        "authors": [
+          "DarkhaxDev"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Glitchfiend/BiomesOPlenty",
+      "curseforge_source_url": "https://github.com/Glitchfiend/BiomesOPlenty",
+      "modrinth": {
+        "id": "HXF82T3G",
+        "slug": "biomes-o-plenty",
+        "title": "Biomes O' Plenty",
+        "description": "Adds 50+ unique biomes to enhance your world, with new trees, flowers, and more!",
+        "authors": [
+          "Forstride"
+        ]
+      },
+      "curseforge": {
+        "id": "220318",
+        "slug": "biomes-o-plenty",
+        "title": "Biomes O' Plenty",
+        "description": "Adds 50+ unique biomes to enhance your world, with new trees, flowers, and more!",
+        "authors": [
+          "Forstride",
+          "TheAdubbz"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Asek3/Oculus",
+      "curseforge_source_url": "https://github.com/Asek3/Oculus",
+      "modrinth": {
+        "id": "GchcoXML",
+        "slug": "oculus",
+        "title": "Oculus",
+        "description": "Unofficial Fork of \"Iris\", made to work with FML",
+        "authors": [
+          "Asek3"
+        ]
+      },
+      "curseforge": {
+        "id": "581495",
+        "slug": "oculus",
+        "title": "Oculus",
+        "description": "Unofficial Fork of \"Iris\", made to work with FML",
+        "authors": [
+          "Asek3"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/AHilyard/Iceberg/",
+      "curseforge_source_url": "https://github.com/AHilyard/Iceberg",
+      "modrinth": {
+        "id": "5faXoLqX",
+        "slug": "iceberg",
+        "title": "Iceberg",
+        "description": "A modding library that contains new events, helpers, and utilities to make modder's lives easier.",
+        "authors": [
+          "Grend"
+        ]
+      },
+      "curseforge": {
+        "id": "520110",
+        "slug": "iceberg",
+        "title": "Iceberg [Neo/Forge]",
+        "description": "A modding library that contains new events, helpers, and utilities to make modder's lives easier.",
+        "authors": [
+          "Grend_G"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/SuperMartijn642/SuperMartijn642sConfigLib",
+      "curseforge_source_url": "https://github.com/SuperMartijn642/SuperMartijn642sConfigLib",
+      "modrinth": {
+        "id": "LN9BxssP",
+        "slug": "supermartijn642s-config-lib",
+        "title": "SuperMartijn642's Config Lib",
+        "description": "Config Lib makes dealing with config files just a bit easier.",
+        "authors": [
+          "SuperMartijn642"
+        ]
+      },
+      "curseforge": {
+        "id": "438332",
+        "slug": "supermartijn642s-config-lib",
+        "title": "SuperMartijn642's Config Lib",
+        "description": "Config Lib makes dealing with config files just a bit easier.",
+        "authors": [
+          "SuperMartijn642"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/TheIllusiveC4/Curios",
+      "curseforge_source_url": "https://github.com/TheIllusiveC4/Curios",
+      "modrinth": {
+        "id": "vvuO3ImH",
+        "slug": "curios",
+        "title": "Curios API",
+        "description": "A flexible and expandable accessory/equipment API for users and developers.",
+        "authors": [
+          "TheIllusiveC4"
+        ]
+      },
+      "curseforge": {
+        "id": "309927",
+        "slug": "curios",
+        "title": "Curios API",
+        "description": "A flexible and expandable accessory/equipment API for users and developers.",
+        "authors": [
+          "TheIllusiveC4"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/TonimatasDEV/PacketFixer",
+      "curseforge_source_url": "https://github.com/TonimatasDEV/PacketFixer",
+      "modrinth": {
+        "id": "c7m1mi73",
+        "slug": "packet-fixer",
+        "title": "Packet Fixer",
+        "description": "A simple mod to fix various problems with packets, nbt and timeouts.",
+        "authors": [
+          "TonimatasDEV"
+        ]
+      },
+      "curseforge": {
+        "id": "689467",
+        "slug": "packet-fixer",
+        "title": "Packet Fixer",
+        "description": "A simple mod to solve various problems with packets, NBTs and timeouts.",
+        "authors": [
+          "TonimatasDEV"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/MehVahdJukaar/Supplementaries",
+      "curseforge_source_url": "https://github.com/MehVahdJukaar/Supplementaries",
+      "modrinth": {
+        "id": "fFEIiSDQ",
+        "slug": "supplementaries",
+        "title": "Supplementaries",
+        "description": "Vanilla+ additions: Jars, signposts, faucets, weather vanes spring launchers, sconces, planters, lights, decoration and automation",
+        "authors": [
+          "MehVahdJukaar"
+        ]
+      },
+      "curseforge": {
+        "id": "412082",
+        "slug": "supplementaries",
+        "title": "Supplementaries",
+        "description": "Vanilla+ additions: Jars, signposts, faucets, weather vanes spring launchers, sconces, planters, lights, decoration and automation",
+        "authors": [
+          "MehVahdJukaar"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/KosmX/fabricPlayerAnimation",
+      "curseforge_source_url": "https://github.com/KosmX/fabricPlayerAnimation",
+      "modrinth": {
+        "id": "gedNE4y2",
+        "slug": "playeranimator",
+        "title": "playerAnimator",
+        "description": "animate the player",
+        "authors": [
+          "KosmX"
+        ]
+      },
+      "curseforge": {
+        "id": "658587",
+        "slug": "playeranimator",
+        "title": "playerAnimator",
+        "description": "player animation library",
+        "authors": [
+          "KosmX"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Creators-of-Create/Create",
+      "curseforge_source_url": "https://github.com/Creators-of-Create/Create",
+      "modrinth": {
+        "id": "LNytGWDc",
+        "slug": "create",
+        "title": "Create",
+        "description": "Aesthetic Technology that empowers the Player",
+        "authors": [
+          "simibubi"
+        ]
+      },
+      "curseforge": {
+        "id": "328085",
+        "slug": "create",
+        "title": "Create",
+        "description": "Aesthetic Technology that empowers the Player",
+        "authors": [
+          "simibubi",
+          "IThundxr"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Tschipp/CarryOn",
+      "curseforge_source_url": "https://github.com/Tschipp/CarryOn",
+      "modrinth": {
+        "id": "joEfVgkn",
+        "slug": "carry-on",
+        "title": "Carry On",
+        "description": "Carry On allows you to pick up Tile Entities and Mobs and carry them around!",
+        "authors": [
+          "Tschipp"
+        ]
+      },
+      "curseforge": {
+        "id": "274259",
+        "slug": "carry-on",
+        "title": "Carry On",
+        "description": "Carry On allows you to pick up Tile Entities and Mobs and carry them around!",
+        "authors": [
+          "Tschipp",
+          "Purplicious_Cow_"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/way2muchnoise/BetterAdvancements",
+      "curseforge_source_url": "https://github.com/way2muchnoise/BetterAdvancements",
+      "modrinth": {
+        "id": "Q2OqKxDG",
+        "slug": "better-advancements",
+        "title": "Better Advancements",
+        "description": "Better Advancements tries to improve the UI and UX for the advancements system in minecraft 1.12+ in a modded environment",
+        "authors": [
+          "way2muchnoise"
+        ]
+      },
+      "curseforge": {
+        "id": "272515",
+        "slug": "better-advancements",
+        "title": "Better Advancements",
+        "description": "Successor to BetterAchievements for the new advancements system in minecraft 1.12+",
+        "authors": [
+          "way2muchnoise"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/MattCzyr/NaturesCompass",
+      "curseforge_source_url": "https://github.com/MattCzyr/NaturesCompass",
+      "modrinth": {
+        "id": "fPetb5Kh",
+        "slug": "natures-compass",
+        "title": "Nature's Compass",
+        "description": "Allows you to locate biomes anywhere in the world.",
+        "authors": [
+          "Chaosyr"
+        ]
+      },
+      "curseforge": {
+        "id": "252848",
+        "slug": "natures-compass",
+        "title": "Nature's Compass",
+        "description": "Nature's Compass is an item that allows you to locate biomes anywhere in the world.",
+        "authors": [
+          "Chaosyr"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/TwelveIterations/Waystones",
+      "curseforge_source_url": "https://github.com/TwelveIterations/Waystones",
+      "modrinth": {
+        "id": "LOpKHB2A",
+        "slug": "waystones",
+        "title": "Waystones",
+        "description": "Teleport from waystone to waystone or craft magical scrolls to warp.",
+        "authors": [
+          "BlayTheNinth"
+        ]
+      },
+      "curseforge": {
+        "id": "245755",
+        "slug": "waystones",
+        "title": "Waystones",
+        "description": "Teleport from waystone to waystone or craft magical scrolls to warp.",
+        "authors": [
+          "BlayTheNinth"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Team-Resourceful/Resourceful-Config",
+      "curseforge_source_url": "https://github.com/Team-Resourceful/Resourceful-Config",
+      "modrinth": {
+        "id": "M1953qlQ",
+        "slug": "resourceful-config",
+        "title": "Resourceful Config",
+        "description": "Resourceful Config is a mod that allows for developers to make cross-platform configs",
+        "authors": [
+          "ThatGravyBoat"
+        ]
+      },
+      "curseforge": {
+        "id": "714059",
+        "slug": "resourceful-config",
+        "title": "Resourceful Config",
+        "description": "Resourceful Config is a mod that allows for developers to make crossplatform configs",
+        "authors": [
+          "ThatGravyBoat",
+          "epic_oreo"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/vectorwing/FarmersDelight",
+      "curseforge_source_url": "https://github.com/vectorwing/FarmersDelight",
+      "modrinth": {
+        "id": "R2OftAxM",
+        "slug": "farmers-delight",
+        "title": "Farmer's Delight",
+        "description": "A cozy expansion to farming and cooking!",
+        "authors": [
+          "vectorwing"
+        ]
+      },
+      "curseforge": {
+        "id": "398521",
+        "slug": "farmers-delight",
+        "title": "Farmer's Delight",
+        "description": "A cozy expansion to farming and cooking!",
+        "authors": [
+          "vectorwing"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/TwelveIterations/NetherPortalFix",
+      "curseforge_source_url": "https://github.com/TwelveIterations/NetherPortalFix",
+      "modrinth": {
+        "id": "nPZr02ET",
+        "slug": "netherportalfix",
+        "title": "NetherPortalFix",
+        "description": "Ensures correct destinations when traveling back and forth through Nether Portals in Multiplayer.",
+        "authors": [
+          "BlayTheNinth"
+        ]
+      },
+      "curseforge": {
+        "id": "241160",
+        "slug": "netherportalfix",
+        "title": "NetherPortalFix",
+        "description": "Ensures correct destinations when traveling back and forth through Nether Portals in Multiplayer.",
+        "authors": [
+          "BlayTheNinth"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/illusivesoulworks/comforts",
+      "curseforge_source_url": "https://github.com/illusivesoulworks/comforts",
+      "modrinth": {
+        "id": "SaCpeal4",
+        "slug": "comforts",
+        "title": "Comforts",
+        "description": "Adds sleeping bags and hammocks for, respectively, portability and turning day to night, without setting new spawns. Comes in 16 different colors!",
+        "authors": [
+          "TheIllusiveC4"
+        ]
+      },
+      "curseforge": {
+        "id": "276951",
+        "slug": "comforts",
+        "title": "Comforts",
+        "description": "Adds sleeping bags and hammocks for, respectively, portability and turning day to night, without setting new spawns. Comes in 16 different colors!",
+        "authors": [
+          "TheIllusiveC4"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/lucko/spark",
+      "curseforge_source_url": "https://github.com/lucko/spark",
+      "modrinth": {
+        "id": "l6YH9Als",
+        "slug": "spark",
+        "title": "spark",
+        "description": "spark is a performance profiler for Minecraft clients, servers and proxies.",
+        "authors": [
+          "lucko"
+        ]
+      },
+      "curseforge": {
+        "id": "361579",
+        "slug": "spark",
+        "title": "spark",
+        "description": "spark is a performance profiler for Minecraft clients, servers and proxies.",
+        "authors": [
+          "Iucko"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/noobanidus/lootr",
+      "curseforge_source_url": "https://github.com/noobanidus/lootr",
+      "modrinth": {
+        "id": "EltpO5cN",
+        "slug": "lootr",
+        "title": "Lootr",
+        "description": "A mod that makes it so nobody misses out on Loot! All loot chests are instanced per player and visually unique.",
+        "authors": [
+          "noobanidus"
+        ]
+      },
+      "curseforge": {
+        "id": "361276",
+        "slug": "lootr",
+        "title": "Lootr (Forge & NeoForge)",
+        "description": "A mod that makes it so nobody misses out on Loot! All loot chests are instanced per player and visually unique.",
+        "authors": [
+          "Noobanidus",
+          "ZestyBlaze",
+          "embeddedt"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Keksuccino/Drippy-Loading-Screen",
+      "curseforge_source_url": "https://github.com/Keksuccino/Drippy-Loading-Screen",
+      "modrinth": {
+        "id": "v3CYg2V9",
+        "slug": "drippy-loading-screen",
+        "title": "Drippy Loading Screen",
+        "description": "Addon for FancyMenu to customize the loading screen.",
+        "authors": [
+          "Keksuccino"
+        ]
+      },
+      "curseforge": {
+        "id": "511770",
+        "slug": "drippy-loading-screen",
+        "title": "Drippy Loading Screen",
+        "description": "Addon for FancyMenu to customize the loading screen.",
+        "authors": [
+          "Keksuccino"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/Darkhax-Minecraft/AttributeFix",
+      "curseforge_source_url": "https://github.com/Darkhax-Minecraft/AttributeFix",
+      "modrinth": {
+        "id": "lOOpEntO",
+        "slug": "attributefix",
+        "title": "AttributeFix",
+        "description": "Removes arbitrary limits on Minecraft's attribute system. Fixes MANY mods!",
+        "authors": [
+          "Darkhax"
+        ]
+      },
+      "curseforge": {
+        "id": "280510",
+        "slug": "attributefix",
+        "title": "AttributeFix",
+        "description": "Removes arbitrary limits on Minecraft's attribute system.",
+        "authors": [
+          "DarkhaxDev"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/P3pp3rF1y/SophisticatedBackpacks",
+      "curseforge_source_url": "https://github.com/P3pp3rF1y/SophisticatedBackpacks",
+      "modrinth": {
+        "id": "TyCTlI4b",
+        "slug": "sophisticated-backpacks",
+        "title": "Sophisticated Backpacks",
+        "description": "Yet another backpack mod this time with backpack you can place in world, color in different color combinations, upgrade with more inventory and enhance with many functional upgrades",
+        "authors": [
+          "P3pp3rF1y"
+        ]
+      },
+      "curseforge": {
+        "id": "422301",
+        "slug": "sophisticated-backpacks",
+        "title": "Sophisticated Backpacks",
+        "description": "Yet another backpack mod this time with backpack you can place in world, color in different color combinations, upgrade with more inventory and enhance with many functional upgrades",
+        "authors": [
+          "P3pp3rF1y"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/P3pp3rF1y/SophisticatedCore",
+      "curseforge_source_url": "https://github.com/P3pp3rF1y/SophisticatedCore",
+      "modrinth": {
+        "id": "nmoqTijg",
+        "slug": "sophisticated-core",
+        "title": "Sophisticated Core",
+        "description": "Library mod for Sophisticated mods",
+        "authors": [
+          "P3pp3rF1y"
+        ]
+      },
+      "curseforge": {
+        "id": "618298",
+        "slug": "sophisticated-core",
+        "title": "Sophisticated Core",
+        "description": "Library mod for Sophisticated mods",
+        "authors": [
+          "P3pp3rF1y"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/TwelveIterations/DefaultOptions",
+      "curseforge_source_url": "https://github.com/TwelveIterations/DefaultOptions",
+      "modrinth": {
+        "id": "WEg59z5b",
+        "slug": "default-options",
+        "title": "Default Options",
+        "description": "Ship default options or keybinds without having to overwrite an existing options.txt.",
+        "authors": [
+          "BlayTheNinth"
+        ]
+      },
+      "curseforge": {
+        "id": "232131",
+        "slug": "default-options",
+        "title": "Default Options",
+        "description": "Ship default options or keybinds without having to overwrite an existing options.txt.",
+        "authors": [
+          "BlayTheNinth"
+        ]
+      }
+    },
+    {
+      "kind": "mod",
+      "modrinth_source_url": "https://github.com/SuperMartijn642/SuperMartijn642sCoreLib",
+      "curseforge_source_url": "https://github.com/SuperMartijn642/SuperMartijn642sCoreLib",
+      "modrinth": {
+        "id": "rOUBggPv",
+        "slug": "supermartijn642s-core-lib",
+        "title": "SuperMartijn642's Core Lib",
+        "description": "SuperMartijn642's Core Lib adds lots of basic implementations that allow for similar code between different Minecraft versions!",
+        "authors": [
+          "SuperMartijn642"
+        ]
+      },
+      "curseforge": {
+        "id": "454372",
+        "slug": "supermartijn642s-core-lib",
+        "title": "SuperMartijn642's Core Lib",
+        "description": "SuperMartijn642's Core Lib adds lots of basic implementations that allow for similar code between different Minecraft versions!",
+        "authors": [
+          "SuperMartijn642"
+        ]
+      }
+    },
+    {
+      "kind": "resourcepack",
+      "modrinth_source_url": "https://github.com/Madis0/sodium-fabric-translations",
+      "curseforge_source_url": "https://github.com/Madis0/sodium-fabric-translations",
+      "modrinth": {
+        "id": "yfDziwn1",
+        "slug": "translations-for-sodium",
+        "title": "Translations for Sodium",
+        "description": "Unofficial translations for the Sodium Minecraft mod",
+        "authors": [
+          "robotkoer"
+        ]
+      },
+      "curseforge": {
+        "id": "867964",
+        "slug": "translations-for-sodium",
+        "title": "Translations for Sodium",
+        "description": "Unofficial translations for the Sodium Minecraft mod",
+        "authors": [
+          "robotkoer",
+          "FlashyReese"
+        ]
+      }
+    },
+    {
+      "kind": "resourcepack",
+      "modrinth_source_url": "https://github.com/TeamMidnightDust/BetterLeavesLite/",
+      "curseforge_source_url": "https://github.com/TeamMidnightDust/BetterLeavesLite",
+      "modrinth": {
+        "id": "uvpymuxq",
+        "slug": "better-leaves",
+        "title": "Motschen's Better Leaves",
+        "description": "Improves the appearance of leaves with high mod compatibility and performance!",
+        "authors": [
+          "Motschen"
+        ]
+      },
+      "curseforge": {
+        "id": "380969",
+        "slug": "motschens-better-leaves",
+        "title": "Motschen's Better Leaves",
+        "description": "Improves the appearance of leaves with high mod compatibility and performance!",
+        "authors": [
+          "Motschen"
+        ]
+      }
+    },
+    {
+      "kind": "resourcepack",
+      "modrinth_source_url": "https://github.com/Fabulously-Optimized/fabulously-optimized/tree/main/Resource%20Packs/Chat%20Reporting%20Helper",
+      "curseforge_source_url": "https://github.com/Fabulously-Optimized/fabulously-optimized/tree/main/Resource%20Packs/Chat%20Reporting%20Helper",
+      "modrinth": {
+        "id": "tN4E9NfV",
+        "slug": "chat-reporting-helper",
+        "title": "Chat Reporting Helper",
+        "description": "An educational tool that explains chat reporting in a simple and neutral way.",
+        "authors": [
+          "robotkoer"
+        ]
+      },
+      "curseforge": {
+        "id": "855981",
+        "slug": "chat-reporting-helper",
+        "title": "Chat Reporting Helper",
+        "description": "An educational tool that explains chat reporting in a simple and neutral way.",
+        "authors": [
+          "robotkoer"
+        ]
+      }
+    },
+    {
+      "kind": "resourcepack",
+      "modrinth_source_url": "https://github.com/nebuIr/Default-Dark-Mode",
+      "curseforge_source_url": "https://github.com/nebuIr/Default-Dark-Mode",
+      "modrinth": {
+        "id": "6SLU7tS5",
+        "slug": "default-dark-mode",
+        "title": "Default Dark Mode",
+        "description": "🌙 The Dark Mode Resource Pack for Minecraft: Java Edition",
+        "authors": [
+          "nebulr"
+        ]
+      },
+      "curseforge": {
+        "id": "349116",
+        "slug": "default-dark-mode",
+        "title": "Default Dark Mode",
+        "description": "🌙 The Dark Mode / Dark Theme Resource Pack",
+        "authors": [
+          "nebulr"
+        ]
+      }
+    },
+    {
+      "kind": "resourcepack",
+      "modrinth_source_url": "https://github.com/Faithful-Resource-Pack/Faithful-Java-64x",
+      "curseforge_source_url": "https://github.com/Faithful-Resource-Pack/Faithful-Java-64x",
+      "modrinth": {
+        "id": "r4GILswZ",
+        "slug": "faithful-64x",
+        "title": "Faithful 64x",
+        "description": "An even more detailed experience with quadruple-resolution textures!",
+        "authors": [
+          "Faithful-Resource-Pack"
+        ]
+      },
+      "curseforge": {
+        "id": "419139",
+        "slug": "faithful-64x",
+        "title": "Faithful 64x",
+        "description": "An even more detailed experience with quadruple-resolution textures!",
+        "authors": [
+          "Faithful_Resource_Pack",
+          "haryamc"
+        ]
+      }
+    },
+    {
+      "kind": "resourcepack",
+      "modrinth_source_url": "https://github.com/Faithful-Resource-Pack/Faithful-Java-32x",
+      "curseforge_source_url": "https://github.com/Faithful-Resource-Pack/Faithful-Java-32x",
+      "modrinth": {
+        "id": "w0TnApzs",
+        "slug": "faithful-32x",
+        "title": "Faithful 32x",
+        "description": "The original Minecraft texture feel, with double the resolution and double the fun!",
+        "authors": [
+          "Faithful-Resource-Pack"
+        ]
+      },
+      "curseforge": {
+        "id": "436482",
+        "slug": "faithful-32x",
+        "title": "Faithful 32x",
+        "description": "The original Minecraft texture feel, with double the resolution and double the fun!",
+        "authors": [
+          "Faithful_Resource_Pack"
+        ]
+      }
+    },
+    {
+      "kind": "resourcepack",
+      "modrinth_source_url": "https://github.com/xalixilax/xali-s-Enhanced-Vanilla-16x",
+      "curseforge_source_url": "https://github.com/xalixilax/xali-s-Enhanced-Vanilla-16x",
+      "modrinth": {
+        "id": "Srw5RQ6k",
+        "slug": "xalis-enhanced-vanilla",
+        "title": "xali's Enhanced Vanilla",
+        "description": "The texture pack for people who hate texture pack.",
+        "authors": [
+          "xalixilax"
+        ]
+      },
+      "curseforge": {
+        "id": "513425",
+        "slug": "xalis-enhanced-vanilla",
+        "title": "xali's Enhanced Vanilla",
+        "description": "A pack that enhance the game while style keeping the vanilla feel.",
+        "authors": [
+          "xalixilax"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://github.com/sixthsurge/photon",
+      "curseforge_source_url": "https://github.com/sixthsurge/photon",
+      "modrinth": {
+        "id": "lLqFfGNs",
+        "slug": "photon-shader",
+        "title": "Photon Shaders",
+        "description": "A gameplay-focused shader pack with a semi-realistic style",
+        "authors": [
+          "sixthsurge"
+        ]
+      },
+      "curseforge": {
+        "id": "1312687",
+        "slug": "photon-shader",
+        "title": "Photon Shader",
+        "description": "A gameplay-focused shader pack with a semi-realistic style",
+        "authors": [
+          "sixthsurge"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://github.com/Septonious/Solas-Shader",
+      "curseforge_source_url": "https://github.com/Septonious/Solas-Shader",
+      "modrinth": {
+        "id": "EpQFjzrQ",
+        "slug": "solas-shader",
+        "title": "Solas Shader",
+        "description": "A modern fantasy stylized shaderpack with colored lighting and stunning visuals",
+        "authors": [
+          "Septonious"
+        ]
+      },
+      "curseforge": {
+        "id": "678384",
+        "slug": "solas-shader",
+        "title": "Solas Shader",
+        "description": "A good performing fantasy stylized shaderpack with colored lighting and fancy visuals",
+        "authors": [
+          "Septonious"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://github.com/X0nk/Bliss-Shader",
+      "curseforge_source_url": "https://github.com/X0nk/Bliss-Shader",
+      "modrinth": {
+        "id": "ZvMtQlho",
+        "slug": "bliss-shader",
+        "title": "Bliss Shaders",
+        "description": "A well performing fantasy styled shaderpack with emphasis on scene variation and customization.",
+        "authors": [
+          "Xonk"
+        ]
+      },
+      "curseforge": {
+        "id": "610844",
+        "slug": "bliss-shader",
+        "title": "Bliss Shaders",
+        "description": "A well performing fantasy styled shaderpack with emphasis on scene variation and customization.",
+        "authors": [
+          "Xonk___"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://github.com/Eldeston/Super-Duper-Vanilla",
+      "curseforge_source_url": "https://github.com/Eldeston/Super-Duper-Vanilla",
+      "modrinth": {
+        "id": "LMIZZNxZ",
+        "slug": "super-duper-vanilla",
+        "title": "Super Duper Vanilla",
+        "description": "A shader pack created to convey the style of the cancelled Super Duper Graphics Pack and other popular Minecraft titles.",
+        "authors": [
+          "Eldeston"
+        ]
+      },
+      "curseforge": {
+        "id": "534748",
+        "slug": "super-duper-vanilla-shaders",
+        "title": "Super Duper Vanilla Shaders",
+        "description": "A shader pack created to convey the style of the cancelled Super Duper Graphics Pack and other popular Minecraft titles.",
+        "authors": [
+          "eldeston"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://codeberg.org/TheCMK/mellow-shader",
+      "curseforge_source_url": "https://codeberg.org/TheCMK/mellow-shader",
+      "modrinth": {
+        "id": "BUxf36AP",
+        "slug": "mellow",
+        "title": "Mellow",
+        "description": "Shaderpack with a painterly aesthetic made for people who want to actually play the game. It's easy on your eyes and on your computer!",
+        "authors": [
+          "TheCMK"
+        ]
+      },
+      "curseforge": {
+        "id": "1113130",
+        "slug": "mellow",
+        "title": "Mellow",
+        "description": "Shaderpack with a painterly aesthetic made for people who want to actually play the game. It's easy on your eyes and on your computer!",
+        "authors": [
+          "TheCMK"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://github.com/mateuskreuch/minecraft-miniature-shader",
+      "curseforge_source_url": "https://github.com/mateuskreuch/minecraft-miniature-shader",
+      "modrinth": {
+        "id": "UaS8ROxa",
+        "slug": "miniature-shader",
+        "title": "Miniature Shader",
+        "description": "Extremely lightweight with shadows and reflections",
+        "authors": [
+          "ukrech"
+        ]
+      },
+      "curseforge": {
+        "id": "602290",
+        "slug": "miniature-shader",
+        "title": "Miniature Shader",
+        "description": "Extremely lightweight with shadows and reflections",
+        "authors": [
+          "ukrech"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://github.com/nvb-uy/Hysteria",
+      "curseforge_source_url": "https://github.com/nvb-uy/Hysteria",
+      "modrinth": {
+        "id": "iHC8BZn4",
+        "slug": "hysteria-shaders",
+        "title": "Hysteria Shaders",
+        "description": "Atmospheric, highly customizable horror shaderpack, successor of Insanity Shader.",
+        "authors": [
+          "ElocinDev"
+        ]
+      },
+      "curseforge": {
+        "id": "1040578",
+        "slug": "hysteria-shaders",
+        "title": "👻 Hysteria Shaders",
+        "description": "Atmospheric, highly customizable eerie shaderpack, successor of Insanity Shader.",
+        "authors": [
+          "ElocinDev"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://github.com/SpacEagle17/Spooklementary",
+      "curseforge_source_url": "https://github.com/SpacEagle17/Spooklementary",
+      "modrinth": {
+        "id": "6uJCfiCH",
+        "slug": "spooklementary",
+        "title": "Spooklementary",
+        "description": "A Spooky, very moody and atmospheric Complementary Shaders Edit",
+        "authors": [
+          "SpacEagle17"
+        ]
+      },
+      "curseforge": {
+        "id": "921717",
+        "slug": "spooklementary",
+        "title": "Spooklementary",
+        "description": "A Spooky, very moody and atmospheric Complementary Shaders Edit",
+        "authors": [
+          "SpacEagle17"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://github.com/EntokitoDezonze/E-LITE-shaders",
+      "curseforge_source_url": "https://github.com/EntokitoDezonze/E-LITE-shaders",
+      "modrinth": {
+        "id": "LTvf5Tji",
+        "slug": "lite-shaders",
+        "title": "E-LITE shaders (MakeUp edit)",
+        "description": "A MakeUp - Ultra Fast shaders edit that is highly customizable, beautiful, and fast!",
+        "authors": [
+          "Entokito"
+        ]
+      },
+      "curseforge": {
+        "id": "1155908",
+        "slug": "lite-shaders",
+        "title": "E-LITE shaders (MakeUp edit)",
+        "description": "A MakeUp - Ultra Fast shaders edit that is highly customizable, beautiful, and fast!",
+        "authors": [
+          "Entokito"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://github.com/Luracasmus/renderpearl",
+      "curseforge_source_url": "https://github.com/Luracasmus/renderpearl",
+      "modrinth": {
+        "id": "BrRak9pu",
+        "slug": "renderpearl",
+        "title": "RenderPearl",
+        "description": "Clean, high performance shaders for modern hardware",
+        "authors": [
+          "Luracasmus"
+        ]
+      },
+      "curseforge": {
+        "id": "1248396",
+        "slug": "renderpearl",
+        "title": "RenderPearl",
+        "description": "Clean, high performance Iris shaders for modern hardware ",
+        "authors": [
+          "Luracasmus"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://github.com/kolgushev/Pixel-Perfect-B",
+      "curseforge_source_url": "https://github.com/kolgushev/Pixel-Perfect-B",
+      "modrinth": {
+        "id": "D5k8BTVz",
+        "slug": "pixel-perfect-shaders",
+        "title": "Pixel Perfect",
+        "description": "Improves visuals without interrupting gameplay",
+        "authors": [
+          "epcr"
+        ]
+      },
+      "curseforge": {
+        "id": "883885",
+        "slug": "pixel-perfect",
+        "title": "Pixel Perfect Shaders",
+        "description": "A shader that improves visuals without interrupting gameplay",
+        "authors": [
+          "epcr"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://github.com/millennIumAMbiguity/ctrvcr",
+      "curseforge_source_url": "https://github.com/millennIumAMbiguity/ctrvcr",
+      "modrinth": {
+        "id": "XaonJnsc",
+        "slug": "ctrvcr",
+        "title": "CTR VCR",
+        "description": "Retro stylized shader that brings artifacts from CRT and VCR / VHS",
+        "authors": [
+          "millennIumAMbiguity"
+        ]
+      },
+      "curseforge": {
+        "id": "1167228",
+        "slug": "ctr-vcr",
+        "title": "CTR VCR",
+        "description": "Retro stylized shader that brings artifacts from CRT and VCR / VHS",
+        "authors": [
+          "millennIumAMbiguity"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://modrinth.com/shader/super-duper-vanilla",
+      "curseforge_source_url": "https://modrinth.com/shader/super-duper-vanilla",
+      "modrinth": {
+        "id": "CiFGzRV9",
+        "slug": "vanilletix",
+        "title": "Vanilletix Shaders",
+        "description": "A shader pack that is created to improve the graphics of your game, leaving it in vanilla style",
+        "authors": [
+          "ara_mat"
+        ]
+      },
+      "curseforge": {
+        "id": "969143",
+        "slug": "vanilletix",
+        "title": "Vanilletix Shaders",
+        "description": "A shader pack that is created to improve the graphics of your game, leaving it in vanilla style",
+        "authors": [
+          "ara_mat_ofc"
+        ]
+      }
+    },
+    {
+      "kind": "shader",
+      "modrinth_source_url": "https://github.com/in2bubble/Aurora-Fantasy?tab=LGPL-3.0-1-ov-file",
+      "curseforge_source_url": "https://github.com/in2bubble/Aurora-Fantasy",
+      "modrinth": {
+        "id": "ZuJPfLHp",
+        "slug": "aurora-fantasy",
+        "title": "Aurora Fantasy",
+        "description": "Transform Minecraft into a magical fantasy world featuring glowing night fireflies, shimmering Auroras, vibrant cinematic lighting, and dynamic weather.",
+        "authors": [
+          "in2bubble"
+        ]
+      },
+      "curseforge": {
+        "id": "1462750",
+        "slug": "aurora-fantasy",
+        "title": "Aurora Fantasy",
+        "description": "Transform Minecraft into a magical fantasy world featuring glowing night fireflies, shimmering Auroras, vibrant cinematic lighting, and dynamic weather.",
+        "authors": [
+          "in2bubble"
+        ]
+      }
+    },
+    {
+      "kind": "modpack",
+      "modrinth_source_url": "https://github.com/Fabulously-Optimized/fabulously-optimized/",
+      "curseforge_source_url": "https://github.com/Fabulously-Optimized/fabulously-optimized",
+      "modrinth": {
+        "id": "1KVo5zza",
+        "slug": "fabulously-optimized",
+        "title": "Fabulously Optimized",
+        "description": "Beautiful graphics, speedy performance and familiar features in a simple package. Wilderness Bound alpha!",
+        "authors": [
+          "robotkoer"
+        ]
+      },
+      "curseforge": {
+        "id": "396246",
+        "slug": "fabulously-optimized",
+        "title": "Fabulously Optimized",
+        "description": "Beautiful graphics, speedy performance and familiar features in a simple package. Wilderness Bound alpha!",
+        "authors": [
+          "robotkoer"
+        ]
+      }
+    },
+    {
+      "kind": "datapack",
+      "modrinth_source_url": "https://github.com/Tschipcraft/dynamiclights",
+      "curseforge_source_url": "https://github.com/Tschipcraft/dynamiclights",
+      "modrinth": {
+        "id": "7YjclEGc",
+        "slug": "dynamic-lights",
+        "title": "Dynamic Lights",
+        "description": "Supported entities and items such as torches, lanterns, or enchanted gear emit light! Server-side!",
+        "authors": [
+          "Tschipcraft"
+        ]
+      },
+      "curseforge": {
+        "id": "831385",
+        "slug": "tschipcrafts-dynamic-lights",
+        "title": "Dynamic Lights [Data Pack]",
+        "description": "Supported entities and items such as torches or lanterns emit light!",
+        "authors": [
+          "Tschipcraft"
+        ]
+      }
+    },
+    {
+      "kind": "datapack",
+      "modrinth_source_url": "https://github.com/Tschipcraft/spawnanimations",
+      "curseforge_source_url": "https://github.com/Tschipcraft/spawnanimations",
+      "modrinth": {
+        "id": "zrzYrlm0",
+        "slug": "spawn-animations",
+        "title": "Spawn Animations",
+        "description": "Hostile mobs dig out of the ground or poof into existence when they spawn!",
+        "authors": [
+          "Tschipcraft"
+        ]
+      },
+      "curseforge": {
+        "id": "811803",
+        "slug": "spawn-animations",
+        "title": "Spawn Animations [Data Pack]",
+        "description": "Hostile mobs dig out of the ground or poof into existence when they spawn!",
+        "authors": [
+          "Tschipcraft"
+        ]
+      }
+    }
+  ]
+}

@@ -74,6 +74,26 @@ fn content_provider_settings_are_normalized() {
 }
 
 #[test]
+fn discovery_provider_only_disables_the_other_provider() {
+    for preferred_provider in [ContentProvider::Modrinth, ContentProvider::CurseForge] {
+        let mut content = Content {
+            preferred_provider,
+            preferred_provider_only: true,
+            ..Content::default()
+        };
+        for provider in ["modrinth", "curseforge"] {
+            assert_eq!(
+                content.discovery_provider_enabled_with_curseforge(provider, true),
+                provider == content.preferred_provider_with_curseforge(true)
+            );
+        }
+        content.preferred_provider_only = false;
+        assert!(content.discovery_provider_enabled_with_curseforge("modrinth", true));
+        assert!(content.discovery_provider_enabled_with_curseforge("curseforge", true));
+    }
+}
+
+#[test]
 fn resolve_path_absolute() {
     assert_eq!(resolve_path("/opt/rmcl"), PathBuf::from("/opt/rmcl"));
 }

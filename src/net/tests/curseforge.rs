@@ -151,6 +151,29 @@ fn discovery_hides_projects_that_block_third_party_downloads() {
 }
 
 #[test]
+fn discovery_metadata_preserves_all_creators_and_tolerates_missing_creators() {
+    for authors in [
+        serde_json::json!([]),
+        serde_json::json!([{"name": "Creator"}, {"name": "Maintainer"}]),
+    ] {
+        let project: Mod = serde_json::from_value(serde_json::json!({
+            "id": 7, "name": "Example", "slug": "example", "authors": authors
+        }))
+        .unwrap();
+        let expected = authors
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|author| author["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(discovery_metadata(&project).authors, expected);
+    }
+    let project: Mod =
+        serde_json::from_str(r#"{"id":7,"name":"Example","slug":"example"}"#).unwrap();
+    assert!(discovery_metadata(&project).authors.is_empty());
+}
+
+#[test]
 fn datapack_discovery_uses_the_curseforge_data_packs_class() {
     assert_eq!(class_id(ContentKind::DataPack), 6945);
 }

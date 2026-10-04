@@ -453,6 +453,26 @@ fn discovery_search_treats_blank_icon_urls_as_missing() {
 }
 
 #[test]
+fn discovery_metadata_preserves_the_creator_and_tolerates_missing_creators() {
+    for author in [None, Some(""), Some("Creator")] {
+        let mut hit = serde_json::json!({
+            "project_id": "project", "slug": "example", "title": "Example", "description": "Description"
+        });
+        if let Some(author) = author {
+            hit["author"] = serde_json::json!(author);
+        }
+        let response: DiscoverySearchResponse =
+            serde_json::from_value(serde_json::json!({"hits": [hit], "total_hits": 1})).unwrap();
+        let result = discovery_results(response);
+        let expected = author
+            .filter(|author| !author.is_empty())
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(result.metadata["project"].authors, expected);
+    }
+}
+
+#[test]
 fn discovery_sort_maps_to_modrinth_indexes() {
     use crate::instance::content::provider::DiscoverySort;
 

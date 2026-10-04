@@ -8,6 +8,30 @@ use std::{
 };
 
 use crate::instance::content::entry::{ContentEntry, WorldDetails, WorldGameMode};
+
+#[tokio::test]
+async fn pending_version_metadata_does_not_queue_another_request_each_redraw() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = ContentListState {
+        provider_icon_meta_dir: Some(temp.path().to_owned()),
+        provider_icon_client: Some(crate::net::HttpClient::new()),
+        local_game_version: "1.21".to_owned(),
+        ..ContentListState::default()
+    };
+    let mut entry = entry("project");
+    entry.provider_project = Some(crate::instance::ProviderProject {
+        provider: "modrinth".to_owned(),
+        project_id: "project".to_owned(),
+        version_id: "version".to_owned(),
+    });
+    state.entries.push(entry);
+    state.request_visible_provider_icons(&[0], 10);
+    let pending = Arc::strong_count(&state.pending_provider_icons);
+    for _ in 0..10 {
+        state.request_visible_provider_icons(&[0], 10);
+    }
+    assert_eq!(Arc::strong_count(&state.pending_provider_icons), pending);
+}
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -967,7 +991,7 @@ fn streamed_entries_without_icons_are_visible_immediately() {
 }
 
 #[tokio::test]
-async fn installed_icon_decode_survives_manifest_binding_and_cache_restore() {
+async fn installed_icon_decode_survives_manifest_binding() {
     let mut state = ContentListState::default();
     state.set_installed_options(
         &crate::tui::widgets::content::discovery::DiscoveryFilters::default(),
@@ -1003,30 +1027,62 @@ async fn installed_icon_decode_survives_manifest_binding_and_cache_restore() {
     })
     .await
     .expect("installed icon decoded after manifest binding");
+}
 
-    let directory = tempfile::tempdir().unwrap();
-    state.start_load(
-        directory.path(),
-        "other",
-        crate::instance::content::mods::scan_one_mod,
-        "jar",
-    );
-    state.start_load(
-        directory.path(),
-        "main",
-        crate::instance::content::mods::scan_one_mod,
-        "jar",
-    );
-    assert!(state.filtered_indices().is_empty());
-    state.request_image_loads(&picker);
+#[tokio::test]
+async fn switching_back_rescans_content_changed_while_inactive() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::write(first.join("old.jar"), b"old").unwrap();
+    let mut state = ContentListState::default();
+    let scanner = crate::instance::content::mods::scan_one_mod;
+    state.start_load(&first, "first", scanner, ".jar");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while state.filtered_indices().is_empty() {
-            state.drain_image_loads(&picker);
+        while state.loading {
+            state.drain_pending();
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("cached installed icon decoded");
+    .unwrap();
+    assert_eq!(state.entries.len(), 1);
+
+    state.start_load(&second, "second", scanner, ".jar");
+    std::fs::remove_file(first.join("old.jar")).unwrap();
+    std::fs::write(first.join("new.jar"), b"new").unwrap();
+    state.start_load(&first, "first", scanner, ".jar");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while state.loading {
+            state.drain_pending();
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(state.entries.len(), 1);
+    assert_eq!(state.entries[0].path, first.join("new.jar"));
+}
+
+#[test]
+fn old_watcher_results_cannot_update_a_new_instance() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = ContentListState::default();
+    let old_slot = state.watcher_diff.clone();
+    state.watch_dir(temp.path().to_owned());
+    *old_slot.lock().unwrap() = Some(super::WatcherDiff {
+        toggled: vec![(
+            "test".to_owned(),
+            false,
+            temp.path().join("test.jar.disabled"),
+        )],
+        removed: Vec::new(),
+        added: Vec::new(),
+    });
+
+    assert!(state.drain_watcher().toggles.is_empty());
 }
 
 #[test]
@@ -1146,6 +1202,47 @@ fn incompatible_installed_version_renders_red_footer() {
     };
     assert_eq!(footer_color("1.0.0+mc1.21.1"), Some(theme.text()));
     assert_eq!(footer_color("0.9.0+mc1.20.1"), Some(theme.error()));
+}
+
+#[test]
+fn warning_descriptions_render_in_warning_color() {
+    let mut conflict = entry("Voxy");
+    conflict.description =
+        "Other selected updates require different versions of Sodium.".to_owned();
+    let mut state = ContentListState {
+        entries: vec![conflict],
+        warning_descriptions: true,
+        ..ContentListState::default()
+    };
+    state.rebuild_display_metadata();
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 5)).unwrap();
+    terminal
+        .draw(|frame| {
+            super::render(
+                frame,
+                frame.area(),
+                &mut state,
+                true,
+                "Loading...",
+                "Empty",
+                &picker,
+                false,
+                true,
+            );
+        })
+        .unwrap();
+
+    let theme = crate::config::theme::THEME.as_ref();
+    let buffer = terminal.backend().buffer().clone();
+    let description_color = (0..buffer.area.height).find_map(|y| {
+        let row = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_owned())
+            .collect::<String>();
+        row.find("Other selected")
+            .map(|start| buffer[(u16::try_from(start).unwrap(), y)].fg)
+    });
+    assert_eq!(description_color, Some(theme.warning()));
 }
 
 #[test]
@@ -1292,6 +1389,92 @@ fn manifest_metadata_keeps_an_embedded_icon_renderer() {
     state.apply_manifest(&manifest, &minecraft_dir, crate::instance::ContentKind::Mod);
 
     assert!(state.image_protocols.contains_key("installed"));
+}
+
+#[test]
+fn unlinked_badge_is_subdued_and_requires_a_completed_unmatched_lookup() {
+    use crate::instance::{
+        ContentFileRecord, ContentKind, ContentManifest, FileFingerprint, Resolution,
+    };
+    let minecraft = PathBuf::from("instance/minecraft");
+    let mut installed = entry("scoreboardinternal");
+    installed.path = minecraft.join("mods/local.jar");
+    installed.footer_label = Some("1.0.0".to_owned());
+    let mut state = ContentListState::default();
+    state.set_entries(vec![installed]);
+    let mut manifest = ContentManifest::default();
+    manifest.upsert(ContentFileRecord {
+        relative_path: PathBuf::from("mods/local.jar"),
+        kind: ContentKind::Mod,
+        enabled: true,
+        fingerprint: FileFingerprint {
+            size: 0,
+            modified_ns: 0,
+            hashes: Default::default(),
+        },
+        resolution: Resolution::Unmatched {
+            checked_at: 1,
+            providers: vec!["modrinth".to_owned()],
+        },
+        provider_aliases: Vec::new(),
+        provider_checks: vec!["modrinth".to_owned()],
+        required_dependencies: Vec::new(),
+        automatic_dependency: false,
+        cleanup_eligible: false,
+    });
+    state.apply_manifest(&manifest, &minecraft, ContentKind::Mod);
+    state.apply_update_snapshot(None);
+    assert!(state.unlinked_paths.contains(&state.entries[0].path));
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    let theme = crate::config::theme::THEME.as_ref();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 4)).unwrap();
+    for focused in [false, true] {
+        terminal
+            .draw(|frame| {
+                super::render(
+                    frame,
+                    frame.area(),
+                    &mut state,
+                    focused,
+                    "Loading...",
+                    "Empty",
+                    &picker,
+                    false,
+                    false,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = (0..50).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+        let x = row.find("Unlinked").expect("unlinked badge") as u16;
+        assert_eq!(buffer[(x, 0)].fg, theme.background());
+        assert_eq!(buffer[(x, 0)].bg, theme.text_dim());
+        assert!(buffer[(x, 0)].modifier.contains(Modifier::BOLD));
+        assert!(terminal.backend().to_string().contains("1.0.0"));
+    }
+    for resolution in [
+        Resolution::Pending,
+        Resolution::Unmatched {
+            checked_at: 1,
+            providers: Vec::new(),
+        },
+        Resolution::Ambiguous {
+            candidates: Vec::new(),
+        },
+        Resolution::Resolved {
+            project: crate::instance::ProviderProject {
+                provider: "modrinth".to_owned(),
+                project_id: "project".to_owned(),
+                version_id: "version".to_owned(),
+            },
+        },
+    ] {
+        manifest.files[0].resolution = resolution;
+        state.apply_manifest(&manifest, &minecraft, ContentKind::Mod);
+        assert!(state.unlinked_paths.is_empty());
+    }
+    state.apply_manifest(&ContentManifest::default(), &minecraft, ContentKind::Mod);
+    assert!(state.unlinked_paths.is_empty());
 }
 
 #[test]

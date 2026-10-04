@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// state machine for the modpack import wizard.
-// browses modpacks from configured providers and keeps the archive import flow
-// for modrinth URLs, project slugs, version IDs, and local pack archives.
-
 use super::super::LoadState;
 use crate::instance::import::{ImportInput, ImportSummary, parse_import_input};
 use crate::net::modrinth::{self, VersionInfo};
@@ -122,6 +118,23 @@ pub fn has_version_popup() -> bool {
     DISCOVERY_STATE
         .lock()
         .is_ok_and(|state| state.version_popup.is_some())
+}
+
+pub(in crate::tui) fn text_input_active() -> bool {
+    let Ok(state) = IMPORT_STATE.lock() else {
+        return false;
+    };
+    match state.step {
+        ImportStep::Input => true,
+        ImportStep::Version => state.version_search.active,
+        ImportStep::Discover => {
+            drop(state);
+            DISCOVERY_STATE
+                .lock()
+                .is_ok_and(|discovery| discovery.text_input_active())
+        }
+        _ => false,
+    }
 }
 
 pub fn discovery_activity() -> Option<&'static str> {
@@ -387,7 +400,6 @@ fn handle_confirm_key(
     }
 }
 
-// pushes an error toast and rewinds the wizard to a previous step
 fn update_current_request(
     state_arc: &Arc<Mutex<ImportWizardState>>,
     request_id: u64,
@@ -419,8 +431,6 @@ fn begin_import_request(state: &mut ImportWizardState) -> u64 {
     request_id
 }
 
-// parses user input to figure out what they gave us, then dispatches
-// to the appropriate resolve path (slug lookup, direct version, or local file)
 fn start_resolve(state: &mut ImportWizardState) {
     let input_text = state.input.clone();
     state.step = ImportStep::Fetching;
@@ -559,8 +569,6 @@ fn resolve_local_file(state_arc: Arc<Mutex<ImportWizardState>>, request_id: u64,
     }
 }
 
-// user picked a version from the list. download the .mrpack,
-// build a summary, and move to confirm.
 fn start_version_download(state: &mut ImportWizardState) {
     let version = match selected_version(state) {
         Some(v) => v.clone(),

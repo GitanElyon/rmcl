@@ -185,6 +185,7 @@ fn skipped_dependencies_render_as_skipped_in_confirmation() {
         title: title.to_owned(),
         version,
         installed_path: None,
+        expected_record: None,
         kind: ContentKind::Mod,
         destination: std::path::PathBuf::from("mods"),
         provider_aliases: Vec::new(),

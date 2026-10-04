@@ -1,12 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// account management panel: list, add (microsoft/offline), delete
-// microsoft auth uses the device code flow, so it polls a shared mutex
-// for the result while showing the user a code to enter in their browser
-
-use std::sync::{Arc, Mutex};
-
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -32,7 +26,7 @@ pub enum AddMode {
     OfflineBlocked,
     DeviceCodeWaiting {
         info: DeviceCodeInfo,
-        pending: Arc<Mutex<Option<AuthResult>>>,
+        pending: auth::MicrosoftAuth,
     },
 }
 
@@ -62,7 +56,7 @@ impl AccountState {
     // can't block on it because the TUI needs to keep rendering
     pub fn drain_auth_result(&mut self) {
         if let AddMode::DeviceCodeWaiting { pending, .. } = &self.add_mode {
-            let result = match pending.lock() {
+            let result = match pending.result.lock() {
                 Ok(mut slot) => slot.take(),
                 _ => None,
             };
@@ -70,7 +64,12 @@ impl AccountState {
             if let Some(result) = result {
                 match result {
                     AuthResult::Success(account) => {
-                        self.store.add(account);
+                        if let Err(error) = self.store.add(account) {
+                            crate::feedback::errors::push_message(
+                                tracing::Level::ERROR,
+                                error.to_string(),
+                            );
+                        }
                         self.add_mode = AddMode::None;
                         if self.list_state.selected.is_none() && !self.store.accounts.is_empty() {
                             self.list_state.selected = Some(0);
@@ -120,7 +119,12 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut AccountState) -> bool {
                 if !trimmed.is_empty() {
                     if state.store.has_microsoft_account() {
                         let account = auth::create_offline_account(&trimmed);
-                        state.store.add(account);
+                        if let Err(error) = state.store.add(account) {
+                            crate::feedback::errors::push_message(
+                                tracing::Level::ERROR,
+                                error.to_string(),
+                            );
+                        }
                         if state.list_state.selected.is_none() && !state.store.accounts.is_empty() {
                             state.list_state.selected = Some(0);
                         }
@@ -173,8 +177,13 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut AccountState) -> bool {
                     true
                 }
                 KeyCode::Enter => {
-                    if let Some(idx) = state.list_state.selected {
-                        state.store.set_active(idx);
+                    if let Some(idx) = state.list_state.selected
+                        && let Err(error) = state.store.set_active(idx)
+                    {
+                        crate::feedback::errors::push_message(
+                            tracing::Level::ERROR,
+                            error.to_string(),
+                        );
                     }
                     true
                 }
@@ -196,12 +205,10 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut AccountState) -> bool {
     }
 }
 
-// the device code arrives asynchronously from the auth thread,
-// so it gets pulled out of a global mutex once it's ready
 pub fn drain_device_code(state: &mut AccountState) {
-    if let AddMode::DeviceCodeWaiting { info, .. } = &mut state.add_mode
+    if let AddMode::DeviceCodeWaiting { info, pending } = &mut state.add_mode
         && info.user_code.is_empty()
-        && let Ok(mut slot) = auth::DEVICE_CODE_DISPLAY.lock()
+        && let Ok(mut slot) = pending.device_code.lock()
         && let Some(dc_info) = slot.take()
     {
         info.user_code = dc_info.user_code;
@@ -335,17 +342,11 @@ fn render_account_list(
     frame.render_stateful_widget(list, area, &mut state.list_state);
 }
 
-// center a popup of given size within the terminal. nothing fancy
 fn popup_area(frame: &Frame, width: u16, height: u16) -> Rect {
-    let area = frame.area();
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect {
-        x,
-        y,
-        width: width.min(area.width),
-        height: height.min(area.height),
-    }
+    frame.area().centered(
+        ratatui::layout::Constraint::Length(width),
+        ratatui::layout::Constraint::Length(height),
+    )
 }
 
 fn render_choose_popup(frame: &mut Frame) {

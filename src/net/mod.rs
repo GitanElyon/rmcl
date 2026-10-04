@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// networking layer: http client, file downloads, and shared utilities
-// for fetching game assets from mojang, mod loaders, and modrinth.
-
 pub mod curseforge;
 pub mod fabric;
 pub mod forge;
@@ -62,7 +59,8 @@ impl HttpClient {
         let user_agent = format!("rmcl/{} (Minecraft Launcher)", env!("CARGO_PKG_VERSION"));
         let client = Client::builder()
             .user_agent(user_agent.clone())
-            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(
@@ -139,34 +137,10 @@ impl HttpClient {
         B: Serialize + ?Sized,
         T: DeserializeOwned,
     {
-        for attempt in 0..=MAX_RETRIES {
-            tracing::trace!("HTTP POST {}", url);
-            let result = async {
-                let response = self.inner.post(url).json(body).send().await?;
-                if !response.status().is_success() {
-                    return Err(NetError::StatusError {
-                        status: response.status().as_u16(),
-                        url: url.to_owned(),
-                    });
-                }
-                Ok(response.json().await?)
-            }
-            .await;
-            match result {
-                Ok(value) => return Ok(value),
-                Err(error) if is_retryable(&error) && attempt < MAX_RETRIES => {
-                    sleep_before_retry("request", url, attempt, &error).await;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        unreachable!("retry loop returns on success or final error")
+        request_json_with_retry(url, || self.inner.post(url).json(body)).await
     }
 
-    // fetch JSON and also keep the raw bytes. used by install paths that
-    // want both the parsed shape (for downloading libraries from it) and
-    // the original bytes (to write byte-for-byte to the loader-profiles
-    // cache, so any field we don't know about survives).
+    // Cache upstream bytes so fields outside our deserialized types survive.
     pub async fn get_json_with_raw<T: DeserializeOwned>(
         &self,
         url: &str,
@@ -181,36 +155,55 @@ impl HttpClient {
     }
 }
 
-// shared retry envelope around `client.get(url).await? -> decode`. retries
-// transient failures (timeouts, connect errors, 5xx) with exponential
-// backoff. used by both get_json and get_bytes.
+async fn request_json_with_retry<T: DeserializeOwned>(
+    url: &str,
+    build: impl Fn() -> reqwest::RequestBuilder,
+) -> Result<T, NetError> {
+    request_with_retry(
+        url,
+        build,
+        |response| async move { Ok(response.json().await?) },
+    )
+    .await
+}
+
+async fn request_with_retry<T, Fut>(
+    url: &str,
+    build: impl Fn() -> reqwest::RequestBuilder,
+    decode: impl Fn(reqwest::Response) -> Fut,
+) -> Result<T, NetError>
+where
+    Fut: std::future::Future<Output = Result<T, NetError>>,
+{
+    for attempt in 0..=MAX_RETRIES {
+        let result = async {
+            let response = build().send().await?;
+            if !response.status().is_success() {
+                return Err(NetError::StatusError {
+                    status: response.status().as_u16(),
+                    url: url.to_owned(),
+                });
+            }
+            decode(response).await
+        }
+        .await;
+        match result {
+            Ok(value) => return Ok(value),
+            Err(error) if error.is_retryable() && attempt < MAX_RETRIES => {
+                sleep_before_retry("request", url, attempt, &error).await
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("retry loop returns on success or final error")
+}
+
 async fn get_with_retry<T, F, Fut>(client: &HttpClient, url: &str, decode: F) -> Result<T, NetError>
 where
     F: Fn(reqwest::Response) -> Fut,
     Fut: std::future::Future<Output = Result<T, NetError>>,
 {
-    for attempt in 0..=MAX_RETRIES {
-        match client.get(url).await {
-            Ok(resp) => match decode(resp).await {
-                Ok(value) => return Ok(value),
-                Err(e) if is_retryable(&e) => {
-                    if attempt == MAX_RETRIES {
-                        return Err(e);
-                    }
-                    sleep_before_retry("request", url, attempt, &e).await;
-                }
-                Err(e) => return Err(e),
-            },
-            Err(e) if is_retryable(&e) => {
-                if attempt == MAX_RETRIES {
-                    return Err(e);
-                }
-                sleep_before_retry("request", url, attempt, &e).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    unreachable!("retry loop returns on success or final error")
+    request_with_retry(url, || client.inner.get(url), decode).await
 }
 
 const MAX_RETRIES: u32 = 3;
@@ -230,9 +223,7 @@ async fn sleep_before_retry(kind: &str, url: &str, attempt: u32, err: &NetError)
     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
 }
 
-// streams a file to disk in chunks, calling progress_cb(downloaded, total) along the way.
-// total will be 0 if the server doesn't send content-length, so callers
-// should handle that gracefully. retries transient failures with exponential backoff.
+// total is 0 without a Content-Length; callers must handle unknown sizes.
 pub async fn download_file(
     client: &HttpClient,
     url: &str,
@@ -241,14 +232,14 @@ pub async fn download_file(
 ) -> Result<(), NetError> {
     tracing::debug!("Downloading {} to {}", url, dest.display());
 
-    let result = 'download: {
+    'download: {
         for attempt in 0..=MAX_RETRIES {
             match download_file_once(client, url, dest, &progress_cb).await {
                 Ok(()) => {
                     tracing::debug!("Downloaded {} to {}", url, dest.display());
                     break 'download Ok(());
                 }
-                Err(e) if is_retryable(&e) => {
+                Err(e) if e.is_retryable() => {
                     if attempt == MAX_RETRIES {
                         break 'download Err(e);
                     }
@@ -258,14 +249,47 @@ pub async fn download_file(
             }
         }
         unreachable!("retry loop returns on success or final error")
-    };
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(dest).await;
     }
-    result
 }
 
-// single attempt at downloading a file to disk
+pub(crate) async fn download_loader_libraries<'a>(
+    client: &HttpClient,
+    libraries: impl IntoIterator<Item = (&'a str, &'a str)>,
+    meta_dir: &Path,
+    loader: &str,
+) -> Result<(), NetError> {
+    let libraries_dir = crate::storage::MetadataPaths::new(meta_dir).libraries();
+    for (name, url) in libraries {
+        let maven_path = crate::instance::loader::maven::maven_coord_to_path(name)
+            .ok_or_else(|| NetError::Parse(format!("Invalid Maven coordinate: {name}")))?;
+        let dest = libraries_dir.join(&maven_path);
+        if valid_jar(&dest) {
+            tracing::debug!("{loader} library already exists: {name}");
+            continue;
+        }
+
+        let download_url = format!("{}/{}", url.trim_end_matches('/'), maven_path);
+        crate::feedback::progress::set_sub_action(name);
+        tracing::info!("Downloading {loader} library: {name}");
+        tracing::trace!("{loader} library destination: {}", dest.display());
+        download_file(client, &download_url, &dest, |_, _| {}).await?;
+        if !valid_jar(&dest) {
+            let _ = tokio::fs::remove_file(&dest).await;
+            return Err(NetError::Parse(format!(
+                "Downloaded {loader} library '{name}' is not a valid JAR"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn valid_jar(path: &Path) -> bool {
+    std::fs::File::open(path)
+        .ok()
+        .and_then(|file| zip::ZipArchive::new(file).ok())
+        .is_some()
+}
+
 async fn download_file_once(
     client: &HttpClient,
     url: &str,
@@ -278,11 +302,15 @@ async fn download_file_once(
     let total = response.content_length().unwrap_or(0);
     tracing::trace!("Download content length for {}: {}", url, total);
 
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    let mut file = tokio::fs::File::create(dest).await?;
+    let parent = dest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    tokio::fs::create_dir_all(parent).await?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".rmcl-download-")
+        .tempfile_in(parent)?;
+    let mut file = tokio::fs::File::from_std(temporary.reopen()?);
     let mut downloaded: u64 = 0;
     let mut stream = response;
 
@@ -292,7 +320,8 @@ async fn download_file_once(
         progress_cb(downloaded, total);
     }
     file.flush().await?;
-
+    drop(file);
+    temporary.persist(dest).map_err(|error| error.error)?;
     Ok(())
 }
 

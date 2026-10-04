@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// generic scrollable list for content items (mods, resource packs, shaders, worlds).
-// supports toggling items on/off by renaming files with .disabled suffix,
-// search filtering, per-instance caching, and directory change detection.
-// also handles minecraft's formatting codes for colored mod names/descriptions
-
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -17,7 +12,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Paragraph, ScrollbarState},
 };
 use ratatui_image::{CropOptions, Resize, StatefulImage, protocol::StatefulProtocol};
 use tui_widget_list::{ListBuilder, ListState as TuiListState, ListView};
@@ -175,12 +170,6 @@ enum ContentStreamUpdate {
     },
 }
 
-struct CachedList {
-    entries: Vec<ContentEntry>,
-    selected: Option<usize>,
-    sort_metadata: HashMap<std::path::PathBuf, FileSortMetadata>,
-}
-
 struct FileSortMetadata {
     name: String,
     size: Option<u64>,
@@ -245,7 +234,6 @@ struct PaginationState {
 
 const REMOVAL_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
-// result from the notify-triggered background diff
 struct WatcherDiff {
     toggled: Vec<(String, bool, std::path::PathBuf)>,
     removed: Vec<String>,
@@ -277,6 +265,7 @@ pub struct ContentListState {
     pending_provider_icons: Arc<Mutex<Vec<PendingProviderIcon>>>,
     project_metadata: HashMap<(String, String), crate::net::modrinth::ProjectInfo>,
     version_metadata: HashMap<(String, String), crate::net::modrinth::VersionInfo>,
+    unlinked_paths: HashSet<std::path::PathBuf>,
     requested_provider_icons: HashSet<(String, String, String)>,
     pub local_panel_open: bool,
     pub local_sort_index: usize,
@@ -288,23 +277,19 @@ pub struct ContentListState {
     images_dirty: bool,
     display_metadata: HashMap<String, DisplayMetadata>,
     pub search: crate::tui::widgets::search::SearchState,
+    pub warning_descriptions: bool,
     filter_search: bool,
-    cache: HashMap<String, CachedList>,
     sort_metadata: RefCell<HashMap<std::path::PathBuf, FileSortMetadata>>,
     filtered_cache: RefCell<Option<CachedSelection>>,
-    // streaming: individual entries arrive here during initial load
     stream_rx: Option<mpsc::Receiver<ContentStreamUpdate>>,
     stream_order: ContentStreamOrder,
     progressive_source_stream: bool,
     staged_source_updates: Option<Vec<ContentStreamUpdate>>,
     source_order_ready: bool,
     preview_count: usize,
-    // file watcher: notify callback spawns background work,
-    // precomputed diff lands here for the UI to pick up
     watcher_diff: Arc<Mutex<Option<WatcherDiff>>>,
     _watcher: Option<notify::RecommendedWatcher>,
     watched_dir: Option<std::path::PathBuf>,
-    // stored for the watcher to scan individual new files
     scan_one_fn: Option<ScanOneFn>,
     content_ext: Option<&'static str>,
     pagination: Option<PaginationState>,
@@ -332,6 +317,7 @@ impl Default for ContentListState {
             pending_provider_icons: Arc::new(Mutex::new(Vec::new())),
             project_metadata: HashMap::new(),
             version_metadata: HashMap::new(),
+            unlinked_paths: HashSet::new(),
             requested_provider_icons: HashSet::new(),
             local_panel_open: false,
             local_sort_index: 0,
@@ -346,8 +332,8 @@ impl Default for ContentListState {
             images_dirty: true,
             display_metadata: HashMap::new(),
             search: crate::tui::widgets::search::SearchState::default(),
+            warning_descriptions: false,
             filter_search: true,
-            cache: HashMap::new(),
             sort_metadata: RefCell::new(HashMap::new()),
             filtered_cache: RefCell::new(None),
             stream_rx: None,
@@ -368,6 +354,10 @@ impl Default for ContentListState {
 }
 
 impl ContentListState {
+    pub(crate) fn is_scanning(&self) -> bool {
+        self.stream_rx.is_some()
+    }
+
     pub(crate) fn has_pending_icons(&self) -> bool {
         !self.pending_entry_images.is_empty()
     }
@@ -417,6 +407,21 @@ impl ContentListState {
         kind: crate::instance::ContentKind,
     ) {
         let mut changed = false;
+        // Unmatched can also mean identification was skipped, so require
+        // at least one completed provider lookup before showing the notice.
+        let unlinked_paths = manifest
+            .files
+            .iter()
+            .filter(|record| {
+                record.kind == kind
+                    && matches!(&record.resolution, crate::instance::Resolution::Unmatched { providers, .. } if !providers.is_empty())
+            })
+            .map(|record| minecraft_dir.join(&record.relative_path))
+            .collect::<HashSet<_>>();
+        if self.unlinked_paths != unlinked_paths {
+            self.unlinked_paths = unlinked_paths;
+            changed = true;
+        }
         let mut invalidated_icons = Vec::new();
         for entry in &mut self.entries {
             let Ok(relative_path) = entry.path.strip_prefix(minecraft_dir) else {
@@ -596,7 +601,7 @@ impl ContentListState {
                 && !self
                     .version_metadata
                     .contains_key(&(project.provider.clone(), project.version_id.clone()));
-            if !self.requested_provider_icons.insert(key) && !missing_version {
+            if !self.requested_provider_icons.insert(key) {
                 continue;
             }
             let pending = self.pending_provider_icons.clone();
@@ -754,6 +759,7 @@ impl ContentListState {
         self.pending_removals.clear();
         self.requested_provider_icons.clear();
         self.entries.clear();
+        self.unlinked_paths.clear();
         self.invalidate_filtered();
         self.sort_metadata.get_mut().clear();
         self.display_metadata.clear();
@@ -893,8 +899,6 @@ impl ContentListState {
         }
     }
 
-    // drain streaming entries from the initial load. each entry arrives
-    // individually and is inserted in sorted position for a smooth fill-in
     pub fn drain_pending(&mut self) -> bool {
         let Some(rx) = &self.stream_rx else {
             return false;
@@ -1175,7 +1179,6 @@ impl ContentListState {
         };
         self.images_dirty |= update.requires_reconcile;
 
-        // apply toggles (enabled/path changes)
         tracing::debug!(
             "Applying content watcher diff for {}: toggled={} removed={} added={}",
             self.loaded_for.as_deref().unwrap_or("<unknown>"),
@@ -1193,6 +1196,9 @@ impl ContentListState {
                 };
                 self.sort_metadata.get_mut().remove(&old_path);
                 self.sort_metadata.get_mut().remove(path);
+                if self.unlinked_paths.remove(&old_path) {
+                    self.unlinked_paths.insert(path.clone());
+                }
                 update.toggles.push(ContentToggle {
                     old_path,
                     new_path: path.clone(),
@@ -1214,14 +1220,15 @@ impl ContentListState {
                 .or_insert_with(std::time::Instant::now);
         }
 
-        // insert new entries in sorted position
         for mut entry in diff.added {
             self.sort_metadata.get_mut().remove(&entry.path);
+            self.unlinked_paths.remove(&entry.path);
             let replacement = self.entries.iter().position(|existing| {
                 self.pending_removals.contains_key(&existing.file_stem)
                     && existing.name.eq_ignore_ascii_case(&entry.name)
             });
             if let Some(index) = replacement {
+                self.unlinked_paths.remove(&self.entries[index].path);
                 let old_stem = self.entries[index].file_stem.clone();
                 self.sort_metadata
                     .get_mut()
@@ -1294,6 +1301,7 @@ impl ContentListState {
             let before = self.entries.len();
             if let Some(entry) = self.entries.iter().find(|entry| entry.file_stem == stem) {
                 self.sort_metadata.get_mut().remove(&entry.path);
+                self.unlinked_paths.remove(&entry.path);
             }
             self.entries.retain(|entry| entry.file_stem != stem);
             removed |= self.entries.len() != before;
@@ -1310,14 +1318,12 @@ impl ContentListState {
         removed
     }
 
-    // starts a notify file watcher on the given directory. changes trigger
-    // a background diff that lands in watcher_diff for drain_watcher to apply.
     pub fn watch_dir(&mut self, dir: std::path::PathBuf) {
         use notify::{RecursiveMode, Watcher};
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        // drop previous watcher
         self._watcher = None;
+        self.watcher_diff = Arc::new(Mutex::new(None));
 
         let watcher_diff = self.watcher_diff.clone();
         let ext: &'static str = self.content_ext.unwrap_or(".jar");
@@ -1691,24 +1697,6 @@ async fn load_installed_version(
 }
 
 impl ContentListState {
-    pub fn forget_instance(&mut self, instance_name: &str) {
-        let world_prefix = format!("{instance_name}:");
-        self.cache
-            .retain(|source, _| source != instance_name && !source.starts_with(&world_prefix));
-        if self
-            .loaded_for
-            .as_deref()
-            .is_some_and(|source| source == instance_name || source.starts_with(&world_prefix))
-        {
-            self.loaded_for = None;
-            self.sort_metadata.get_mut().clear();
-            self.invalidate_filtered();
-        }
-    }
-
-    // saves current entries to cache before loading new ones, and restores
-    // from cache if this instance was seen before (avoids re-scanning).
-    // content_dir is the actual directory to scan (e.g. .minecraft/mods).
     pub fn start_load(
         &mut self,
         content_dir: &Path,
@@ -1724,52 +1712,6 @@ impl ContentListState {
         self.pending_entry_images.clear();
         self.pending_removals.clear();
 
-        // save current entries to cache
-        if let Some(prev) = self.loaded_for.take()
-            && !self.entries.is_empty()
-        {
-            tracing::trace!(
-                "Caching {} content entries for {}",
-                self.entries.len(),
-                prev
-            );
-            self.cache.insert(
-                prev,
-                CachedList {
-                    entries: std::mem::take(&mut self.entries),
-                    selected: self.list_state.selected,
-                    sort_metadata: std::mem::take(self.sort_metadata.get_mut()),
-                },
-            );
-        }
-
-        // try cache first
-        // files modified while another instance was active become a real problem.
-        if let Some(cached) = self.cache.remove(instance_name) {
-            self.entries = cached.entries;
-            self.invalidate_filtered();
-            *self.sort_metadata.get_mut() = cached.sort_metadata;
-            self.pending_entry_images.extend(
-                self.entries
-                    .iter()
-                    .filter(|entry| entry.icon_bytes.is_some() || entry.provider_icon)
-                    .map(|entry| entry.file_stem.clone()),
-            );
-            self.rebuild_display_metadata();
-            self.list_state.selected = cached.selected;
-            self.loading = false;
-            self.stream_rx = None;
-            self.loaded_for = Some(instance_name.to_string());
-            self.update_scrollbar();
-            tracing::debug!(
-                "Restored {} cached content entries for {}",
-                self.entries.len(),
-                instance_name
-            );
-            return;
-        }
-
-        // no cache, stream entries one by one as each file is scanned
         let stream = self.start_stream(instance_name);
 
         let dir = content_dir.to_path_buf();
@@ -1881,8 +1823,6 @@ impl ContentListState {
             .collect();
     }
 
-    // enable/disable by renaming the file with/without .disabled extension.
-    // this is how most minecraft launchers handle it
     pub fn toggle_selected(&mut self) {
         let Some(index) = self.list_state.selected else {
             return;
@@ -1912,6 +1852,7 @@ impl ContentListState {
     }
 
     pub fn remove_path(&mut self, path: &Path) {
+        self.unlinked_paths.remove(path);
         self.invalidate_filtered();
         self.sort_metadata.get_mut().remove(path);
         let file_stem = self
@@ -2089,9 +2030,13 @@ fn handle_key_inner(
         KeyCode::Enter if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
             if let Some(&real_idx) = state.list_state.selected.and_then(|i| filtered.get(i))
                 && let Some(dir) = state.entries[real_idx].path.parent()
-                && let Err(e) = open::that_detached(dir)
+                && let Err(error) = open::that_detached(dir)
             {
-                tracing::error!("Failed to open directory: {}", e);
+                tracing::error!("Failed to open directory: {}", error);
+                crate::feedback::errors::push_message(
+                    tracing::Level::ERROR,
+                    format!("Could not open {}: {error}", dir.display()),
+                );
             }
             true
         }
@@ -2173,8 +2118,10 @@ pub fn render(
     let display_metadata = &state.display_metadata;
     let version_metadata = &state.version_metadata;
     let local_game_version = state.local_game_version.clone();
+    let unlinked_paths = &state.unlinked_paths;
     let filtered_rows = &filtered;
     let search = &state.search;
+    let warning_descriptions = state.warning_descriptions;
     let ready_image_stems: HashSet<String> = state.image_protocols.keys().cloned().collect();
 
     let builder = ListBuilder::new(move |context| {
@@ -2188,7 +2135,11 @@ pub fn render(
         let title_suffix = world_details
             .and_then(|details| details.game_mode)
             .map(WorldGameMode::label)
-            .or(entry.title_suffix.as_deref());
+            .or(entry.title_suffix.as_deref())
+            .or_else(|| {
+                (entry.provider_project.is_none() && unlinked_paths.contains(&entry.path))
+                    .then_some("Unlinked")
+            });
         let world_footer = world_details.map(|details| format_relative_time(details.last_played));
         let footer_label = world_footer.as_deref().or(entry.footer_label.as_deref());
         // Keep rendering the terminal fallback until the asynchronous image
@@ -2205,7 +2156,7 @@ pub fn render(
             theme.stripe()
         };
 
-        let (name_style, description_style, background) = match (enabled, show_selected) {
+        let (name_style, mut description_style, background) = match (enabled, show_selected) {
             (true, true) => (
                 Style::default()
                     .fg(theme.accent())
@@ -2235,6 +2186,9 @@ pub fn render(
                 stripe_bg,
             ),
         };
+        if warning_descriptions {
+            description_style = Style::default().fg(theme.warning());
+        }
         let title_suffix_color = world_details
             .and_then(|details| details.game_mode)
             .map(world_game_mode_color)
@@ -2245,7 +2199,11 @@ pub fn render(
                     theme.success()
                 }
             });
-        let title_suffix_style = crate::tui::widgets::status_badge_style(title_suffix_color);
+        let title_suffix_style = if title_suffix == Some("Unlinked") {
+            crate::tui::widgets::status_badge_style(theme.text_dim())
+        } else {
+            crate::tui::widgets::status_badge_style(title_suffix_color)
+        };
         let incompatible_version = !local_game_version.is_empty()
             && entry.provider_project.as_ref().is_some_and(|installed| {
                 !installed.version_id.is_empty()
@@ -2460,17 +2418,7 @@ pub fn render(
         height: list_area.height.saturating_sub(2),
     };
     frame.render_stateful_widget(
-        Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("\u{25b2}"))
-            .style(
-                Style::default()
-                    .fg(theme.text_dim())
-                    .add_modifier(Modifier::BOLD),
-            )
-            .thumb_symbol("\u{2551}")
-            .track_symbol(Some(""))
-            .end_symbol(Some("\u{25bc}")),
+        crate::tui::widgets::scrollbar(theme.text_dim()),
         scrollbar_area,
         &mut state.scrollbar_state,
     );
@@ -2690,8 +2638,6 @@ fn searchable_spans(
     }
 }
 
-// parses minecraft's section-sign (U+00A7) formatting codes into styled spans.
-// handles colors (0-f), bold (l), strikethrough (m), underline (n), italic (o), reset (r)
 fn parse_mc_text(text: &str, base_style: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut current_style = base_style;
@@ -2779,9 +2725,6 @@ fn preserve_visual_metadata(entry: &mut ContentEntry, previous: &mut ContentEntr
     }
 }
 
-// renders one row of a mod icon using half-block characters (U+2584).
-// each cell packs two vertical pixels via fg/bg colors, giving
-// double the vertical resolution out of the terminal
 fn icon_spans(
     icon_pixels: Option<&Vec<Vec<IconCell>>>,
     row: usize,
@@ -2976,10 +2919,6 @@ fn watcher_event_handling(kind: &notify::EventKind) -> WatcherEventHandling {
     }
 }
 
-// reads a content directory and builds a stem -> (path, enabled) map.
-// used both by watch_dir to initialize known state and by the watcher
-// thread to detect changes. when ext is empty (worlds), only directories
-// are included.
 fn diff_directory(
     dir: &std::path::Path,
     ext: &str,

@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// mod loader installation. each loader (fabric, forge, neoforge, quilt, vanilla)
-// implements the same trait so the UI can treat them uniformly: pick game version,
-// pick loader version, install. the actual installation strategies differ wildly
-// though (fabric/quilt just download jars, forge/neoforge run a whole java installer).
-
 mod fabric;
 pub mod forge;
 pub mod maven;
@@ -13,7 +8,7 @@ pub mod neoforge;
 mod quilt;
 mod vanilla;
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -47,6 +42,10 @@ pub struct GameVersion {
     pub stable: bool,
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds #[must_use] to generated futures"
+)]
 #[async_trait]
 pub trait ModLoaderInstaller: Send + Sync {
     fn loader_type(&self) -> ModLoader;
@@ -68,6 +67,7 @@ pub trait ModLoaderInstaller: Send + Sync {
         meta_dir: &Path,
     ) -> Result<(), InstallError>;
 
+    #[allow(clippy::too_many_arguments)]
     async fn install_with_java(
         &self,
         client: &HttpClient,
@@ -75,16 +75,15 @@ pub trait ModLoaderInstaller: Send + Sync {
         loader_version: &str,
         instance_dir: &Path,
         meta_dir: &Path,
-        java_path: Option<&str>,
+        _java_path: Option<&str>,
+        _environment: &BTreeMap<String, String>,
     ) -> Result<(), InstallError> {
-        let _ = java_path;
         self.install(client, game_version, loader_version, instance_dir, meta_dir)
             .await
     }
 }
 
-// writes raw profile JSON bytes to meta_dir/loader-profiles/<filename>.
-// callers that already have the upstream bytes (fabric/quilt http fetch,
+// Callers that already have the upstream bytes (fabric/quilt http fetch,
 // legacy forge versionInfo extract) use this directly to keep the on-disk
 // file byte-for-byte identical to the source.
 pub(crate) fn save_profile_bytes(

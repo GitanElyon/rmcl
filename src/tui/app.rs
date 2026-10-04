@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// app state: holds everything the TUI needs between frames.
-// this is basically the "god struct" of the UI. not ideal, but ratatui
-// kinda pushes you into this pattern since you need mutable access
-// to all the widget states during rendering.
-
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -15,8 +10,6 @@ use tachyonfx::Effect;
 use super::widgets::{self, instances};
 use crate::instance::{InstanceConfig, InstanceManager};
 
-// background tasks (instance creation, import) push completed configs here
-// so the main loop can pick them up without blocking
 pub(super) static PENDING_INSTANCES: LazyLock<Arc<Mutex<Vec<InstanceConfig>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
 pub(super) static COMPLETED_INSTANCE_SETTINGS_UPDATES: LazyLock<Arc<Mutex<Vec<InstanceConfig>>>> =
@@ -55,21 +48,83 @@ pub struct App {
     pub(super) instance_manager: InstanceManager,
     pub(super) log_overlay_scroll: usize,
     pub(super) log_overlay_max_scroll: usize,
+    pub(super) log_filter_open: bool,
+    pub(super) log_filter_selected: usize,
+    pub(super) log_level_filters: widgets::logs_viewer::LevelFilters,
+    pub(super) log_selection: widgets::log_selection::LogSelection,
+    pub(super) log_overlay_inner: ratatui::layout::Rect,
     pub(super) log_overlay_search: widgets::search::SearchState,
     pub(super) log_overlay_scrollbar: ratatui::widgets::ScrollbarState,
     pub(super) throbber_state: throbber_widgets_tui::ThrobberState,
     pub(super) throbber_tick: u8,
     pub(super) error_effects: HashMap<u64, ErrorEffectState>,
     pub(super) pending_editor: Option<std::path::PathBuf>,
+    pub(super) edited_config_watches: Vec<super::event::EditedConfigWatch>,
+    pub(super) content_for: Option<InstanceContentKey>,
+    pub(super) cached_instance_content: HashMap<InstanceContentKey, CachedInstanceContent>,
     pub(super) reconciliation_for: Option<(String, chrono::DateTime<chrono::Utc>)>,
     pub(super) content_manifest: Option<(String, crate::instance::ContentManifest)>,
     pub(super) content_update_snapshot:
         Option<(String, crate::instance::content::updates::UpdateSnapshot)>,
+    pub(super) content_update_check_pending: bool,
     pub(super) content_update_popup: Option<widgets::content::update::State>,
     pub(super) modpack_versions_state: Option<widgets::content::DiscoveryState>,
     pub(super) modpack_update_popup: Option<widgets::popups::modpack_update::State>,
     pub(super) provider_conflict: Option<ProviderConflictState>,
     pub(super) dismissed_provider_conflicts: HashSet<PathBuf>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(super) struct InstanceContentKey {
+    pub root: PathBuf,
+    pub name: String,
+    pub created: chrono::DateTime<chrono::Utc>,
+    pub game_version: String,
+    pub loader: crate::instance::ModLoader,
+}
+
+#[derive(Default)]
+pub(super) struct CachedInstanceContent {
+    mods: widgets::content::ContentListState,
+    resource_packs: widgets::content::ContentListState,
+    shaders: widgets::content::ContentListState,
+    worlds: widgets::content::ContentListState,
+    world_datapacks: widgets::content::ContentListState,
+    open_world_datapacks: Option<(String, PathBuf)>,
+    screenshots: widgets::screenshots_grid::ScreenshotsState,
+    logs: widgets::logs_viewer::LogsState,
+    pub(super) reconciliation_for: Option<(String, chrono::DateTime<chrono::Utc>)>,
+    manifest: Option<(String, crate::instance::ContentManifest)>,
+    updates: Option<(String, crate::instance::content::updates::UpdateSnapshot)>,
+    pub(super) update_check_pending: bool,
+    dismissed_provider_conflicts: HashSet<PathBuf>,
+}
+
+impl CachedInstanceContent {
+    pub fn swap(&mut self, app: &mut App) {
+        std::mem::swap(&mut self.mods, &mut app.mods_state);
+        std::mem::swap(&mut self.resource_packs, &mut app.resource_packs_state);
+        std::mem::swap(&mut self.shaders, &mut app.shaders_state);
+        std::mem::swap(&mut self.worlds, &mut app.worlds_state);
+        std::mem::swap(&mut self.world_datapacks, &mut app.world_datapacks_state);
+        std::mem::swap(
+            &mut self.open_world_datapacks,
+            &mut app.open_world_datapacks,
+        );
+        std::mem::swap(&mut self.screenshots, &mut app.screenshots_state);
+        std::mem::swap(&mut self.logs, &mut app.logs_state);
+        std::mem::swap(&mut self.reconciliation_for, &mut app.reconciliation_for);
+        std::mem::swap(&mut self.manifest, &mut app.content_manifest);
+        std::mem::swap(&mut self.updates, &mut app.content_update_snapshot);
+        std::mem::swap(
+            &mut self.update_check_pending,
+            &mut app.content_update_check_pending,
+        );
+        std::mem::swap(
+            &mut self.dismissed_provider_conflicts,
+            &mut app.dismissed_provider_conflicts,
+        );
+    }
 }
 
 pub(super) struct ProviderConflictState {
@@ -78,7 +133,6 @@ pub(super) struct ProviderConflictState {
     pub selected: usize,
 }
 
-// lifecycle of an error toast animation: slide in -> sit there -> fade out
 pub(super) enum ErrorEffectState {
     SlidingIn(Effect, std::time::Instant),
     Idle,
@@ -137,24 +191,13 @@ impl App {
         crate::instance::import::refresh::recover_interrupted(&instances_dir);
 
         let manager = InstanceManager::new(instances_dir, meta_dir);
-        let settings_state = widgets::settings::SettingsState::new(manager.meta_dir.clone());
+        let settings_state = widgets::settings::SettingsState::new(
+            manager.meta_dir.clone(),
+            manager.instances_dir.clone(),
+        );
         let instances = manager.load_all();
         instances::spawn_modpack_update_checks(&instances);
         let instances_state = instances::State::with_instances(instances);
-
-        let mut mods_state = widgets::content::list::ContentListState::default();
-        let mut resource_packs_state = widgets::content::list::ContentListState::default();
-        let mut shaders_state = widgets::content::list::ContentListState::default();
-        let mut world_datapacks_state = widgets::content::list::ContentListState::default();
-        let provider_icon_client = crate::net::HttpClient::new();
-        for state in [
-            &mut mods_state,
-            &mut resource_packs_state,
-            &mut shaders_state,
-            &mut world_datapacks_state,
-        ] {
-            state.enable_provider_icons(manager.meta_dir.clone(), provider_icon_client.clone());
-        }
 
         App {
             exit: false,
@@ -163,15 +206,15 @@ impl App {
             content_tab: widgets::content::ContentTab::default(),
             content_mode: widgets::content::ContentMode::default(),
             instances_state,
-            mods_state,
+            mods_state: widgets::content::ContentListState::default(),
             mods_discovery_state: widgets::content::DiscoveryState::new(
                 crate::instance::ContentKind::Mod,
             ),
-            resource_packs_state,
+            resource_packs_state: widgets::content::ContentListState::default(),
             resource_packs_discovery_state: widgets::content::DiscoveryState::new(
                 crate::instance::ContentKind::ResourcePack,
             ),
-            shaders_state,
+            shaders_state: widgets::content::ContentListState::default(),
             shaders_discovery_state: widgets::content::DiscoveryState::new(
                 crate::instance::ContentKind::Shader,
             ),
@@ -179,7 +222,7 @@ impl App {
                 crate::instance::ContentKind::DataPack,
             ),
             worlds_state: widgets::content::list::ContentListState::default(),
-            world_datapacks_state,
+            world_datapacks_state: widgets::content::ContentListState::default(),
             open_world_datapacks: None,
             world_quick_play_support: None,
             logs_state: widgets::logs_viewer::LogsState::default(),
@@ -199,15 +242,24 @@ impl App {
             instance_manager: manager,
             log_overlay_scroll: 0,
             log_overlay_max_scroll: 0,
+            log_filter_open: false,
+            log_filter_selected: 0,
+            log_level_filters: [None; 5],
+            log_selection: widgets::log_selection::LogSelection::default(),
+            log_overlay_inner: ratatui::layout::Rect::default(),
             log_overlay_search: widgets::search::SearchState::default(),
             log_overlay_scrollbar: ratatui::widgets::ScrollbarState::default(),
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
             throbber_tick: 0,
             error_effects: HashMap::new(),
             pending_editor: None,
+            edited_config_watches: Vec::new(),
+            content_for: None,
+            cached_instance_content: HashMap::new(),
             reconciliation_for: None,
             content_manifest: None,
             content_update_snapshot: None,
+            content_update_check_pending: false,
             content_update_popup: None,
             modpack_versions_state: None,
             modpack_update_popup: None,

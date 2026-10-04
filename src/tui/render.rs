@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// layout and rendering. the main frame is split into:
-//   left 20%: instance sidebar
-//   right 80%: title bar + content area + bottom bar (account / details / status)
-// popups and error toasts render on top of everything.
-
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
@@ -34,6 +29,9 @@ impl App {
         use ratatui::style::Style;
         use ratatui::widgets::Block;
 
+        if load_content {
+            self.sync_instance_content();
+        }
         let theme = THEME.as_ref();
         frame.render_widget(
             Block::default().style(Style::default().bg(theme.background())),
@@ -149,6 +147,23 @@ impl App {
 
         if self.focused == FocusedArea::OverviewExpanded {
             self.render_log_overlay(frame);
+            if self.log_filter_open {
+                widgets::logs_viewer::render_level_filter(
+                    frame,
+                    self.log_filter_selected,
+                    &self.log_level_filters,
+                );
+            }
+        } else if load_content
+            && self.content_tab == widgets::content::ContentTab::Logs
+            && self.instances_state.selected_instance().is_some()
+            && self.logs_state.filter_open
+        {
+            widgets::logs_viewer::render_level_filter(
+                frame,
+                self.logs_state.filter_selected,
+                &self.logs_state.level_filters,
+            );
         }
 
         if self.focused == FocusedArea::InstanceSettings
@@ -165,7 +180,6 @@ impl App {
             widgets::popups::global_settings::render(frame, area, state);
         }
 
-        // error toasts stack from the top, each one below the previous
         let all_errors = error_buffer::peek_all_errors();
         self.sync_error_effects(&all_errors);
         let mut next_y: u16 = 1;
@@ -220,16 +234,26 @@ impl App {
         }
     }
 
-    // full-screen log viewer with search highlighting and auto-scroll.
-    // auto-sticks to the bottom unless the user scrolled up manually
+    pub(super) fn overlay_filtered_lines(&self) -> Vec<String> {
+        crate::tui::logging::get_app_logs()
+            .into_iter()
+            .filter(|line| self.log_overlay_search.matches(line))
+            .filter(|line| {
+                widgets::logs_viewer::level_matches(
+                    &self.log_level_filters,
+                    widgets::logs_viewer::level_of_line(line),
+                )
+            })
+            .collect()
+    }
+
     fn render_log_overlay(&mut self, frame: &mut Frame) {
         use crate::config::theme::{BORDER_STYLE, THEME};
-        use crate::tui::logging::get_app_logs;
         use ratatui::{
             layout::{Alignment, Margin},
             style::{Modifier, Style},
             text::Line,
-            widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation},
+            widgets::{Block, Clear, Paragraph},
         };
 
         let theme = THEME.as_ref();
@@ -238,34 +262,47 @@ impl App {
 
         frame.render_widget(Clear, overlay);
 
-        let all_lines = get_app_logs();
-        let filtered: Vec<&String> = all_lines
-            .iter()
-            .filter(|l| self.log_overlay_search.matches(l))
-            .collect();
+        let filtered = self.overlay_filtered_lines();
 
         let visible_height = overlay.height.saturating_sub(2) as usize;
-        let was_at_bottom =
-            self.log_overlay_scroll >= self.log_overlay_max_scroll.saturating_sub(1);
+        // Only follow new lines when pinned to the very bottom; being even
+        // one line up means the user is reading history.
+        let was_at_bottom = self.log_overlay_scroll >= self.log_overlay_max_scroll;
         self.log_overlay_max_scroll = filtered.len().saturating_sub(visible_height);
-        if was_at_bottom || self.log_overlay_scroll > self.log_overlay_max_scroll {
+        if (was_at_bottom && self.log_selection.range.is_none())
+            || self.log_overlay_scroll > self.log_overlay_max_scroll
+        {
             self.log_overlay_scroll = self.log_overlay_max_scroll;
         }
         self.log_overlay_scrollbar =
             ratatui::widgets::ScrollbarState::new(self.log_overlay_max_scroll)
                 .position(self.log_overlay_scroll);
 
+        let active_filters = self.log_level_filters.iter().flatten().count();
+        let title = if active_filters == 0 {
+            " Logs ".to_owned()
+        } else {
+            format!(" Logs · {active_filters} filter(s) ")
+        };
+        let mut keybinds = vec![
+            ("Esc", " close"),
+            ("f", " filter"),
+            ("g/G", " top/bottom"),
+            ("/", " search"),
+        ];
+        if self.log_selection.range.is_some() {
+            keybinds.insert(1, ("y", " yank"));
+        }
         let mut block = Block::bordered()
             .title_top(
-                Line::from(" Logs ").style(
+                Line::from(title).style(
                     Style::default()
                         .fg(theme.text())
                         .add_modifier(Modifier::BOLD),
                 ),
             )
             .title_bottom(
-                crate::tui::widgets::popups::keybind_line(&[("O", " close"), ("/", " search")])
-                    .alignment(Alignment::Right),
+                crate::tui::widgets::popups::keybind_line(&keybinds).alignment(Alignment::Right),
             )
             .border_type(BORDER_STYLE.to_border_type())
             .border_style(Style::default().fg(theme.accent()))
@@ -277,23 +314,21 @@ impl App {
 
         let inner = block.inner(overlay);
         frame.render_widget(block, overlay);
+        self.log_overlay_inner = inner;
 
         let search = &self.log_overlay_search;
         let styled: Vec<Line> = filtered
             .iter()
+            .enumerate()
             .skip(self.log_overlay_scroll)
             .take(visible_height)
-            .map(|line| {
-                let style = if line.contains("ERROR") || line.contains("FATAL") {
-                    Style::default().fg(theme.error())
-                } else if line.contains("WARN") {
-                    Style::default().fg(theme.warning())
-                } else if line.contains("DEBUG") || line.contains("TRACE") {
-                    Style::default().fg(theme.text_dim())
-                } else {
-                    Style::default().fg(theme.text())
-                };
-                search.highlight_line(line, style)
+            .map(|(index, line)| {
+                self.log_selection.highlight_line(
+                    index,
+                    line,
+                    search,
+                    widgets::logs_viewer::line_level_style(line),
+                )
             })
             .collect();
 
@@ -306,24 +341,12 @@ impl App {
             height: overlay.height.saturating_sub(2),
         };
         frame.render_stateful_widget(
-            Scrollbar::default()
-                .orientation(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("\u{25b2}"))
-                .style(
-                    Style::default()
-                        .fg(theme.text_dim())
-                        .add_modifier(Modifier::BOLD),
-                )
-                .thumb_symbol("\u{2551}")
-                .track_symbol(Some(""))
-                .end_symbol(Some("\u{25bc}")),
+            widgets::scrollbar(theme.text_dim()),
             scrollbar_area,
             &mut self.log_overlay_scrollbar,
         );
     }
 
-    // keeps the effect map in sync with current errors: removes effects for
-    // dismissed errors and creates slide-in effects for new ones
     fn sync_error_effects(&mut self, events: &[error_buffer::ErrorEvent]) {
         use crate::config::theme::THEME;
         let theme = THEME.as_ref();
@@ -348,8 +371,6 @@ impl App {
         }
     }
 
-    // drives the slide-in / idle / slide-out state machine for each error toast.
-    // transitions to FadingOut at the configured slide-start time
     fn render_error_effect(
         &mut self,
         frame: &mut Frame,

@@ -4,6 +4,59 @@
 use super::*;
 
 #[test]
+fn build_key_overrides_the_default_and_empty_values_disable_curseforge() {
+    for (build_key, default_key, expected) in [
+        (None, "", None),
+        (None, " default-key ", Some("default-key")),
+        (Some(" override-key "), "default-key", Some("override-key")),
+        (Some(""), "default-key", None),
+        (Some(" \n\t"), "default-key", None),
+    ] {
+        assert_eq!(select_api_key(build_key, default_key), expected);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn authenticated_requests_retry_transient_failures_with_the_api_key() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    for verb in ["GET", "POST"] {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        Mock::given(method(verb))
+            .and(path(format!("/{verb}")))
+            .and(header("x-api-key", "test-key"))
+            .respond_with(move |_: &wiremock::Request| {
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(503)
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true}))
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+    }
+    let client: HttpClient = reqwest::Client::builder().build().unwrap().into();
+    let fetched: serde_json::Value = get(&client, "test-key", &format!("{}/GET", server.uri()))
+        .await
+        .unwrap();
+    let posted: serde_json::Value = post(
+        &client,
+        "test-key",
+        &format!("{}/POST", server.uri()),
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    assert!(fetched["ok"].as_bool().unwrap());
+    assert!(posted["ok"].as_bool().unwrap());
+}
+
+#[test]
 fn search_category_ids_match_the_selected_class() {
     let response: ApiResponse<Vec<SearchCategory>> = serde_json::from_str(r#"{"data":[{"id":6,"slug":"mc-mods","name":"Mods","classId":null},{"id":11,"slug":"magic","name":"Magic","classId":6},{"id":22,"slug":"magic","name":"Magic","classId":4471}]}"#).unwrap();
     assert_eq!(category_id(&response.data, 6, "magic"), Some(11));

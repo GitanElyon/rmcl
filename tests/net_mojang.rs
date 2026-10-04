@@ -1,12 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// integration tests for the public mojang fetchers. wiremock stands in for
-// Mojang so tests are fast, deterministic, and don't depend on the live
-// endpoint. these are different from the #[ignore = "hits live Mojang API"]
-// tests in tests/live_apis.rs which verify the upstream schema hasn't drifted;
-// these here verify our parsing + retry envelope on synthetic responses.
-
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -14,9 +8,40 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use rmcl::net::HttpClient;
 use rmcl::net::mojang::{
     Artifact, AssetIndex, Download, JavaVersion, Library, LibraryDownloads, VersionDownloads,
-    VersionEntry, VersionMeta, download_assets, download_assets_from, download_libraries,
-    fetch_version_manifest_from, fetch_version_meta_with_raw,
+    VersionEntry, VersionMeta, download_assets, download_assets_from,
+    download_libraries_for_platform, fetch_version_manifest_from, fetch_version_meta_with_raw,
 };
+
+fn test_platform() -> rmcl::launch_profile::system::JavaPlatform {
+    rmcl::launch_profile::system::JavaPlatform::from_java_properties(
+        match std::env::consts::OS {
+            "windows" => "Windows 10",
+            "macos" => "Mac OS X",
+            _ => "Linux",
+        },
+        std::env::consts::ARCH,
+        if cfg!(target_pointer_width = "64") {
+            "64"
+        } else {
+            "32"
+        },
+        "10.0",
+    )
+    .unwrap()
+}
+
+async fn download_libraries(
+    client: &HttpClient,
+    meta: &VersionMeta,
+    meta_dir: &std::path::Path,
+) -> Result<(), rmcl::net::NetError> {
+    download_libraries_for_platform(client, meta, meta_dir, &test_platform()).await
+}
+
+fn sha1(bytes: &[u8]) -> String {
+    use sha1::Digest;
+    format!("{:x}", sha1::Sha1::digest(bytes))
+}
 
 fn synthetic_manifest() -> serde_json::Value {
     json!({
@@ -85,12 +110,10 @@ async fn fetch_version_manifest_parses_synthetic_response() {
 async fn fetch_version_meta_returns_struct_and_raw_bytes() {
     let server = MockServer::start().await;
     let body_json = synthetic_version_meta();
-    // serialise once so we can assert the raw bytes equal what the mock
-    // actually sent (wiremock re-serialises the json, so we have to match
-    // its output format)
+    let body = serde_json::to_vec(&body_json).unwrap();
     Mock::given(method("GET"))
         .and(path("/1.20.1.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body_json.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
         .expect(1)
         .mount(&server)
         .await;
@@ -99,7 +122,7 @@ async fn fetch_version_meta_returns_struct_and_raw_bytes() {
         id: "1.20.1".to_string(),
         version_type: "release".to_string(),
         url: format!("{}/1.20.1.json", server.uri()),
-        sha1: "0".repeat(40),
+        sha1: sha1(&body),
     };
 
     let (meta, raw) = fetch_version_meta_with_raw(&HttpClient::new(), &entry)
@@ -112,11 +135,30 @@ async fn fetch_version_meta_returns_struct_and_raw_bytes() {
     assert_eq!(meta.downloads.client.size, 12345);
     assert_eq!(meta.java_version.unwrap().major_version, 17);
 
-    // the raw bytes must parse back to the same struct - verifies the
-    // get_json_with_raw plumbing actually captures the upstream body intact.
     let reparsed: serde_json::Value = serde_json::from_slice(&raw).expect("raw is json");
     assert_eq!(reparsed["id"], "1.20.1");
     assert_eq!(reparsed["mainClass"], "net.minecraft.client.main.Main");
+}
+
+#[tokio::test]
+async fn version_metadata_rejects_a_wrong_manifest_hash() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/version.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(synthetic_version_meta()))
+        .mount(&server)
+        .await;
+    let entry = VersionEntry {
+        id: "1.20.1".to_owned(),
+        version_type: "release".to_owned(),
+        url: format!("{}/version.json", server.uri()),
+        sha1: "0".repeat(40),
+    };
+    assert!(
+        fetch_version_meta_with_raw(&HttpClient::new(), &entry)
+            .await
+            .is_err()
+    );
 }
 
 // constructs a minimal VersionMeta with a single library pointing at the
@@ -144,8 +186,8 @@ fn meta_with_one_library(server_uri: &str) -> VersionMeta {
                 artifact: Some(Artifact {
                     url: format!("{server_uri}/slf4j.jar"),
                     path: "org/slf4j/slf4j-api/2.0.7/slf4j-api-2.0.7.jar".to_string(),
-                    sha1: "0".repeat(40),
-                    size: 11,
+                    sha1: sha1(b"jar-bytes"),
+                    size: b"jar-bytes".len() as u64,
                 }),
                 classifiers: None,
             },
@@ -214,7 +256,6 @@ async fn download_libraries_skips_when_destination_exists() {
         .await
         .expect("noop succeeds");
 
-    // file untouched, mock untouched (server drop will panic if it isn't)
     assert_eq!(std::fs::read(&existing).unwrap(), b"already there");
 }
 
@@ -230,7 +271,10 @@ async fn download_libraries_redownloads_corrupted_cache() {
         .mount(&server)
         .await;
 
-    let meta = meta_with_one_library(&server.uri());
+    let mut meta = meta_with_one_library(&server.uri());
+    let artifact = meta.libraries[0].downloads.artifact.as_mut().unwrap();
+    artifact.sha1 = sha1(b"fresh-bytes");
+    artifact.size = b"fresh-bytes".len() as u64;
     let tmp = tempfile::tempdir().unwrap();
     let existing = tmp
         .path()
@@ -246,33 +290,63 @@ async fn download_libraries_redownloads_corrupted_cache() {
 }
 
 #[tokio::test]
-async fn download_assets_from_writes_index_and_assets() {
-    // exercises the full path: index fetch + write, then per-asset download
-    // from the configurable assets base. uses download_assets_from so the
-    // hardcoded ASSETS_BASE_URL stays out of the way.
+async fn library_rejects_wrong_download_bytes_and_unsafe_paths() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/assets/index.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "objects": {
-                "minecraft/lang/en_us.json": {
-                    "hash": "ab1234567890abcdef1234567890abcdef123456",
-                    "size": 11
-                }
-            }
-        })))
+        .and(path("/slf4j.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"wrong".to_vec()))
         .expect(1)
         .mount(&server)
         .await;
-    // asset hash starts with "ab" so the per-asset URL is /<base>/ab/<hash>.
+    let mut meta = meta_with_one_library(&server.uri());
+    let temp = tempfile::tempdir().unwrap();
+    let library = temp
+        .path()
+        .join("cache/minecraft/libraries/org/slf4j/slf4j-api/2.0.7/slf4j-api-2.0.7.jar");
+    assert!(
+        download_libraries(&HttpClient::new(), &meta, temp.path())
+            .await
+            .is_err()
+    );
+    assert!(!library.exists());
+
+    meta.libraries[0].downloads.artifact.as_mut().unwrap().path =
+        "../../../../escape.jar".to_owned();
+    assert!(
+        download_libraries(&HttpClient::new(), &meta, temp.path())
+            .await
+            .is_err()
+    );
+    assert!(!temp.path().join("escape.jar").exists());
+}
+
+#[tokio::test]
+async fn download_assets_from_writes_index_and_assets() {
+    let server = MockServer::start().await;
+    let hash = sha1(b"asset-bytes");
+    let index = serde_json::to_vec(&json!({
+        "virtual": true,
+        "objects": {
+            "minecraft/lang/en_us.json": {"hash": hash, "size": b"asset-bytes".len()},
+            "lang/en_us.lang": {"hash": hash, "size": b"asset-bytes".len()}
+        }
+    }))
+    .unwrap();
     Mock::given(method("GET"))
-        .and(path("/cdn/ab/ab1234567890abcdef1234567890abcdef123456"))
+        .and(path("/assets/index.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(index.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/cdn/{}/{}", &hash[..2], hash)))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"asset-bytes".to_vec()))
         .expect(1)
         .mount(&server)
         .await;
 
-    let meta = meta_with_one_library(&server.uri());
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.asset_index.sha1 = sha1(&index);
     let tmp = tempfile::tempdir().unwrap();
     let cdn_base = format!("{}/cdn", server.uri());
 
@@ -284,9 +358,25 @@ async fn download_assets_from_writes_index_and_assets() {
     assert!(index_path.exists(), "index file missing");
     let asset_path = tmp
         .path()
-        .join("cache/minecraft/assets/objects/ab/ab1234567890abcdef1234567890abcdef123456");
+        .join("cache/minecraft/assets/objects")
+        .join(&hash[..2])
+        .join(&hash);
     assert!(asset_path.exists(), "asset file missing");
     assert_eq!(std::fs::read(&asset_path).unwrap(), b"asset-bytes");
+    for name in ["minecraft/lang/en_us.json", "lang/en_us.lang"] {
+        assert_eq!(
+            std::fs::read(
+                tmp.path()
+                    .join("cache/minecraft/assets/virtual/5")
+                    .join(name)
+            )
+            .unwrap(),
+            b"asset-bytes"
+        );
+    }
+    download_assets_from(&HttpClient::new(), &meta, tmp.path(), &cdn_base)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -295,14 +385,16 @@ async fn download_assets_writes_index_when_objects_is_empty() {
     // path without triggering individual asset downloads (which go to the
     // hardcoded ASSETS_BASE_URL and can't be wiremocked here).
     let server = MockServer::start().await;
+    let index = serde_json::to_vec(&json!({"objects": {}})).unwrap();
     Mock::given(method("GET"))
         .and(path("/assets/index.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"objects": {}})))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(index.clone()))
         .expect(1)
         .mount(&server)
         .await;
 
-    let meta = meta_with_one_library(&server.uri());
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.asset_index.sha1 = sha1(&index);
     let tmp = tempfile::tempdir().unwrap();
 
     download_assets(&HttpClient::new(), &meta, tmp.path())
@@ -317,6 +409,93 @@ async fn download_assets_writes_index_when_objects_is_empty() {
     let body: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
     assert!(body.get("objects").is_some());
+}
+
+#[tokio::test]
+async fn invalid_cached_index_is_refetched() {
+    let server = MockServer::start().await;
+    let body = serde_json::to_vec(&json!({"objects": {}})).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/assets/index.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.asset_index.sha1 = sha1(&body);
+    let tmp = tempfile::tempdir().unwrap();
+    let index_path = tmp.path().join("cache/minecraft/assets/indexes/5.json");
+    std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+    std::fs::write(&index_path, b"{\"objects\":{\"fake\":{}}}").unwrap();
+
+    download_assets(&HttpClient::new(), &meta, tmp.path())
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(index_path).unwrap(), body);
+}
+
+#[tokio::test]
+async fn invalid_asset_hash_returns_an_error_without_escaping_or_panicking() {
+    let server = MockServer::start().await;
+    let body =
+        serde_json::to_vec(&json!({"objects": {"bad": {"hash": "aé/../escape", "size": 1}}}))
+            .unwrap();
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.asset_index.sha1 = sha1(&body);
+    let tmp = tempfile::tempdir().unwrap();
+    let index_path = tmp.path().join("cache/minecraft/assets/indexes/5.json");
+    std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+    std::fs::write(&index_path, body).unwrap();
+
+    assert!(
+        download_assets(&HttpClient::new(), &meta, tmp.path())
+            .await
+            .is_err()
+    );
+    assert!(!tmp.path().join("escape").exists());
+    meta.asset_index.id = "../outside".to_owned();
+    assert!(
+        download_assets(&HttpClient::new(), &meta, tmp.path())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn downloaded_asset_must_match_index_hash_and_size() {
+    let server = MockServer::start().await;
+    let hash = sha1(b"expected");
+    let body = serde_json::to_vec(&json!({"objects": {"one": {"hash": hash, "size": 8}}})).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/assets/index.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/cdn/{}/{}", &hash[..2], hash)))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"bad bytes".to_vec()))
+        .mount(&server)
+        .await;
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.asset_index.sha1 = sha1(&body);
+    let tmp = tempfile::tempdir().unwrap();
+    let asset = tmp
+        .path()
+        .join("cache/minecraft/assets/objects")
+        .join(&hash[..2])
+        .join(&hash);
+
+    assert!(
+        download_assets_from(
+            &HttpClient::new(),
+            &meta,
+            tmp.path(),
+            &format!("{}/cdn", server.uri())
+        )
+        .await
+        .is_err()
+    );
+    assert!(!asset.exists());
 }
 
 #[tokio::test]
@@ -372,7 +551,14 @@ async fn download_libraries_downloads_and_extracts_natives() {
             downloads: LibraryDownloads {
                 artifact: None,
                 classifiers: Some(std::collections::HashMap::from([(
-                    "natives-linux".to_string(),
+                    format!(
+                        "natives-linux-{}",
+                        if cfg!(target_pointer_width = "64") {
+                            "64"
+                        } else {
+                            "32"
+                        }
+                    ),
                     Artifact {
                         url: format!("{server_uri}/lwjgl-natives.jar"),
                         path: "org/lwjgl/lwjgl/lwjgl/2.9.4/lwjgl-2.9.4-natives-linux.jar"
@@ -385,7 +571,7 @@ async fn download_libraries_downloads_and_extracts_natives() {
             rules: None,
             natives: Some(std::collections::HashMap::from([(
                 rmcl::launch_profile::system::mojang_os_name().to_string(),
-                "natives-linux".to_string(),
+                "natives-linux-${arch}".to_string(),
             )])),
             extract: Some(rmcl::net::mojang::LibraryExtract {
                 exclude: Some(vec!["META-INF/".to_string()]),
@@ -404,18 +590,151 @@ async fn download_libraries_downloads_and_extracts_natives() {
     );
     assert_eq!(std::fs::read(&cached_jar).unwrap(), jar_bytes);
 
-    let extracted = tmp
-        .path()
-        .join("cache/minecraft/versions/test/natives/lib/native.so");
+    let natives = test_platform().natives_directory(tmp.path(), "test");
+    let extracted = natives.join("lib/native.so");
     assert_eq!(
         std::fs::read(&extracted).unwrap(),
         b"native-bits",
         "natives payload must be unpacked next to java.library.path"
     );
+    let original_permissions = std::fs::metadata(&extracted).unwrap().permissions();
+    let modified = std::fs::metadata(&extracted).unwrap().modified().unwrap();
+    let mut protected = original_permissions.clone();
+    protected.set_readonly(true);
+    std::fs::set_permissions(&extracted, protected).unwrap();
+    let reuse = download_libraries(&HttpClient::new(), &meta, tmp.path()).await;
+    std::fs::set_permissions(&extracted, original_permissions).unwrap();
+    reuse.expect("unchanged natives must be reusable without replacing a protected/loaded library");
+    assert_eq!(
+        std::fs::metadata(&extracted).unwrap().modified().unwrap(),
+        modified
+    );
+    std::fs::write(&extracted, b"corrupted extraction").unwrap();
+    download_libraries(&HttpClient::new(), &meta, tmp.path())
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&extracted).unwrap(), b"native-bits");
     assert!(
-        !tmp.path()
-            .join("cache/minecraft/versions/test/natives/META-INF")
-            .exists(),
+        !natives.join("META-INF").exists(),
         "extract.exclude prefixes must be skipped"
     );
+}
+
+fn native_zip(payload: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file("native.dll", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(payload).unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
+#[tokio::test]
+async fn selected_java_bitness_controls_downloads_and_extraction_is_isolated() {
+    let server = MockServer::start().await;
+    let mut classifiers = serde_json::Map::new();
+    for bits in [32, 64] {
+        let bytes = native_zip(bits.to_string().as_bytes());
+        let url = format!("/native-{bits}.jar");
+        Mock::given(method("GET"))
+            .and(path(&url))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        classifiers.insert(
+            format!("natives-windows-{bits}"),
+            json!({
+                "url":format!("{}{url}", server.uri()), "sha1":sha1(&bytes), "size":bytes.len(),
+            }),
+        );
+    }
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.libraries = serde_json::from_value(json!([{
+        "name":"tv.twitch:twitch-platform:5.16", "downloads":{"classifiers":classifiers},
+        "natives":{"windows":"natives-windows-${arch}"},
+        "rules":[{"action":"allow", "os":{"name":"windows", "version":"^10\\."}}],
+    }]))
+    .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    for (arch, bits) in [("x86", "32"), ("amd64", "64")] {
+        let platform = rmcl::launch_profile::system::JavaPlatform::from_java_properties(
+            "Windows 10",
+            arch,
+            bits,
+            "10.0",
+        )
+        .unwrap();
+        download_libraries_for_platform(&HttpClient::new(), &meta, temp.path(), &platform)
+            .await
+            .unwrap();
+        let natives = platform.natives_directory(temp.path(), &meta.id);
+        assert_eq!(
+            std::fs::read(natives.join("native.dll")).unwrap(),
+            bits.as_bytes()
+        );
+    }
+    // The second extraction must leave the first architecture's payload intact.
+    let java32 = rmcl::launch_profile::system::JavaPlatform::from_java_properties(
+        "Windows 10",
+        "x86",
+        "32",
+        "10.0",
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(
+            java32
+                .natives_directory(temp.path(), &meta.id)
+                .join("native.dll")
+        )
+        .unwrap(),
+        b"32"
+    );
+    assert!(
+        !temp
+            .path()
+            .join("cache/minecraft/versions")
+            .join(&meta.id)
+            .join("natives/native.dll")
+            .exists()
+    );
+    let old_windows = rmcl::launch_profile::system::JavaPlatform::from_java_properties(
+        "Windows 7",
+        "x86",
+        "32",
+        "6.1",
+    )
+    .unwrap();
+    let other = tempfile::tempdir().unwrap();
+    download_libraries_for_platform(&HttpClient::new(), &meta, other.path(), &old_windows)
+        .await
+        .unwrap();
+    assert!(
+        !old_windows
+            .natives_directory(other.path(), &meta.id)
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn missing_selected_native_classifier_is_reported() {
+    let mut meta = meta_with_one_library("https://example.invalid");
+    meta.libraries = serde_json::from_value(json!([{
+        "name":"tv.twitch:twitch-platform:5.16", "downloads":{"classifiers":{}},
+        "natives":{"windows":"natives-windows-${arch}"},
+    }]))
+    .unwrap();
+    let java32 = rmcl::launch_profile::system::JavaPlatform::from_java_properties(
+        "Windows 10",
+        "x86",
+        "32",
+        "10.0",
+    )
+    .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let error = download_libraries_for_platform(&HttpClient::new(), &meta, temp.path(), &java32)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("natives-windows-32"));
 }

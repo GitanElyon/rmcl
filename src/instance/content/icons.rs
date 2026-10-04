@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// terminal icon rasterization shared by every content type and markdown.
-
-// a single "pixel" in a terminal icon.
 #[derive(Debug, Clone, Copy)]
 pub struct IconCell {
     pub symbol: char,
@@ -45,7 +42,7 @@ pub(crate) fn make_icon_pixels_from_image(
             let [tr, tg, tb] = rgb.get_pixel(u32::from(column), top_y).0;
             let [br, bg, bb] = rgb.get_pixel(u32::from(column), bottom_y).0;
             columns.push(IconCell {
-                symbol: '\u{2584}',
+                symbol: '\u{2580}',
                 bg_r: br,
                 bg_g: bg,
                 bg_b: bb,

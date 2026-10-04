@@ -4,6 +4,90 @@
 use super::*;
 
 #[test]
+fn migrated_layout_detects_a_newly_copied_legacy_instance() {
+    let temp = tempfile::tempdir().unwrap();
+    let instances = temp.path().join("instances");
+    let meta = temp.path().join("meta");
+    fs::create_dir_all(&instances).unwrap();
+    initialize_new_layout(&meta).unwrap();
+    assert!(!is_needed(&instances, &meta));
+
+    fs::create_dir_all(instances.join("copied/.minecraft/saves")).unwrap();
+    assert!(is_needed(&instances, &meta));
+    fs::write(temp.path().join("config.toml"), b"[paths]").unwrap();
+    fs::write(
+        MetadataPaths::new(&meta).cache_rebuild_pending(),
+        LAYOUT_VERSION.to_string(),
+    )
+    .unwrap();
+    run(&instances, &meta, &temp.path().join("config.toml"), |_| {}).unwrap();
+    assert!(instances.join("copied/minecraft/saves").exists());
+}
+
+#[test]
+fn migrated_layout_detects_newly_copied_shared_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let instances = temp.path().join("instances");
+    let meta = temp.path().join("meta");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(&instances).unwrap();
+    fs::write(&config, b"[paths]").unwrap();
+    initialize_new_layout(&meta).unwrap();
+    fs::write(
+        MetadataPaths::new(&meta).cache_rebuild_pending(),
+        LAYOUT_VERSION.to_string(),
+    )
+    .unwrap();
+    fs::create_dir_all(meta.join("versions")).unwrap();
+    fs::write(meta.join("versions/copied.json"), b"data").unwrap();
+
+    assert!(is_needed(&instances, &meta));
+    run(&instances, &meta, &config, |_| {}).unwrap();
+    assert_eq!(
+        fs::read(MetadataPaths::new(&meta).versions().join("copied.json")).unwrap(),
+        b"data"
+    );
+}
+
+#[test]
+fn incomplete_migration_is_not_skipped_after_legacy_directories_were_renamed() {
+    let temp = tempfile::tempdir().unwrap();
+    let instances = temp.path().join("instances");
+    let meta = temp.path().join("meta");
+    let config = temp.path().join("config.toml");
+    let state = instances.join("Copied/.rmcl");
+    fs::create_dir_all(state.join("config-sync/local-config")).unwrap();
+    fs::create_dir_all(state.join("content/config")).unwrap();
+    fs::write(state.join("config-sync/local-config/options.txt"), b"old").unwrap();
+    fs::write(state.join("content/config/options.txt"), b"current").unwrap();
+    initialize_new_layout(&meta).unwrap();
+
+    assert!(run(&instances, &meta, &config, |_| {}).is_err());
+    assert!(!state.exists());
+    assert!(MetadataPaths::new(&meta).migration_journal().exists());
+    assert!(run(&instances, &meta, &config, |_| {}).is_err());
+    assert_eq!(
+        fs::read(instances.join("Copied/rmcl/content/config/options.txt")).unwrap(),
+        b"current"
+    );
+}
+
+#[test]
+fn repeated_migrations_create_separate_backups() {
+    let temp = tempfile::tempdir().unwrap();
+    let instances = temp.path().join("instances");
+    let meta = temp.path().join("meta");
+    let config = temp.path().join("config.toml");
+    fs::create_dir_all(instances.join("First/.minecraft")).unwrap();
+    let first = run(&instances, &meta, &config, |_| {}).unwrap();
+    fs::create_dir_all(instances.join("Second/.minecraft")).unwrap();
+    let second = run(&instances, &meta, &config, |_| {}).unwrap();
+
+    assert_ne!(first, second);
+    assert!(second.join("instances/Second/.minecraft").is_dir());
+}
+
+#[test]
 fn migration_backs_up_and_renames_instance_directories() {
     let temp = tempfile::tempdir().unwrap();
     let instances = temp.path().join("instances");
@@ -155,7 +239,10 @@ fn migration_need_follows_legacy_data_marker_and_pending_rebuild() {
 
     assert!(is_needed(&instances, &meta));
     initialize_new_layout(&meta).unwrap();
+    assert!(is_needed(&instances, &meta));
+    fs::remove_dir_all(instances.join("Example/.minecraft")).unwrap();
     assert!(!is_needed(&instances, &meta));
+    fs::create_dir_all(meta.join("versions")).unwrap();
     fs::write(MetadataPaths::new(&meta).layout_marker(), b"invalid marker").unwrap();
     assert!(is_needed(&instances, &meta));
     initialize_new_layout(&meta).unwrap();

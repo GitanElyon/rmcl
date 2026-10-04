@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// the instance list on the left side of the UI.
-// handles search/filter, scrollbar sync, and inline renaming.
-// each row shows instance name + "last played" or current run state.
-
 use crate::config::theme::{BORDER_STYLE, THEME};
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -12,7 +8,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, ScrollbarState},
 };
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -388,17 +384,7 @@ pub fn render(frame: &mut Frame, area: Rect, focused: FocusedArea, state: &mut S
     frame.render_stateful_widget(list, area, &mut state.list_state);
 
     frame.render_stateful_widget(
-        Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("\u{25b2}"))
-            .style(
-                Style::default()
-                    .fg(theme.text_dim())
-                    .add_modifier(Modifier::BOLD),
-            )
-            .thumb_symbol("\u{2551}")
-            .track_symbol(Some(""))
-            .end_symbol(Some("\u{25bc}")),
+        super::scrollbar(theme.text_dim()),
         scrollbar_area,
         &mut state.scrollbar_state,
     );

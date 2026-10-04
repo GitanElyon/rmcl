@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use color_eyre::eyre::Context;
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::{Buffer, CellDiffOption},
     crossterm::event::KeyEventKind,
@@ -20,7 +20,6 @@ use crate::feedback::progress;
 use crate::instance::InstanceManager;
 
 impl App {
-    /// main loop: poll async results and input at ~60Hz, drawing only when state changes
     pub async fn run(&mut self, terminal: &mut Tui) -> color_eyre::Result<()> {
         let mut last_draw = std::time::Instant::now()
             .checked_sub(Duration::from_secs(1))
@@ -29,8 +28,9 @@ impl App {
         let mut drawn_image_skips = Vec::new();
         let mut image_redraw_marker = false;
         while !self.exit {
+            self.sync_instance_content();
             let redraw_requested = crate::feedback::take_redraw_request();
-            // check if any popup wizard finished and wants to create/import
+            let edited_config_changed = self.drain_edited_configs();
             if let Some(params) = new_instance::take_result() {
                 self.spawn_create(params);
             }
@@ -42,9 +42,6 @@ impl App {
 
             self.dismiss_expired_errors();
 
-            // drain all the channels from background tasks.
-            // every content type has its own pending queue because they each
-            // get scanned/loaded on separate tokio tasks
             self.drain_pending_instances();
             self.drain_completed_instance_settings_updates();
             self.drain_failed_instance_settings_updates();
@@ -52,6 +49,17 @@ impl App {
             self.drain_pending_last_played();
             if let Some(state) = self.modpack_versions_state.as_mut() {
                 state.drain_pending();
+            }
+            if self.content_update_popup.as_ref().is_some_and(|update| {
+                update.phase != widgets::content::update::Phase::Applying
+                    && self
+                        .instances_state
+                        .selected_instance()
+                        .map(|instance| instance.name.as_str())
+                        != Some(update.instance_name.as_str())
+            }) && let Some(popup) = self.content_update_popup.take()
+            {
+                popup.cancel();
             }
             let content_update_completed = self.content_update_popup.as_mut().and_then(|update| {
                 update.drain();
@@ -77,10 +85,9 @@ impl App {
                 self.instances_state.modpack_updates.remove(&name);
                 widgets::instances::spawn_modpack_update_check(&instance);
                 self.modpack_update_popup = None;
-                self.reconciliation_for = None;
-                self.content_manifest = None;
-                self.content_update_snapshot = None;
+                self.forget_instance_content(&name);
             }
+            self.sync_instance_content();
             let mut local_streamed = false;
             let mut content_changed = false;
             let mut toggles = Vec::new();
@@ -154,6 +161,12 @@ impl App {
             if local_streamed {
                 self.apply_cached_content_manifest();
             }
+            if self.content_update_check_ready() {
+                self.content_update_check_pending = false;
+                if crate::config::SETTINGS.read().general.check_content_updates {
+                    self.spawn_selected_content_update_check();
+                }
+            }
             self.ensure_provider_conflict_popup();
             self.ensure_active_discovery_loaded();
             let progress_active = progress::is_active();
@@ -174,6 +187,7 @@ impl App {
             let continuously_animated = spinner_active || error_buffer::has_errors();
             let safety_refresh = last_draw.elapsed() >= Duration::from_secs(1);
             if input_changed
+                || edited_config_changed
                 || continuously_animated
                 || safety_refresh
                 || redraw_requested
@@ -193,10 +207,8 @@ impl App {
                 drawn_image_skips = image_skips;
             }
 
-            if let Some(path) = self.pending_editor.take()
-                && Self::run_editor(terminal, &path)
-            {
-                self.reload_edited_config(&path);
+            if let Some(path) = self.pending_editor.take() {
+                self.run_editor(terminal, &path);
             }
         }
         Ok(())
@@ -254,15 +266,13 @@ impl App {
             crate::instance::ContentManifest::update(&paths.content_manifest(), |manifest| {
                 let mut complete = true;
                 for toggle in toggles {
-                    let Ok(old_path) = toggle.old_path.strip_prefix(&minecraft_dir) else {
-                        complete = false;
-                        continue;
-                    };
-                    let Ok(new_path) = toggle.new_path.strip_prefix(&minecraft_dir) else {
-                        complete = false;
-                        continue;
-                    };
-                    complete &= manifest.rename_record(old_path, new_path, toggle.enabled);
+                    complete &= crate::instance::content::local::record_toggle(
+                        manifest,
+                        &minecraft_dir,
+                        &toggle.old_path,
+                        &toggle.new_path,
+                        toggle.enabled,
+                    )?;
                 }
                 Ok((manifest.clone(), complete))
             });
@@ -286,7 +296,77 @@ impl App {
         !complete
     }
 
+    pub(super) fn sync_instance_content(&mut self) {
+        let key = self.instances_state.selected_instance().map(|instance| {
+            super::app::InstanceContentKey {
+                root: self.instance_manager.instances_dir.clone(),
+                name: instance.name.clone(),
+                created: instance.created,
+                game_version: instance.game_version.clone(),
+                loader: instance.loader,
+            }
+        });
+        if self.content_for == key {
+            return;
+        }
+        if let Some(previous) = self.content_for.take() {
+            let mut cached = super::app::CachedInstanceContent::default();
+            cached.swap(self);
+            self.cached_instance_content.insert(previous, cached);
+        }
+        self.cached_instance_content.retain(|cached, _| {
+            cached.root == self.instance_manager.instances_dir
+                && self.instances_state.instances.iter().any(|instance| {
+                    instance.name == cached.name
+                        && instance.created == cached.created
+                        && instance.game_version == cached.game_version
+                        && instance.loader == cached.loader
+                })
+        });
+        let cached = key
+            .as_ref()
+            .and_then(|key| self.cached_instance_content.remove(key));
+        if let Some(mut cached) = cached {
+            cached.swap(self);
+        } else if key.is_some() {
+            let client = crate::net::HttpClient::new();
+            for state in [
+                &mut self.mods_state,
+                &mut self.resource_packs_state,
+                &mut self.shaders_state,
+                &mut self.world_datapacks_state,
+            ] {
+                state.enable_provider_icons(self.instance_manager.meta_dir.clone(), client.clone());
+            }
+            let font_size = self.picker.font_size();
+            self.screenshots_state.font_size = (font_size.width, font_size.height);
+        }
+        self.content_for = key;
+        self.provider_conflict = None;
+        if let Some(instance) = self.instances_state.selected_instance() {
+            let minecraft = crate::storage::InstancePaths::new(
+                self.instance_manager.instances_dir.join(&instance.name),
+            )
+            .minecraft();
+            let empty = crate::instance::ContentManifest::default();
+            let manifest = self
+                .content_manifest
+                .as_ref()
+                .map_or(&empty, |(_, manifest)| manifest);
+            for discovery in [
+                &mut self.mods_discovery_state,
+                &mut self.resource_packs_discovery_state,
+                &mut self.shaders_discovery_state,
+                &mut self.datapacks_discovery_state,
+            ] {
+                discovery.refresh_installed_manifest(manifest, &minecraft);
+            }
+        }
+        self.apply_cached_content_manifest();
+    }
+
     fn ensure_content_reconciliation(&mut self, changed: bool) {
+        self.sync_instance_content();
         let Some(instance) = self.instances_state.selected_instance().cloned() else {
             self.reconciliation_for = None;
             self.content_manifest = None;
@@ -295,27 +375,6 @@ impl App {
         let instance_id = (instance.name.clone(), instance.created);
         if !changed && self.reconciliation_for.as_ref() == Some(&instance_id) {
             return;
-        }
-        let instance_changed = self.reconciliation_for.as_ref() != Some(&instance_id);
-        if instance_changed {
-            self.provider_conflict = None;
-            self.dismissed_provider_conflicts.clear();
-            self.content_manifest = None;
-            self.content_update_snapshot = None;
-            for discovery in [
-                &mut self.mods_discovery_state,
-                &mut self.resource_packs_discovery_state,
-                &mut self.shaders_discovery_state,
-                &mut self.datapacks_discovery_state,
-            ] {
-                discovery.refresh_installed_manifest(
-                    &crate::instance::ContentManifest::default(),
-                    &crate::storage::InstancePaths::new(
-                        self.instance_manager.instances_dir.join(&instance.name),
-                    )
-                    .minecraft(),
-                );
-            }
         }
         self.reconciliation_for = Some(instance_id);
         if changed {
@@ -353,16 +412,35 @@ impl App {
             }
             Err(_) => return,
         };
-        let Some(result) = result else {
+        let Some(mut result) = result else {
             return;
         };
-        self.reconciliation_for = Some((result.instance_name.clone(), result.instance_created));
-        if let Some(error) = result.error {
+        if result.complete {
+            self.reconciliation_for = Some((result.instance_name.clone(), result.instance_created));
+        }
+        if let Some(error) = &result.error {
             tracing::warn!(
                 "Content reconciliation for {} was incomplete: {}",
                 result.instance_name,
                 error
             );
+            let path = crate::storage::InstancePaths::new(
+                self.instance_manager.instances_dir.join(&selected.name),
+            )
+            .content_manifest();
+            result.manifest = match crate::instance::ContentManifest::load(&path) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    tracing::error!("Could not reload content inventory: {error}");
+                    let Some((name, manifest)) = &self.content_manifest else {
+                        return;
+                    };
+                    if name != &selected.name {
+                        return;
+                    }
+                    manifest.clone()
+                }
+            };
         }
         let minecraft_dir = crate::storage::InstancePaths::new(
             self.instance_manager.instances_dir.join(&selected.name),
@@ -406,23 +484,30 @@ impl App {
                 .instances_dir
                 .join(&result.instance_name),
         );
-        let cached =
-            crate::instance::content::updates::UpdateSnapshot::load(&paths.content_updates())
-                .filter(|snapshot| snapshot.applies_to(&selected));
-        let stale = cached
+        if self.content_update_snapshot.is_none() {
+            self.content_update_snapshot =
+                crate::instance::content::updates::UpdateSnapshot::load(&paths.content_updates())
+                    .filter(|snapshot| snapshot.applies_to(&selected))
+                    .map(|snapshot| (result.instance_name.clone(), snapshot));
+        }
+        let stale = self
+            .content_update_snapshot
             .as_ref()
-            .is_none_or(|snapshot| snapshot.is_stale(&result.manifest));
-        self.content_update_snapshot =
-            cached.map(|snapshot| (result.instance_name.clone(), snapshot));
+            .is_none_or(|(_, snapshot)| snapshot.is_stale(&result.manifest));
+        let running = crate::instance::content::updates::is_running(
+            &selected,
+            &result.manifest,
+            &paths.content_updates(),
+        );
         self.content_manifest = Some((result.instance_name.clone(), result.manifest.clone()));
         self.apply_content_update_snapshot();
-        if stale && crate::config::SETTINGS.read().general.check_content_updates {
-            crate::instance::content::updates::spawn(
-                selected,
-                result.manifest,
-                paths.content_updates(),
-            );
-        }
+        self.content_update_check_pending |=
+            stale && !running && crate::config::SETTINGS.read().general.check_content_updates;
+    }
+
+    fn content_update_check_ready(&self) -> bool {
+        let active = self.active_installed_content_state();
+        self.content_update_check_pending && !(active.is_scanning() && active.entries.is_empty())
     }
 
     fn apply_cached_content_manifest(&mut self) {
@@ -471,11 +556,10 @@ impl App {
                     .rposition(|pending| {
                         pending.instance_name == selected.name
                             && pending.instance_created == selected.created
+                            && pending.snapshot.applies_to(selected)
                     })
                     .map(|index| pending.remove(index));
-                // every scan also writes its result to disk, so whatever is left
-                // here is recovered on the next reconciliation of that instance
-                pending.clear();
+                pending.retain(|pending| pending.instance_name != selected.name);
                 latest
             }
             Err(_) => return,
@@ -483,6 +567,15 @@ impl App {
         let Some(snapshot) = snapshot else {
             return;
         };
+        if self
+            .content_manifest
+            .as_ref()
+            .is_some_and(|(name, manifest)| {
+                name == &snapshot.instance_name && !snapshot.snapshot.is_stale(manifest)
+            })
+        {
+            self.content_update_check_pending = false;
+        }
         self.content_update_snapshot = Some((snapshot.instance_name, snapshot.snapshot));
         self.apply_content_update_snapshot();
     }
@@ -543,21 +636,10 @@ impl App {
         });
     }
 
-    // polls for input with a 16ms timeout (~60fps). only key presses are handled,
-    // releases and repeats are ignored thanks to the enhanced keyboard protocol
     fn handle_events(&mut self) -> color_eyre::Result<bool> {
         match crossterm::event::poll(Duration::from_millis(16)) {
             Ok(true) => match event::read() {
-                Ok(Event::Key(key_event)) if key_event.kind == KeyEventKind::Press => {
-                    self.handle_key_event(key_event)
-                        .wrap_err_with(|| format!("handling key event failed:\n{key_event:#?}"))?;
-                    Ok(true)
-                }
-                Ok(Event::Mouse(mouse_event)) => {
-                    self.handle_mouse_event(mouse_event);
-                    Ok(true)
-                }
-                Ok(_) => Ok(true),
+                Ok(event) => self.dispatch_event(event),
                 Err(e) => {
                     tracing::error!("Event read error: {}", e);
                     Ok(false)
@@ -571,13 +653,162 @@ impl App {
         }
     }
 
+    pub(super) fn dispatch_event(&mut self, event: Event) -> color_eyre::Result<bool> {
+        match event {
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    || (key.kind == KeyEventKind::Repeat && self.key_repeat_allowed(&key)) =>
+            {
+                self.handle_key_event(key)
+                    .wrap_err_with(|| format!("handling key event failed:\n{key:#?}"))?;
+                Ok(true)
+            }
+            Event::Key(_) => Ok(false),
+            Event::Mouse(mouse) => {
+                self.handle_mouse_event(mouse);
+                Ok(true)
+            }
+            _ => Ok(true),
+        }
+    }
+
+    fn key_repeat_allowed(&self, key: &KeyEvent) -> bool {
+        let vertical_navigation = matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k')
+        );
+        // These overlays take input before the focused area underneath them.
+        if self
+            .content_update_popup
+            .as_ref()
+            .is_some_and(widgets::content::update::State::visible)
+            || self.modpack_update_popup.is_some()
+            || self.provider_conflict.is_some()
+        {
+            return vertical_navigation;
+        }
+        if let Some(state) = &self.modpack_versions_state {
+            return vertical_navigation || (state.text_input_active() && repeatable_text_key(key));
+        }
+        if self.focused == FocusedArea::ConfirmDelete {
+            return false;
+        }
+
+        let text_input_active = match self.focused {
+            FocusedArea::Instances => {
+                self.instances_state.renaming.is_some() || self.instances_state.search.active
+            }
+            FocusedArea::Popup => new_instance::text_input_active(),
+            FocusedArea::ImportPopup => import_modpack::text_input_active(),
+            FocusedArea::Account => matches!(
+                self.account_state.add_mode,
+                widgets::account::AddMode::OfflineNameInput(_)
+            ),
+            FocusedArea::Settings => matches!(
+                self.settings_state.add_mode,
+                widgets::settings::AddMode::ProfileName(_)
+            ),
+            FocusedArea::InstanceSettings => self
+                .instance_settings
+                .as_ref()
+                .is_some_and(widgets::popups::instance_settings::State::text_input_active),
+            FocusedArea::GlobalSettings => self
+                .global_settings
+                .as_ref()
+                .is_some_and(widgets::popups::global_settings::State::text_input_active),
+            FocusedArea::OverviewExpanded => self.log_overlay_search.active,
+            FocusedArea::Content => {
+                let discovery = self.active_discovery_state();
+                if let Some(state) = discovery
+                    && (self.content_mode == widgets::content::ContentMode::Discover
+                        || state.version_popup.is_some()
+                        || state.project_page_open()
+                        || state.sort_panel_open)
+                {
+                    state.text_input_active()
+                } else {
+                    match self.content_tab {
+                        widgets::content::ContentTab::Mods => self.mods_state.search.active,
+                        widgets::content::ContentTab::ResourcePacks => {
+                            self.resource_packs_state.search.active
+                        }
+                        widgets::content::ContentTab::Shaders => self.shaders_state.search.active,
+                        widgets::content::ContentTab::Worlds
+                            if self.open_world_datapacks.is_some() =>
+                        {
+                            self.world_datapacks_state.search.active
+                        }
+                        widgets::content::ContentTab::Worlds => self.worlds_state.search.active,
+                        widgets::content::ContentTab::Screenshots => {
+                            self.screenshots_state.search.active
+                        }
+                        widgets::content::ContentTab::Logs if self.logs_state.viewer_focused => {
+                            self.logs_state.viewer_search.active
+                        }
+                        widgets::content::ContentTab::Logs => self.logs_state.search.active,
+                        _ => false,
+                    }
+                }
+            }
+            _ => false,
+        };
+        if text_input_active {
+            return repeatable_text_key(key);
+        }
+        if vertical_navigation {
+            return true;
+        }
+        match self.focused {
+            FocusedArea::OverviewExpanded => matches!(key.code, KeyCode::Char('g' | 'G')),
+            FocusedArea::Settings => matches!(
+                key.code,
+                KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l')
+            ),
+            FocusedArea::Content => {
+                if let Some(state) = self.active_discovery_state() {
+                    if state.project_page_open() {
+                        return matches!(
+                            key.code,
+                            KeyCode::PageUp
+                                | KeyCode::PageDown
+                                | KeyCode::Home
+                                | KeyCode::End
+                                | KeyCode::Char('g' | 'G' | 'd' | 'u')
+                        );
+                    }
+                    if state.version_popup.is_some() || state.sort_panel_open {
+                        return false;
+                    }
+                    if self.content_mode == widgets::content::ContentMode::Discover
+                        && widgets::content::discovery::page_key_direction(key).is_some()
+                    {
+                        return true;
+                    }
+                }
+                if self.content_tab == widgets::content::ContentTab::Logs
+                    && self.logs_state.viewer_focused
+                    && matches!(key.code, KeyCode::Char('g' | 'G'))
+                {
+                    return true;
+                }
+                matches!(
+                    key.code,
+                    KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l')
+                ) || (self.content_tab == widgets::content::ContentTab::Screenshots
+                    && key.modifiers.contains(KeyModifiers::SHIFT)
+                    && matches!(key.code, KeyCode::Char('H' | 'J' | 'K' | 'L')))
+            }
+            _ => false,
+        }
+    }
+
     fn spawn_create(&self, params: new_instance::WizardParams) {
         let instances_dir = self.instance_manager.instances_dir.clone();
         let meta_dir = crate::config::SETTINGS.read().paths.resolve_meta_dir();
         let pending_instances = PENDING_INSTANCES.clone();
 
         tokio::spawn(async move {
-            progress::set_action(format!("Creating instance '{}'...", params.name));
+            progress::set_action("Creating instance...");
             progress::set_sub_action(format!("{} {}", params.game_version, params.loader));
 
             let manager = InstanceManager::new(instances_dir, meta_dir);
@@ -620,7 +851,7 @@ impl App {
         let completed_updates = COMPLETED_INSTANCE_SETTINGS_UPDATES.clone();
 
         tokio::spawn(async move {
-            progress::set_action(format!("Updating instance '{}'...", updated.name));
+            progress::set_action("Updating instance...");
             progress::set_sub_action(format!("{} {}", updated.game_version, updated.loader));
             let manager = InstanceManager::new(&instances_dir, &meta_dir);
             updated = match apply_instance_settings_update(&manager, &previous, updated).await {
@@ -690,10 +921,8 @@ impl App {
         });
     }
 
-    // spawns $EDITOR/$VISUAL to edit a file. for terminal editors (vim, nano, etc)
-    // gotta leave the alternate screen and restore it after, otherwise the
-    // editor fights with ratatui for the terminal. GUI editors just get spawned detached.
-    fn run_editor(terminal: &mut ratatui::DefaultTerminal, path: &std::path::Path) -> bool {
+    // Terminal editors need the normal screen and input mode while they run.
+    fn run_editor(&mut self, terminal: &mut ratatui::DefaultTerminal, path: &std::path::Path) {
         use ratatui::crossterm::{
             ExecutableCommand,
             event::{DisableMouseCapture, EnableMouseCapture},
@@ -707,15 +936,34 @@ impl App {
         let editor = std::env::var("EDITOR")
             .or_else(|_| std::env::var("VISUAL"))
             .unwrap_or_else(|_| default_editor.to_owned());
+        let parts = match editor_parts(&editor) {
+            Ok(parts) => parts,
+            Err(error) => {
+                tracing::error!("Cannot parse editor command: {error}");
+                return;
+            }
+        };
+        let Some((program, args)) = parts.split_first() else {
+            tracing::error!("Editor command is empty");
+            return;
+        };
 
-        let is_tui_editor = editor_runs_in_terminal(&editor);
+        let is_tui_editor = editor_runs_in_terminal(program);
 
         if is_tui_editor {
+            if let Err(error) = self.watch_edited_config(path) {
+                error_buffer::push_message(
+                    tracing::Level::ERROR,
+                    format!("Cannot watch edited file {}: {error}", path.display()),
+                );
+                return;
+            }
             let _ = stdout().execute(DisableMouseCapture);
             let _ = stdout().execute(LeaveAlternateScreen);
             let _ = disable_raw_mode();
 
-            let result = std::process::Command::new(&editor)
+            let result = std::process::Command::new(program)
+                .args(args)
                 .arg(path)
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::inherit())
@@ -729,21 +977,60 @@ impl App {
 
             if let Err(e) = result {
                 tracing::error!("Failed to open editor: {}", e);
-                return false;
             }
-            true
         } else {
-            if let Err(e) = std::process::Command::new(&editor)
-                .arg(path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
+            if let Err(e) = self.launch_gui_editor(
+                std::process::Command::new(program).args(args).arg(path),
+                path,
+            ) {
                 tracing::error!("Failed to open editor: {}", e);
-                return false;
             }
-            false
         }
+    }
+
+    fn watch_edited_config(&mut self, path: &std::path::Path) -> color_eyre::Result<()> {
+        let path = std::path::absolute(path)?;
+        if !self
+            .edited_config_watches
+            .iter()
+            .any(|watch| watch.path == path)
+        {
+            self.edited_config_watches
+                .push(EditedConfigWatch::new(path)?);
+        }
+        Ok(())
+    }
+
+    fn launch_gui_editor(
+        &mut self,
+        command: &mut std::process::Command,
+        path: &std::path::Path,
+    ) -> color_eyre::Result<std::thread::JoinHandle<()>> {
+        self.watch_edited_config(path)?;
+        let mut child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        // A GUI launcher can exit after handing the file to an existing editor.
+        // Reap it without tying the file watch or Tokio shutdown to its lifetime.
+        Ok(std::thread::spawn(move || match child.wait() {
+            Ok(status) if !status.success() => tracing::warn!("Editor exited with {status}"),
+            Err(error) => tracing::error!("Failed to wait for editor: {error}"),
+            _ => {}
+        }))
+    }
+
+    fn drain_edited_configs(&mut self) -> bool {
+        let changed = self
+            .edited_config_watches
+            .iter_mut()
+            .filter_map(|watch| watch.changed().then(|| watch.path.clone()))
+            .collect::<Vec<_>>();
+        for path in &changed {
+            self.reload_edited_config(path);
+        }
+        !changed.is_empty()
     }
 
     fn reload_edited_config(&mut self, path: &std::path::Path) {
@@ -760,7 +1047,7 @@ impl App {
                             );
                         }
                         if outcome.content_updates_enabled {
-                            self.spawn_selected_content_update_check();
+                            self.queue_content_update_checks();
                         }
                         if outcome.restart_required {
                             error_buffer::push_error(error_buffer::ErrorEvent {
@@ -879,8 +1166,6 @@ impl App {
         });
     }
 
-    // pops errors from the front of the queue once they've been visible long enough.
-    // loops because multiple errors could expire in the same frame
     fn dismiss_expired_errors(&self) {
         use crate::config::SETTINGS;
         loop {
@@ -969,28 +1254,29 @@ impl App {
     }
 
     pub(super) fn forget_instance_content(&mut self, instance_name: &str) {
-        for state in [
-            &mut self.mods_state,
-            &mut self.resource_packs_state,
-            &mut self.shaders_state,
-            &mut self.worlds_state,
-            &mut self.world_datapacks_state,
-        ] {
-            state.forget_instance(instance_name);
+        crate::instance::content::updates::cancel(Some(
+            &crate::storage::InstancePaths::new(
+                self.instance_manager.instances_dir.join(instance_name),
+            )
+            .content_updates(),
+        ));
+        self.settings_state
+            .invalidate_java_cache(Some(instance_name));
+        self.cached_instance_content
+            .retain(|key, _| key.name != instance_name);
+        if self
+            .content_for
+            .as_ref()
+            .is_some_and(|key| key.name != instance_name)
+        {
+            return;
         }
-        if self.logs_state.loaded_for.as_deref() == Some(instance_name) {
-            self.logs_state.loaded_for = None;
+        super::app::CachedInstanceContent::default().swap(self);
+        self.content_for = None;
+        if let Some(popup) = self.content_update_popup.take() {
+            popup.cancel();
         }
-        if self.screenshots_state.loaded_for.as_deref() == Some(instance_name) {
-            self.screenshots_state.loaded_for = None;
-        }
-        self.reconciliation_for = None;
-        self.content_manifest = None;
-        self.content_update_snapshot = None;
-        self.content_update_popup = None;
         self.provider_conflict = None;
-        self.dismissed_provider_conflicts.clear();
-        self.apply_content_update_snapshot();
     }
 
     fn drain_pending_last_played(&mut self) {
@@ -1011,6 +1297,120 @@ impl App {
             self.screenshots_state.set_protocol(idx, proto);
         }
     }
+}
+
+pub(super) struct EditedConfigWatch {
+    path: std::path::PathBuf,
+    contents: Option<Vec<u8>>,
+    events: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    pending: Option<std::time::Instant>,
+    read_error: Option<std::io::ErrorKind>,
+    _watcher: notify::RecommendedWatcher,
+}
+
+impl EditedConfigWatch {
+    fn new(path: std::path::PathBuf) -> color_eyre::Result<Self> {
+        use notify::Watcher;
+
+        let (tx, events) = std::sync::mpsc::channel();
+        let mut watcher = notify::recommended_watcher(move |event| {
+            let _ = tx.send(event);
+        })?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| color_eyre::eyre::eyre!("File has no parent directory"))?;
+        watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
+        let contents = match std::fs::read(&path) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Self {
+            path,
+            contents,
+            events,
+            pending: None,
+            read_error: None,
+            _watcher: watcher,
+        })
+    }
+
+    fn changed(&mut self) -> bool {
+        for result in self.events.try_iter() {
+            match result {
+                Ok(event)
+                    if matches!(event.kind, notify::EventKind::Access(_))
+                        && !matches!(
+                            event.kind,
+                            notify::EventKind::Access(notify::event::AccessKind::Close(
+                                notify::event::AccessMode::Write
+                            ))
+                        ) => {}
+                Ok(event)
+                    if event.need_rescan()
+                        || event.paths.is_empty()
+                        || event.paths.iter().any(|path| {
+                            path.file_name().zip(self.path.file_name()).is_some_and(
+                                |(changed, watched)| changed.eq_ignore_ascii_case(watched),
+                            ) || Some(path.as_path()) == self.path.parent()
+                        }) =>
+                {
+                    self.pending = Some(std::time::Instant::now());
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(
+                        "Edited file watch for {} failed: {error}",
+                        self.path.display()
+                    );
+                    self.pending = Some(std::time::Instant::now());
+                }
+            }
+        }
+        if self
+            .pending
+            .is_none_or(|pending| pending.elapsed() < Duration::from_millis(100))
+        {
+            return false;
+        }
+        let contents = match std::fs::read(&self.path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound
+                    && self.read_error != Some(error.kind())
+                {
+                    tracing::warn!("Cannot read edited file {}: {error}", self.path.display());
+                }
+                self.read_error = Some(error.kind());
+                self.pending = Some(std::time::Instant::now());
+                return false;
+            }
+        };
+        self.pending = None;
+        self.read_error = None;
+        if self.contents.as_ref() == Some(&contents) {
+            return false;
+        }
+        self.contents = Some(contents);
+        true
+    }
+}
+
+fn repeatable_text_key(key: &KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Char(_)
+            | KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+    )
 }
 
 async fn apply_instance_settings_update(
@@ -1113,6 +1513,64 @@ fn editor_runs_in_terminal(editor: &str) -> bool {
             | "joe"
             | "mcedit"
     )
+}
+
+fn editor_parts(editor: &str) -> std::io::Result<Vec<String>> {
+    if std::path::Path::new(editor).is_file() {
+        Ok(vec![editor.to_owned()])
+    } else {
+        split_editor_command(editor)
+    }
+}
+
+#[cfg(unix)]
+fn split_editor_command(editor: &str) -> std::io::Result<Vec<String>> {
+    shlex::split(editor).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Unterminated editor quote or escape",
+        )
+    })
+}
+
+#[cfg(windows)]
+fn split_editor_command(editor: &str) -> std::io::Result<Vec<String>> {
+    use windows_sys::Win32::{Foundation::LocalFree, UI::Shell::CommandLineToArgvW};
+    if editor.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    if editor.contains('\0') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Editor command contains a NUL",
+        ));
+    }
+    let command = editor
+        .trim()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut count = 0;
+    // The OS allocates the complete argument array; it remains valid until LocalFree below.
+    let args = unsafe { CommandLineToArgvW(command.as_ptr(), &mut count) };
+    if args.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut parts = Vec::new();
+    for index in 0..count as usize {
+        let arg = unsafe { *args.add(index) };
+        let mut length = 0;
+        while unsafe { *arg.add(length) } != 0 {
+            length += 1;
+        }
+        parts.push(String::from_utf16_lossy(unsafe {
+            std::slice::from_raw_parts(arg, length)
+        }));
+    }
+    unsafe {
+        LocalFree(args.cast());
+    }
+    Ok(parts)
 }
 
 #[cfg(test)]

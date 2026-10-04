@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// cli entry point and clap command definitions.
-// no subcommand = launch TUI, otherwise dispatch to the appropriate handler.
 mod account;
 mod content;
 mod import;
@@ -17,9 +15,7 @@ use clap::{Arg, ArgAction, ArgGroup, Command};
 pub async fn init() {
     let matches = build_command().get_matches();
 
-    // no subcommand means the user just ran `rmcl` bare, so fall through to TUI mode
     if matches.subcommand().is_none() {
-        // force-init the theme so it's ready before the TUI renders
         let _ = &*crate::config::theme::THEME;
         if let Err(e) = crate::tui::show().await {
             tracing::error!("TUI error: {}", e);
@@ -27,51 +23,52 @@ pub async fn init() {
         return;
     }
 
-    let instances_dir = crate::config::SETTINGS.read().paths.resolve_instances_dir();
-    let meta_dir = crate::config::SETTINGS.read().paths.resolve_meta_dir();
-    let config = crate::config::get_config_path().join("config.toml");
-    if crate::layout_migration::is_needed(&instances_dir, &meta_dir) {
-        if let Err(error) =
-            crate::layout_migration::run(&instances_dir, &meta_dir, &config, |progress| {
-                eprintln!(
-                    "{}: {} ({}/{})",
-                    progress.phase, progress.item, progress.current, progress.total
-                );
-            })
-        {
-            eprintln!("error: layout migration failed safely: {error}");
+    if !matches!(matches.subcommand_name(), Some("account" | "version")) {
+        let instances_dir = crate::config::SETTINGS.read().paths.resolve_instances_dir();
+        let meta_dir = crate::config::SETTINGS.read().paths.resolve_meta_dir();
+        let config = crate::config::get_config_path().join("config.toml");
+        if crate::layout_migration::is_needed(&instances_dir, &meta_dir) {
+            if let Err(error) =
+                crate::layout_migration::run(&instances_dir, &meta_dir, &config, |progress| {
+                    eprintln!(
+                        "{}: {} ({}/{})",
+                        progress.phase, progress.item, progress.current, progress.total
+                    );
+                })
+            {
+                eprintln!("error: layout migration failed safely: {error}");
+                std::process::exit(1);
+            }
+        } else if let Err(error) = crate::layout_migration::initialize_new_layout(&meta_dir) {
+            eprintln!("error: cannot initialize metadata layout: {error}");
             std::process::exit(1);
+        } else if let Err(error) = crate::config::upgrade_config_file(&config) {
+            eprintln!("warning: cannot upgrade launcher config: {error}");
         }
-    } else if let Err(error) = crate::layout_migration::initialize_new_layout(&meta_dir) {
-        eprintln!("error: cannot initialize metadata layout: {error}");
-        std::process::exit(1);
-    } else if let Err(error) = crate::config::upgrade_config_file(&config) {
-        eprintln!("warning: cannot upgrade launcher config: {error}");
-    }
-    if crate::layout_migration::cache_rebuild_pending(&meta_dir) {
-        let manager = crate::instance::InstanceManager::new(&instances_dir, &meta_dir);
-        let instances = manager.load_all();
-        for (index, instance) in instances.iter().enumerate() {
-            eprintln!(
-                "Rebuilding runtime cache: {} ({}/{})",
-                instance.name,
-                index + 1,
-                instances.len()
-            );
-            if let Err(error) = manager.repair_runtime_cache(instance).await {
+        if crate::layout_migration::cache_rebuild_pending(&meta_dir) {
+            let manager = crate::instance::InstanceManager::new(&instances_dir, &meta_dir);
+            let instances = manager.load_all();
+            for (index, instance) in instances.iter().enumerate() {
                 eprintln!(
-                    "error: runtime cache rebuild stopped safely for '{}': {error}",
-                    instance.name
+                    "Rebuilding runtime cache: {} ({}/{})",
+                    instance.name,
+                    index + 1,
+                    instances.len()
                 );
+                if let Err(error) = manager.repair_runtime_cache(instance).await {
+                    eprintln!(
+                        "error: runtime cache rebuild stopped safely for '{}': {error}",
+                        instance.name
+                    );
+                    std::process::exit(1);
+                }
+            }
+            if let Err(error) = crate::layout_migration::finish_cache_rebuild(&meta_dir) {
+                eprintln!("error: cannot finish runtime cache migration: {error}");
                 std::process::exit(1);
             }
         }
-        if let Err(error) = crate::layout_migration::finish_cache_rebuild(&meta_dir) {
-            eprintln!("error: cannot finish runtime cache migration: {error}");
-            std::process::exit(1);
-        }
     }
-
     let result = match matches.subcommand() {
         Some(("instance", sub_matches)) => instance::handle_instance(sub_matches).await,
         Some(("mod", sub_matches)) => content::handle_mod(sub_matches),
@@ -265,7 +262,6 @@ fn build_command() -> Command {
         )
 }
 
-// mods, resource packs, and shaders all share the same list/enable/disable shape
 fn build_content_command(name: &'static str, about: &'static str) -> Command {
     Command::new(name)
         .about(format!("Manage {}", about))

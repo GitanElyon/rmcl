@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// modrinth api client and provider file downloads.
-
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -527,7 +525,11 @@ pub async fn download_version_file(
     validate_path_component(&version.id, "provider version id")?;
     let path = destination.join(&file.filename);
     if path.exists() {
-        if verify_version_file(&path, file)? {
+        if ["sha512", "sha1"]
+            .iter()
+            .any(|algorithm| file.hashes.contains_key(*algorithm))
+            && verify_version_file(&path, file)?
+        {
             return Ok(DownloadOutcome::SkippedExisting(path));
         }
         return Err(crate::net::NetError::Parse(format!(
@@ -535,25 +537,8 @@ pub async fn download_version_file(
             path.display()
         )));
     }
-    let temporary = destination.join(format!(".{}.{}.rmcl-download", file.filename, version.id));
-    if temporary.exists() {
-        tokio::fs::remove_file(&temporary).await?;
-    }
-    let progress =
-        crate::feedback::progress::ProgressTask::start(format!("Downloading {}", file.filename));
-    crate::net::download_file(client, &file.url, &temporary, |current, total| {
-        progress.set_progress(current, total);
-    })
-    .await?;
-    if !verify_version_file(&temporary, file)? {
-        let _ = tokio::fs::remove_file(&temporary).await;
-        return Err(crate::net::NetError::Parse(format!(
-            "Downloaded file '{}' failed its size or hash verification",
-            file.filename
-        )));
-    }
-    tokio::fs::rename(&temporary, &path).await?;
-    progress.finish();
+    let temporary = staged_version_file(client, file, destination).await?;
+    temporary.persist(&path).map_err(|error| error.error)?;
     Ok(DownloadOutcome::Downloaded(path))
 }
 
@@ -571,19 +556,21 @@ pub async fn download_version_file_for_update(
         return download_version_file(client, version, destination).await;
     }
 
-    let temporary = destination.join(format!(".{}.{}.rmcl-download", file.filename, version.id));
-    let backup = destination.join(format!(".{}.{}.rmcl-backup", file.filename, version.id));
-    if backup.exists() {
-        if !installed_path.exists() {
-            tokio::fs::rename(&backup, installed_path).await?;
-        } else {
-            tokio::fs::remove_file(&backup).await?;
-        }
-    }
-    if temporary.exists() {
-        tokio::fs::remove_file(&temporary).await?;
-    }
+    let temporary = staged_version_file(client, file, destination).await?;
+    temporary.persist(&target).map_err(|error| error.error)?;
+    Ok(DownloadOutcome::Downloaded(target))
+}
 
+async fn staged_version_file(
+    client: &crate::net::HttpClient,
+    file: &VersionFile,
+    destination: &std::path::Path,
+) -> Result<tempfile::TempPath, crate::net::NetError> {
+    tokio::fs::create_dir_all(destination).await?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".rmcl-verified-")
+        .tempfile_in(destination)?
+        .into_temp_path();
     let progress =
         crate::feedback::progress::ProgressTask::start(format!("Downloading {}", file.filename));
     crate::net::download_file(client, &file.url, &temporary, |current, total| {
@@ -591,22 +578,16 @@ pub async fn download_version_file_for_update(
     })
     .await?;
     if !verify_version_file(&temporary, file)? {
-        let _ = tokio::fs::remove_file(&temporary).await;
         return Err(crate::net::NetError::Parse(format!(
             "Downloaded file '{}' failed its size or hash verification",
             file.filename
         )));
     }
-    replace_installed_file(&temporary, &target, installed_path, &backup).await?;
-    progress.finish();
-    Ok(DownloadOutcome::Downloaded(target))
+    Ok(temporary)
 }
 
 fn validate_path_component(value: &str, label: &str) -> Result<(), crate::net::NetError> {
-    let mut components = std::path::Path::new(value).components();
-    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
-        || components.next().is_some()
-    {
+    if !crate::instance::manager::portable_component(value) {
         return Err(crate::net::NetError::Parse(format!(
             "Invalid {label} '{value}'"
         )));
@@ -630,24 +611,6 @@ fn verify_version_file(
         }
     }
     Ok(true)
-}
-
-async fn replace_installed_file(
-    temporary: &std::path::Path,
-    target: &std::path::Path,
-    installed_path: &std::path::Path,
-    backup: &std::path::Path,
-) -> Result<(), crate::net::NetError> {
-    tokio::fs::rename(installed_path, &backup).await?;
-    if let Err(error) = tokio::fs::rename(&temporary, &target).await {
-        let _ = tokio::fs::rename(&backup, installed_path).await;
-        let _ = tokio::fs::remove_file(&temporary).await;
-        return Err(error.into());
-    }
-    if let Err(error) = tokio::fs::remove_file(&backup).await {
-        tracing::warn!("Failed to remove provider update backup: {error}");
-    }
-    Ok(())
 }
 
 pub async fn fetch_version(
@@ -688,16 +651,22 @@ pub async fn resolve_version_files(
         .await
 }
 
-// grabs the primary file from a version, falling back to the first file
-// if none is marked primary (some projects are sloppy about that).
-// routes through the shared verified download (temp file + size/hash check
-// + rename) so a truncated or corrupted .mrpack is never left in place.
 pub async fn download_mrpack(
     client: &crate::net::HttpClient,
     version: &VersionInfo,
     dest: &std::path::Path,
 ) -> Result<std::path::PathBuf, crate::net::NetError> {
-    match download_version_file(client, version, dest).await? {
+    validate_path_component(&version.id, "provider version id")?;
+    let cache = dest.join(&version.id);
+    let file = select_primary_file(version)?;
+    validate_path_component(&file.filename, "provider filename")?;
+    let path = cache.join(&file.filename);
+    if path.exists() && !verify_version_file(&path, file)? {
+        return match download_version_file_for_update(client, version, &cache, &path).await? {
+            DownloadOutcome::Downloaded(path) | DownloadOutcome::SkippedExisting(path) => Ok(path),
+        };
+    }
+    match download_version_file(client, version, &cache).await? {
         DownloadOutcome::Downloaded(path) | DownloadOutcome::SkippedExisting(path) => Ok(path),
     }
 }

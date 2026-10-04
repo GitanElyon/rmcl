@@ -3,9 +3,6 @@
 
 use super::*;
 
-// builds an in-memory zip in a tempdir with the given json as
-// install_profile.json. lets the legacy-install-profile detector be
-// tested without an actual forge installer.
 fn make_installer_zip(tmp: &std::path::Path, json: &serde_json::Value) -> std::path::PathBuf {
     use std::io::Write;
     let path = tmp.join("installer.jar");

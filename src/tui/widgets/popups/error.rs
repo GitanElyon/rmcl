@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// toast-style error/warning popup that auto-dismisses after a timeout.
-// stacks in the top-right corner; border color changes based on severity.
-
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -66,8 +63,6 @@ impl Widget for ErrorPopup {
     }
 }
 
-// returns None when the toast has lived past its expiry, which is
-// what triggers removal from the render loop
 pub fn popup_area(frame_area: Rect, message: &str, base_y: u16, elapsed_ms: u128) -> Option<Rect> {
     use super::word_wrap_size;
 

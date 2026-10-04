@@ -29,7 +29,16 @@ fn maven_nested_group() {
 
 #[test]
 fn maven_invalid_coordinates() {
-    for coordinate in ["org.example:artifact", "a:b:c:d:e", "just-a-string", ""] {
+    for coordinate in [
+        "org.example:artifact",
+        "a:b:c:d:e",
+        "just-a-string",
+        "",
+        ".example:artifact:1",
+        "org.example:../escape:1",
+        "org.example:artifact:../1",
+        "org.example:artifact:1:../../escape",
+    ] {
         assert_eq!(maven_coord_to_path(coordinate), None);
     }
 }

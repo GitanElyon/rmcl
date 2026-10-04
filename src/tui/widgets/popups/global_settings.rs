@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// modal editor for launcher-wide settings.
-
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -16,7 +14,10 @@ use ratatui_textarea::TextArea;
 use crate::{
     config::{
         Config,
-        settings::{ContentProvider, DEFAULT_RESOLUTION, ImageProtocol, ShortcutHintScope},
+        settings::{
+            ContentProvider, DEFAULT_RESOLUTION, ImageProtocol, ShortcutHintScope,
+            format_tag_values, parse_tag_values,
+        },
         theme::{BORDER_STYLE, BorderStyle, THEME, ThemeConfig},
     },
     instance::models::{memory_kib, normalize_memory_value, parse_resolution},
@@ -24,10 +25,10 @@ use crate::{
         DisplayResolution, JavaChoice, JavaPicker, ResolutionChoice, ResolutionPickerAction,
         SettingsPicker, SettingsPickerAction, SettingsPickerOption, adjust_memory, auto_label,
         default_label, default_resolution, display_resolutions, environment_labels,
-        format_tag_values, handle_resolution_picker_key, handle_text_area_input,
-        is_default_resolution, parse_environment, parse_tag_values, render_memory_gauge,
-        render_settings_picker, resolution_choices, resolution_items, settings_text_area,
-        tagged_row_count, tagged_value_lines, toggle_window_mode, window_mode_title,
+        handle_resolution_picker_key, handle_text_area_input, is_default_resolution,
+        parse_environment, render_memory_gauge, render_settings_picker, resolution_choices,
+        resolution_items, settings_text_area, tagged_row_count, tagged_value_lines,
+        toggle_window_mode, window_mode_title,
     },
     tui::widgets::status_badge,
 };
@@ -98,8 +99,13 @@ impl State {
         let java_cache =
             crate::storage::MetadataPaths::new(runtime_config.paths.resolve_meta_dir())
                 .java_installations();
-        let mut java_picker =
-            JavaPicker::with_cache(crate::instance::java::detect_java_path(), Some(java_cache));
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let environment = crate::instance::java::merge_environment(
+            &config.defaults.environment,
+            &Default::default(),
+        );
+        let detected = crate::instance::java::resolve_java_path_in(None, &cwd, &environment);
+        let mut java_picker = JavaPicker::with_cache(detected, Some(java_cache), cwd, environment);
         java_picker.set_current(config.paths.java_path.as_deref());
         Self {
             config,
@@ -195,26 +201,26 @@ impl State {
             state.editing = Some(settings_text_area(editor.lines().to_vec()));
         };
         match self.selected {
-            3 | 4 if normalize_memory_value(value).is_none() => invalid(
-                self,
-                "Use a positive memory value ending in K, M, or G.".to_owned(),
-            ),
-            3 => {
-                let value = normalize_memory_value(value).unwrap();
-                self.config.defaults.memory_min = value.clone();
-                if memory_kib(&value) > memory_kib(&self.config.defaults.memory_max) {
-                    self.config.defaults.memory_max = value;
+            3 | 4 => match normalize_memory_value(value) {
+                Some(value) => {
+                    if self.selected == 3 {
+                        self.config.defaults.memory_min = value.clone();
+                        if memory_kib(&value) > memory_kib(&self.config.defaults.memory_max) {
+                            self.config.defaults.memory_max = value;
+                        }
+                    } else {
+                        self.config.defaults.memory_max = value.clone();
+                        if memory_kib(&value) < memory_kib(&self.config.defaults.memory_min) {
+                            self.config.defaults.memory_min = value;
+                        }
+                    }
+                    self.save_pending = true;
                 }
-                self.save_pending = true;
-            }
-            4 => {
-                let value = normalize_memory_value(value).unwrap();
-                self.config.defaults.memory_max = value.clone();
-                if memory_kib(&value) < memory_kib(&self.config.defaults.memory_min) {
-                    self.config.defaults.memory_min = value;
-                }
-                self.save_pending = true;
-            }
+                None => invalid(
+                    self,
+                    "Use a positive memory value ending in K, M, or G.".to_owned(),
+                ),
+            },
             5 => {
                 self.config.paths.java_path = (!value.is_empty()).then(|| value.to_owned());
                 self.save_pending = true;
@@ -240,6 +246,7 @@ impl State {
             9 => match parse_environment(value) {
                 Ok(environment) => {
                     self.config.defaults.environment = environment;
+                    self.refresh_java_context();
                     self.save_pending = true;
                 }
                 Err(error) => invalid(self, error),
@@ -565,7 +572,8 @@ impl State {
             .iter()
             .position(|mode| *mode == current);
         let index = match (index, forward) {
-            (Some(2), true) | (Some(0), false) => 0,
+            (Some(2), true) => 0,
+            (Some(0), false) => 2,
             (Some(index), true) => index + 1,
             (Some(index), false) => index - 1,
             (None, true) => 0,
@@ -581,6 +589,7 @@ impl State {
     }
 
     fn open_java_picker(&mut self) {
+        self.refresh_java_context();
         self.java_picker
             .open(self.config.paths.java_path.as_deref());
         self.java_picker.initialize();
@@ -588,6 +597,7 @@ impl State {
     }
 
     fn toggle_auto_java(&mut self) -> Action {
+        self.refresh_java_context();
         let Some(current) = self.config.paths.java_path.as_deref() else {
             self.config.paths.java_path = Some(self.java_picker.detected_path().to_owned());
             self.save_pending = true;
@@ -619,6 +629,17 @@ impl State {
 
     pub fn invalidate_java_cache(&mut self) {
         self.java_picker.invalidate_cache();
+        self.refresh_java_context();
+    }
+
+    fn refresh_java_context(&mut self) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let environment = crate::instance::java::merge_environment(
+            &self.config.defaults.environment,
+            &Default::default(),
+        );
+        let detected = crate::instance::java::resolve_java_path_in(None, &cwd, &environment);
+        self.java_picker.set_context(detected, cwd, environment);
     }
 
     fn handle_java_picker_key(&mut self, key: &KeyEvent) {
@@ -687,6 +708,13 @@ impl State {
         }
         self.save_pending = true;
         self.error = None;
+    }
+
+    pub(in crate::tui) fn text_input_active(&self) -> bool {
+        self.choice_picker.is_none()
+            && !self.java_picker_open
+            && !self.theme_picker
+            && self.editing.is_some()
     }
 
     pub fn handle_key(&mut self, key: &KeyEvent) -> Action {
@@ -1321,6 +1349,88 @@ mod tests {
     use crate::instance::models::WindowMode;
 
     #[test]
+    fn dispatch_repeats_launcher_text_but_not_setting_toggles() {
+        use crate::tui::{app::FocusedArea, tests::harness::UiHarness};
+        use crossterm::event::{KeyEventKind, KeyModifiers};
+
+        let mut ui = UiHarness::new();
+        let mut state = State::new();
+        state.selected = 6;
+        let mode = state.config.defaults.window_mode;
+        ui.app.global_settings = Some(state);
+        ui.app.focused = FocusedArea::GlobalSettings;
+        for code in [KeyCode::Right, KeyCode::Char('l'), KeyCode::Enter] {
+            assert!(!ui.key_event(KeyEvent::new_with_kind(
+                code,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat
+            )));
+        }
+        assert_eq!(
+            ui.app
+                .global_settings
+                .as_ref()
+                .unwrap()
+                .config
+                .defaults
+                .window_mode,
+            mode
+        );
+
+        ui.app.global_settings.as_mut().unwrap().editing =
+            Some(settings_text_area(vec![String::new()]));
+        ui.key(KeyCode::Char('l'));
+        assert!(ui.key_event(KeyEvent::new_with_kind(
+            KeyCode::Char('l'),
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat
+        )));
+        assert!(!ui.key_event(KeyEvent::new_with_kind(
+            KeyCode::Char('l'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release
+        )));
+        assert_eq!(
+            ui.app
+                .global_settings
+                .as_ref()
+                .unwrap()
+                .editing
+                .as_ref()
+                .unwrap()
+                .lines(),
+            &["ll"]
+        );
+        assert!(ui.key_event(KeyEvent::new_with_kind(
+            KeyCode::Left,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat
+        )));
+        assert!(ui.key_event(KeyEvent::new_with_kind(
+            KeyCode::Delete,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat
+        )));
+        assert_eq!(
+            ui.app
+                .global_settings
+                .as_ref()
+                .unwrap()
+                .editing
+                .as_ref()
+                .unwrap()
+                .lines(),
+            &["l"]
+        );
+        assert!(!ui.key_event(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat
+        )));
+        assert!(ui.app.global_settings.as_ref().unwrap().editing.is_some());
+    }
+
+    #[test]
     fn launcher_memory_uses_slider_and_java_uses_picker() {
         let mut state = State::new();
         state.selected = 3;
@@ -1552,6 +1662,10 @@ mod tests {
         state.selected = 2;
         state.handle_key(&KeyEvent::from(KeyCode::Down));
         assert_eq!(state.selected, 24);
+        state.cycle_shortcut_hints(false);
+        assert_eq!(shortcut_hint_mode(&state.config.ui), "Hidden");
+        state.cycle_shortcut_hints(true);
+        assert_eq!(shortcut_hint_mode(&state.config.ui), "All");
 
         assert!(matches!(
             state.handle_key(&KeyEvent::from(KeyCode::Right)),

@@ -80,15 +80,18 @@ fn resolve_path_absolute() {
 
 #[test]
 fn resolve_path_tilde_prefix() {
-    let resolved = resolve_path("~/games/rmcl");
-    assert!(!resolved.to_string_lossy().starts_with('~'));
-    assert!(resolved.to_string_lossy().ends_with("games/rmcl"));
+    let home = dirs::home_dir().expect("test environment has a home directory");
+    for path in ["~/games/rmcl", r"~\games/rmcl"] {
+        assert_eq!(resolve_path(path), home.join("games/rmcl"));
+    }
 }
 
 #[test]
 fn resolve_path_bare_tilde() {
-    let resolved = resolve_path("~");
-    assert!(!resolved.to_string_lossy().starts_with('~'));
+    assert_eq!(
+        resolve_path("~"),
+        dirs::home_dir().expect("test environment has a home directory")
+    );
 }
 
 #[test]

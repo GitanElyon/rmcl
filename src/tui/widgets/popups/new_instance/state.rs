@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// state machine and input handling for the new instance wizard.
-// flow: Name -> Loader -> Version -> LoaderVersion -> Confirm
-// version lists are fetched lazily from the network when you reach that step.
-
 use crate::instance::{loader::GameVersion, models::ModLoader};
 use crate::tui::widgets::instances;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -16,7 +12,6 @@ use super::super::LoadState;
 
 pub(crate) static WIZARD_STATE: LazyLock<Arc<Mutex<WizardState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(WizardState::default())));
-// populated on confirm, consumed by the main event loop to actually create the instance
 pub(crate) static WIZARD_RESULT: LazyLock<Arc<Mutex<Option<WizardParams>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(None)));
 
@@ -40,6 +35,7 @@ pub enum WizardStep {
 
 #[derive(Debug, Clone)]
 pub struct WizardState {
+    request_epoch: u64,
     pub step: WizardStep,
     pub name_state: TextState<'static>,
     pub versions: LoadState<Vec<GameVersion>>,
@@ -54,6 +50,7 @@ pub struct WizardState {
 impl Default for WizardState {
     fn default() -> Self {
         Self {
+            request_epoch: 0,
             step: WizardStep::Name,
             name_state: TextState::new().with_focus(FocusState::Focused),
             versions: LoadState::Idle,
@@ -69,19 +66,13 @@ impl Default for WizardState {
 
 impl WizardState {
     pub fn reset(&mut self) {
+        let next_epoch = self.request_epoch.wrapping_add(1);
         *self = WizardState::default();
+        self.request_epoch = next_epoch;
     }
 
     pub fn selected_version(&self) -> Option<&GameVersion> {
-        if let LoadState::Loaded(ref versions) = self.versions {
-            let visible: Vec<_> = versions
-                .iter()
-                .filter(|v| self.show_snapshots || v.stable)
-                .collect();
-            visible.get(self.version_idx).copied()
-        } else {
-            None
-        }
+        visible_versions(self).nth(self.version_idx)
     }
 
     pub fn selected_loader(&self) -> ModLoader {
@@ -125,6 +116,13 @@ pub fn take_result() -> Option<WizardParams> {
     }
 }
 
+pub(in crate::tui) fn text_input_active() -> bool {
+    WIZARD_STATE.lock().is_ok_and(|state| {
+        state.step == WizardStep::Name
+            || (state.step == WizardStep::Version && state.version_search.active)
+    })
+}
+
 fn handle_name_key(
     state: &mut WizardState,
     key_event: &KeyEvent,
@@ -163,7 +161,6 @@ fn handle_version_key(
     key_event: &KeyEvent,
     instances_state: &mut instances::State,
 ) {
-    // Search mode: route char input to search query
     if state.version_search.active {
         match key_event.code {
             KeyCode::Esc => {
@@ -176,22 +173,18 @@ fn handle_version_key(
                 clamp_version_index(state);
                 return;
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                // fall through to navigation below
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                // fall through to navigation below
-            }
+            KeyCode::Char('j') | KeyCode::Down => {}
+            KeyCode::Char('k') | KeyCode::Up => {}
             KeyCode::Char(c) => {
                 state.version_search.push(c);
-                state.version_idx = 0; // reset to top of filtered list
+                state.version_idx = 0;
                 return;
             }
             _ => {}
         }
     }
 
-    let visible_count = visible_versions(state).len();
+    let visible_count = visible_versions(state).count();
 
     match key_event.code {
         KeyCode::Esc => {
@@ -350,21 +343,20 @@ fn close_popup(state: &mut WizardState, instances_state: &mut instances::State) 
     instances_state.show_popup = false;
 }
 
-pub(crate) fn visible_versions(state: &WizardState) -> Vec<GameVersion> {
+pub(crate) fn visible_versions(state: &WizardState) -> impl Iterator<Item = &GameVersion> {
     let q = state.version_search.query.to_lowercase();
-    match &state.versions {
-        LoadState::Loaded(versions) => versions
-            .iter()
-            .filter(|v| state.show_snapshots || v.stable)
-            .filter(|v| q.is_empty() || v.id.to_lowercase().contains(&q))
-            .cloned()
-            .collect(),
-        _ => Vec::new(),
-    }
+    let versions = match &state.versions {
+        LoadState::Loaded(versions) => versions.as_slice(),
+        _ => &[],
+    };
+    versions.iter().filter(move |version| {
+        (state.show_snapshots || version.stable)
+            && (q.is_empty() || version.id.to_lowercase().contains(&q))
+    })
 }
 
 pub(crate) fn clamp_version_index(state: &mut WizardState) {
-    let count = visible_versions(state).len();
+    let count = visible_versions(state).count();
     if count == 0 {
         state.version_idx = 0;
     } else if state.version_idx >= count {
@@ -384,20 +376,24 @@ pub(crate) fn clamp_loader_version_index(state: &mut WizardState) {
     }
 }
 
-// only fires on the Idle -> Loading transition to avoid spamming requests.
-// the spawned task writes results back into WIZARD_STATE when done.
+// Spawn only on Idle -> Loading to avoid repeating network requests per frame.
 pub(crate) fn ensure_versions_loaded(state: &mut WizardState) {
     if !matches!(state.versions, LoadState::Idle) {
         return;
     }
 
     state.versions = LoadState::Loading;
+    state.request_epoch = state.request_epoch.wrapping_add(1);
+    let epoch = state.request_epoch;
     let versions_arc = WIZARD_STATE.clone();
     let loader = state.selected_loader();
     tokio::spawn(async move {
         match super::super::version_lists::game_versions(loader).await {
             Ok(versions) => match versions_arc.lock() {
                 Ok(mut s) => {
+                    if s.request_epoch != epoch || !matches!(s.versions, LoadState::Loading) {
+                        return;
+                    }
                     s.versions = LoadState::Loaded(versions);
                     clamp_version_index(&mut s);
                 }
@@ -407,6 +403,9 @@ pub(crate) fn ensure_versions_loaded(state: &mut WizardState) {
             },
             Err(e) => match versions_arc.lock() {
                 Ok(mut s) => {
+                    if s.request_epoch != epoch || !matches!(s.versions, LoadState::Loading) {
+                        return;
+                    }
                     s.versions = LoadState::Error(e.to_string());
                 }
                 Err(lock_error) => {
@@ -427,11 +426,17 @@ pub(crate) fn ensure_loader_versions_loaded(
     }
 
     state.loader_versions = LoadState::Loading;
+    state.request_epoch = state.request_epoch.wrapping_add(1);
+    let epoch = state.request_epoch;
     let versions_arc = WIZARD_STATE.clone();
     tokio::spawn(async move {
         match super::super::version_lists::loader_versions(loader, &game_version).await {
             Ok(versions) => match versions_arc.lock() {
                 Ok(mut s) => {
+                    if s.request_epoch != epoch || !matches!(s.loader_versions, LoadState::Loading)
+                    {
+                        return;
+                    }
                     s.loader_versions = LoadState::Loaded(versions);
                     clamp_loader_version_index(&mut s);
                 }
@@ -441,6 +446,10 @@ pub(crate) fn ensure_loader_versions_loaded(
             },
             Err(e) => match versions_arc.lock() {
                 Ok(mut s) => {
+                    if s.request_epoch != epoch || !matches!(s.loader_versions, LoadState::Loading)
+                    {
+                        return;
+                    }
                     s.loader_versions = LoadState::Error(e.to_string());
                 }
                 Err(lock_error) => {

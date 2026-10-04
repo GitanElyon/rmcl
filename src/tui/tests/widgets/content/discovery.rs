@@ -2,6 +2,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::*;
+
+#[test]
+fn changing_loader_isolates_pending_filter_versions() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    let previous = state.filter_game_versions.clone();
+    state.set_filter_loader(ModLoader::Fabric);
+    *previous.lock().unwrap() = crate::tui::widgets::popups::LoadState::Error("stale".to_owned());
+    assert!(matches!(
+        *state.filter_game_versions.lock().unwrap(),
+        crate::tui::widgets::popups::LoadState::Idle
+    ));
+}
 use crate::tests::TEST_LOCK;
 use chrono::Utc;
 use crossterm::event::KeyModifiers;
@@ -409,6 +421,68 @@ fn any_version_filter_requests_all_project_versions() {
     state.list.list_state.selected = Some(0);
 
     assert!(state.begin_versions().unwrap().all_game_versions);
+}
+
+#[test]
+fn empty_filtered_versions_fall_back_to_the_version_picker() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.filters.game_version = GameVersionFilter::Current;
+    state
+        .list
+        .entries
+        .push(project_entry(project("project"), None));
+    state.list.list_state.selected = Some(0);
+    let request = state.begin_versions().unwrap();
+    assert!(!request.all_game_versions);
+
+    let mut fallback = version("new");
+    fallback.game_versions = vec!["1.21.4".to_owned()];
+    DiscoveryState::push_action_result(
+        &request.pending,
+        DiscoveryActionResult::VersionsUnfiltered {
+            request_id: request.request_id,
+            project_id: request.project_id,
+            result: Ok(vec![fallback]),
+        },
+    );
+    state.drain_pending();
+
+    let popup = state.version_popup.as_ref().unwrap();
+    assert!(!popup.loading);
+    assert!(popup.selecting_minecraft_version);
+    assert_eq!(popup.minecraft_versions, ["1.21.4"]);
+    assert_eq!(popup.versions.len(), 1);
+    assert!(state.select_minecraft_version());
+    let popup = state.version_popup.as_ref().unwrap();
+    assert_eq!(popup.selected_minecraft_version.as_deref(), Some("1.21.4"));
+    assert_eq!(popup.visible_versions().count(), 1);
+}
+
+#[test]
+fn unfiltered_fallback_without_any_versions_keeps_the_empty_state() {
+    let mut state = DiscoveryState::new(ContentKind::Mod);
+    state.filters.game_version = GameVersionFilter::Current;
+    state
+        .list
+        .entries
+        .push(project_entry(project("project"), None));
+    state.list.list_state.selected = Some(0);
+    let request = state.begin_versions().unwrap();
+
+    DiscoveryState::push_action_result(
+        &request.pending,
+        DiscoveryActionResult::VersionsUnfiltered {
+            request_id: request.request_id,
+            project_id: request.project_id,
+            result: Ok(Vec::new()),
+        },
+    );
+    state.drain_pending();
+
+    let popup = state.version_popup.as_ref().unwrap();
+    assert!(!popup.loading);
+    assert!(!popup.selecting_minecraft_version);
+    assert!(popup.versions.is_empty());
 }
 
 #[test]
@@ -1332,6 +1406,7 @@ fn dependency_resolution_opens_the_existing_confirmation() {
                     title: "Project".to_owned(),
                     version: root_version,
                     installed_path: None,
+                    expected_record: None,
                     kind: crate::instance::ContentKind::Mod,
                     destination: std::path::PathBuf::from("mods"),
                     provider_aliases: Vec::new(),
@@ -1389,6 +1464,7 @@ fn confirming_state_with_plan() -> DiscoveryState {
             title: title.to_owned(),
             version,
             installed_path: None,
+            expected_record: None,
             kind: crate::instance::ContentKind::Mod,
             destination: std::path::PathBuf::from("mods"),
             provider_aliases: Vec::new(),
@@ -1428,7 +1504,6 @@ fn confirming_popup_toggles_skip_dependencies_with_s() {
     assert!(handle_key(&KeyEvent::from(KeyCode::Char('s')), &mut state));
     assert!(!state.version_popup.as_ref().unwrap().skip_dependencies);
 
-    // Toggling is blocked while loading or installing.
     state.version_popup.as_mut().unwrap().loading = true;
     assert!(handle_key(&KeyEvent::from(KeyCode::Char('s')), &mut state));
     assert!(!state.version_popup.as_ref().unwrap().skip_dependencies);
@@ -1505,7 +1580,6 @@ fn installed_mode_defaults_to_any_game_version() {
     assert_eq!(state.filters.game_version, GameVersionFilter::Any);
     assert_eq!(state.active_filter_count(), 0);
 
-    // The same Any filter counts as active in discovery mode.
     state.set_local_mode(false);
     state.filters.game_version = GameVersionFilter::Any;
     assert_eq!(state.active_filter_count(), 1);

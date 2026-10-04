@@ -1,6 +1,32 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
+#[tokio::test]
+async fn dropping_the_kill_sender_does_not_request_cancellation_or_repoll_a_completed_receiver() {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let mut receiver = Some(receiver);
+    drop(sender);
+    for _ in 0..2 {
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(5),
+                super::wait_for_kill(&mut receiver)
+            )
+            .await
+            .is_err()
+        );
+    }
+    let (sender, request) = tokio::sync::oneshot::channel();
+    receiver = Some(request);
+    sender.send(()).unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        super::wait_for_kill(&mut receiver),
+    )
+    .await
+    .unwrap();
+}
+
 use super::*;
 
 #[rstest::rstest]
@@ -173,9 +199,7 @@ fn preferred_account_falls_back_to_the_active_account() {
     );
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn launch_commands_receive_instance_environment() {
+fn hook_fixture() -> (tempfile::TempDir, InstanceConfig, LaunchInvocation) {
     use chrono::Utc;
 
     let temp = tempfile::tempdir().unwrap();
@@ -218,9 +242,20 @@ async fn launch_commands_receive_instance_environment() {
         environment: config.environment.clone(),
         working_dir: minecraft.clone(),
     };
+    (temp, config, invocation)
+}
+
+#[tokio::test]
+async fn launch_commands_receive_instance_environment() {
+    let (temp, config, invocation) = hook_fixture();
     let command = LaunchCommand {
         enabled: true,
-        command: "printf '%s|%s' \"$CUSTOM_VALUE\" \"$INST_NAME\" > hook-result".to_owned(),
+        command: if cfg!(windows) {
+            "echo %CUSTOM_VALUE%^|%INST_NAME%>hook-result"
+        } else {
+            "printf '%s|%s' \"$CUSTOM_VALUE\" \"$INST_NAME\" > hook-result"
+        }
+        .to_owned(),
     };
 
     run_launch_command("Pre-launch", &command, &config, &invocation, temp.path())
@@ -228,16 +263,91 @@ async fn launch_commands_receive_instance_environment() {
         .unwrap();
 
     assert_eq!(
-        std::fs::read_to_string(minecraft.join("hook-result")).unwrap(),
+        std::fs::read_to_string(invocation.working_dir.join("hook-result"))
+            .unwrap()
+            .trim_end(),
         "available|Hook Test"
     );
 }
 
-// exercises the early-return branch of migrate_legacy_meta_if_needed.
-// a profile with either arguments or minecraftArguments is not legacy
-// and must produce Ok(None) without touching the network. covers both
-// shapes in one parameterised test so a regression that drops one of
-// the two predicate conditions is caught.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_hooks_preserve_quoted_paths_arguments_redirection_and_expansion() {
+    let (temp, config, invocation) = hook_fixture();
+    let script = invocation.working_dir.join("hook script with spaces.cmd");
+    std::fs::write(&script, "@echo off\r\necho %1\r\necho %CUSTOM_VALUE%\r\necho %INST_NAME%\r\necho stderr value 1>&2\r\n").unwrap();
+    let command = LaunchCommand {
+        enabled: true,
+        command: format!(
+            "\"{}\" \"argument with spaces & |\" > \"result file.txt\" 2> \"error file.txt\"",
+            script.display()
+        ),
+    };
+    run_launch_command("Pre-launch", &command, &config, &invocation, temp.path())
+        .await
+        .unwrap();
+    let stdout = std::fs::read_to_string(invocation.working_dir.join("result file.txt")).unwrap();
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        ["\"argument with spaces & |\"", "available", "Hook Test"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(invocation.working_dir.join("error file.txt"))
+            .unwrap()
+            .trim(),
+        "stderr value"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_hook_terminates_its_descendants() {
+    let (temp, config, invocation) = hook_fixture();
+    let command = LaunchCommand { enabled: true, command: if cfg!(windows) {
+        "powershell.exe -NoProfile -NonInteractive -Command \"[IO.File]::WriteAllText('child-ready','ready'); Start-Sleep -Milliseconds 1200; [IO.File]::WriteAllText('escaped','escaped')\""
+    } else {
+        "(printf ready > child-ready; sleep 1; printf escaped > escaped) & wait"
+    }.to_owned() };
+    {
+        let future = run_launch_command("Pre-launch", &command, &config, &invocation, temp.path());
+        tokio::pin!(future);
+        let ready = async {
+            while !invocation.working_dir.join("child-ready").is_file() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            result = &mut future => panic!("hook ended before cancellation: {result:?}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(15), ready) => result.unwrap(),
+        }
+        // Dropping the future must close the job/kill the group, not only its shell.
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
+    assert!(
+        !invocation.working_dir.join("escaped").exists(),
+        "hook descendant survived cancellation"
+    );
+}
+
+#[tokio::test]
+async fn completed_hooks_can_leave_an_intentional_background_command() {
+    let (temp, config, invocation) = hook_fixture();
+    let command = LaunchCommand { enabled: true, command: if cfg!(windows) {
+        "start \"\" /B powershell.exe -NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 600; [IO.File]::WriteAllText('background-finished','done')\" >nul 2>nul"
+    } else {
+        "(sleep 0.6; printf done > background-finished) >/dev/null 2>&1 &"
+    }.to_owned() };
+    run_launch_command("Pre-launch", &command, &config, &invocation, temp.path())
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while !invocation.working_dir.join("background-finished").is_file() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("completed hook's background command was terminated");
+}
+
 #[rstest::rstest]
 #[case::modern_arguments(true, false)]
 #[case::legacy_minecraft_arguments(false, true)]
@@ -268,9 +378,6 @@ async fn migrate_legacy_meta_skips_when_arguments_present(
     );
 }
 
-// each loader maps to a distinct directory-naming branch. one rstest
-// exercises every variant so a regression that misorders the match
-// arms in installer_version_dir_name is caught.
 #[rstest::rstest]
 #[case::forge(ModLoader::Forge, "1.20.1", "47.2.0", Some("1.20.1-forge-47.2.0"))]
 #[case::neoforge(ModLoader::NeoForge, "1.21.1", "21.1.0", Some("neoforge-21.1.0"))]
@@ -289,11 +396,6 @@ fn installer_version_dir_name_per_loader(
     );
 }
 
-// exercises the modern-profile early-return in
-// migrate_legacy_loader_profile_if_needed. any of inheritsFrom,
-// arguments, minecraftArguments present (or game_arguments absent)
-// means "not legacy" and the function must return Ok(None) without
-// touching the installer JSON path.
 #[tokio::test]
 async fn migrate_legacy_loader_profile_skips_modern_with_inherits_from() {
     use LaunchProfile;
@@ -350,8 +452,6 @@ async fn migrate_legacy_loader_profile_skips_modern_with_inherits_from() {
 async fn migrate_legacy_loader_profile_skips_fabric() {
     // a fresh upstream Fabric profile happens to match the "legacy"
     // shape (no inheritsFrom, no arguments, no minecraftArguments).
-    // make sure the migration helper recognises this is Fabric and
-    // returns Ok(None) instead of erroring with "reinstall Fabric".
     use LaunchProfile;
     use chrono::Utc;
     use tempfile::TempDir;

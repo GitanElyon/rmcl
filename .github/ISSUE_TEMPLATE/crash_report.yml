@@ -18,7 +18,7 @@ body:
         paste relevant log output here. you can find logs at:
 
         - **rmcl logs**: `~/.cache/rmcl/` (per-session files like `rmcl_2026-04-20_12-34-56.log`)
-        - **launch logs**: `~/.local/share/rmcl/instances/{instance}/.minecraft/logs/launches/`
+        - **launch logs**: `~/.local/share/rmcl/instances/{instance}/minecraft/logs/launches/`
 
         you can also view logs in the TUI via the log overlay or use `rmcl log` from the CLI.
       render: text

@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// multimc / prism launcher instance import: mods and configs are bundled
-// in the zip. we install the game + loader normally, then extract the
-// archive contents over it.
-
 use std::path::Path;
 
 use crate::feedback::progress;
@@ -99,6 +95,7 @@ pub async fn execute_import(
     manager: &InstanceManager,
     config: &crate::instance::InstanceConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    crate::instance::manager::validate_name(&config.name)?;
     tracing::info!(
         "Importing MultiMC/Prism pack '{}' as instance '{}'",
         summary.name,
@@ -119,13 +116,10 @@ pub async fn execute_import(
     Ok(())
 }
 
-// extracts everything under .minecraft/ from the archive into the instance dir
 fn extract_mmc_archive(
     archive_path: &Path,
     minecraft_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::io::Read;
-
     progress::set_action("Extracting pack contents...".to_string());
     progress::set_sub_action(String::new());
 
@@ -166,13 +160,20 @@ fn extract_mmc_archive(
                 )
             })?;
 
+        let relative = if relative.as_os_str().is_empty() {
+            std::path::PathBuf::new()
+        } else {
+            std::path::PathBuf::from(super::portable_pack_path(
+                relative.to_str().ok_or("Archive path is not UTF-8")?,
+            )?)
+        };
         if relative.as_os_str().is_empty() || entry_name.ends_with('/') {
-            std::fs::create_dir_all(minecraft_dir.join(relative))?;
+            std::fs::create_dir_all(minecraft_dir.join(&relative))?;
             dirs += 1;
             continue;
         }
 
-        let dest = minecraft_dir.join(relative);
+        let dest = minecraft_dir.join(&relative);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -183,15 +184,14 @@ fn extract_mmc_archive(
             .unwrap_or_default();
         progress::set_sub_action(filename.to_string());
 
-        let mut buf = Vec::new();
-        entry.read_to_end(&mut buf)?;
+        let mut destination = std::fs::File::create(&dest)?;
+        let size = std::io::copy(&mut entry, &mut destination)?;
         tracing::trace!(
             "Extracting MultiMC entry {} to {} ({} bytes)",
             entry_name,
             dest.display(),
-            buf.len()
+            size
         );
-        std::fs::write(&dest, &buf)?;
         extracted += 1;
     }
 
@@ -215,7 +215,8 @@ fn parse_mmc_pack(path: &Path) -> Result<MmcPack, String> {
         .by_name(&entry_name)
         .map_err(|e| format!("Failed to read mmc-pack.json: {e}"))?;
 
-    serde_json::from_reader(entry).map_err(|e| format!("Invalid mmc-pack.json: {e}"))
+    let raw = super::read_pack_manifest(entry)?;
+    serde_json::from_slice(&raw).map_err(|e| format!("Invalid mmc-pack.json: {e}"))
 }
 
 fn instance_name_from_cfg(path: &Path) -> Option<String> {
@@ -225,8 +226,8 @@ fn instance_name_from_cfg(path: &Path) -> Option<String> {
     let entry_name = find_entry(&archive, "instance.cfg")?;
     tracing::trace!("Reading instance name from {}", entry_name);
     let entry = archive.by_name(&entry_name).ok()?;
-
-    let reader = std::io::BufRead::lines(std::io::BufReader::new(entry));
+    let raw = super::read_pack_manifest(entry).ok()?;
+    let reader = std::io::BufRead::lines(std::io::BufReader::new(raw.as_slice()));
     for line in reader.map_while(Result::ok) {
         if let Some(value) = line.strip_prefix("name=") {
             let name = value.trim().to_string();
@@ -239,14 +240,10 @@ fn instance_name_from_cfg(path: &Path) -> Option<String> {
     None
 }
 
-// finds the prefix for the archive: empty for flat zips, "DirName/" for nested
 fn find_archive_prefix(archive: &zip::ZipArchive<std::fs::File>) -> String {
-    for name in archive.file_names() {
-        if name.ends_with("mmc-pack.json") {
-            return name.strip_suffix("mmc-pack.json").unwrap_or("").to_string();
-        }
-    }
-    String::new()
+    find_entry(archive, "mmc-pack.json")
+        .and_then(|name| name.strip_suffix("mmc-pack.json").map(str::to_owned))
+        .unwrap_or_default()
 }
 
 // looks for a file at root or one level deep (some archives nest everything

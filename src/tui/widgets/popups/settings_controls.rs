@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// Reusable interactive controls shared by instance and launcher settings.
-
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -23,8 +21,12 @@ use ratatui::{
 use ratatui_textarea::{CursorMove, TextArea};
 
 use crate::{
-    config::{settings::DEFAULT_RESOLUTION, theme::THEME},
+    config::{
+        settings::{DEFAULT_RESOLUTION, parse_tag_values},
+        theme::THEME,
+    },
     instance::{
+        glfw::{GlfwInstallation, discover_glfw_installations, glfw_version_from_path},
         java::JavaInstallation,
         models::{WindowMode, memory_kib},
     },
@@ -206,6 +208,9 @@ pub(crate) struct JavaPicker {
     cache_path: Option<PathBuf>,
     refresh_started: bool,
     generation: Arc<AtomicU64>,
+    cwd: PathBuf,
+    environment: BTreeMap<String, String>,
+    context_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,12 +230,6 @@ pub(crate) struct GlfwPicker {
 pub(crate) enum GlfwChoice {
     Bundled,
     System(String),
-}
-
-#[derive(Debug, Clone)]
-struct GlfwInstallation {
-    path: PathBuf,
-    version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,13 +299,24 @@ impl JavaPicker {
     }
 
     pub(crate) fn with_auto_path(detected: String) -> Self {
-        Self::with_cache(detected, None)
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let environment = crate::instance::java::merge_environment(
+            &crate::config::SETTINGS.read().defaults.environment,
+            &BTreeMap::new(),
+        );
+        Self::with_cache(detected, None, cwd, environment)
     }
 
-    pub(crate) fn with_cache(detected: String, cache_path: Option<PathBuf>) -> Self {
-        let cached = cache_path
-            .as_deref()
-            .and_then(crate::instance::java::load_installation_cache);
+    pub(crate) fn with_cache(
+        detected: String,
+        cache_path: Option<PathBuf>,
+        cwd: PathBuf,
+        environment: BTreeMap<String, String>,
+    ) -> Self {
+        let cached = cache_path.as_deref().and_then(|path| {
+            crate::instance::java::load_installation_cache_in(path, &cwd, &environment)
+        });
+        let context_key = crate::instance::java::probe_context_key(&cwd, &environment);
         Self {
             load: Arc::new(Mutex::new(
                 cached.map_or(LoadState::Idle, LoadState::Loaded),
@@ -317,6 +327,25 @@ impl JavaPicker {
             cache_path,
             refresh_started: false,
             generation: Arc::new(AtomicU64::new(0)),
+            cwd,
+            environment,
+            context_key,
+        }
+    }
+
+    pub(crate) fn set_context(
+        &mut self,
+        detected: String,
+        cwd: PathBuf,
+        environment: BTreeMap<String, String>,
+    ) {
+        let key = crate::instance::java::probe_context_key(&cwd, &environment);
+        if key != self.context_key || detected != self.detected {
+            self.invalidate_cache();
+            self.detected = detected;
+            self.cwd = cwd;
+            self.environment = environment;
+            self.context_key = key;
         }
     }
 
@@ -344,17 +373,22 @@ impl JavaPicker {
         let refresh_generation = self.generation.load(Ordering::Relaxed);
         let generation = self.generation.clone();
         let selected_paths = [Some(self.detected.clone()), self.current.clone()];
+        let cwd = self.cwd.clone();
+        let environment = self.environment.clone();
         let discover = move || {
-            let mut installations = crate::instance::java::discover_installations();
+            let mut installations =
+                crate::instance::java::discover_installations_in(&cwd, &environment);
             for path in selected_paths.into_iter().flatten() {
                 if installations.iter().any(|installation| {
                     same_executable(&installation.path.to_string_lossy(), &path)
                 }) {
                     continue;
                 }
-                if let Some(installation) =
-                    crate::instance::java::inspect_installation(Path::new(&path))
-                {
+                if let Some(installation) = crate::instance::java::inspect_installation_in(
+                    Path::new(&path),
+                    &cwd,
+                    &environment,
+                ) {
                     installations.push(installation);
                 }
             }
@@ -365,8 +399,12 @@ impl JavaPicker {
                 return;
             }
             if let Some(cache_path) = cache_path
-                && let Err(error) =
-                    crate::instance::java::save_installation_cache(&cache_path, &installations)
+                && let Err(error) = crate::instance::java::save_installation_cache_in(
+                    &cache_path,
+                    &installations,
+                    &cwd,
+                    &environment,
+                )
             {
                 tracing::debug!("Could not cache Java installations: {error}");
             }
@@ -739,121 +777,6 @@ impl Default for GlfwPicker {
     }
 }
 
-pub(crate) fn bundled_glfw_version(meta_dir: &Path, game_version: &str) -> Option<String> {
-    let path = crate::storage::MetadataPaths::new(meta_dir)
-        .versions()
-        .join(game_version)
-        .join("meta.json");
-    let profile: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    profile
-        .get("libraries")?
-        .as_array()?
-        .iter()
-        .filter_map(|library| library.get("name")?.as_str())
-        .find_map(|coordinate| {
-            let mut parts = coordinate.split(':');
-            match (parts.next(), parts.next(), parts.next()) {
-                (Some("org.lwjgl"), Some("lwjgl-glfw"), Some(version)) => Some(version.to_owned()),
-                _ => None,
-            }
-        })
-}
-
-fn discover_glfw_installations() -> Vec<GlfwInstallation> {
-    let mut directories = Vec::<PathBuf>::new();
-    for variable in ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "PATH"] {
-        if let Some(value) = std::env::var_os(variable) {
-            directories.extend(std::env::split_paths(&value));
-        }
-    }
-    directories.extend(
-        [
-            "/usr/lib",
-            "/usr/lib64",
-            "/usr/local/lib",
-            "/lib",
-            "/lib64",
-            "/opt/homebrew/lib",
-            "/opt/local/lib",
-        ]
-        .into_iter()
-        .map(PathBuf::from),
-    );
-
-    let mut nested = Vec::new();
-    for directory in &directories {
-        if let Ok(entries) = std::fs::read_dir(directory) {
-            nested.extend(
-                entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .filter(|path| path.is_dir()),
-            );
-        }
-    }
-    directories.extend(nested);
-
-    let mut seen = BTreeSet::new();
-    let mut installations = Vec::new();
-    for directory in directories {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            continue;
-        };
-        for path in entries.flatten().map(|entry| entry.path()) {
-            if !is_glfw_library(&path) {
-                continue;
-            }
-            let canonical = std::fs::canonicalize(&path).unwrap_or(path);
-            if seen.insert(canonical.clone()) {
-                installations.push(GlfwInstallation {
-                    version: glfw_version_from_path(&canonical),
-                    path: canonical,
-                });
-            }
-        }
-    }
-    installations.sort_by(|left, right| left.path.cmp(&right.path));
-    installations
-}
-
-fn is_glfw_library(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    is_glfw_library_name(name)
-}
-
-fn is_glfw_library_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    let versioned_so = name.strip_prefix("libglfw.so.").is_some_and(|version| {
-        version.split('.').all(|part| {
-            !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
-        })
-    });
-    name == "libglfw.so"
-        || versioned_so
-        || name.starts_with("libglfw.") && name.ends_with(".dylib")
-        || name.starts_with("glfw") && name.ends_with(".dll")
-}
-
-fn glfw_version_from_path(path: &Path) -> Option<String> {
-    let name = path.file_name()?.to_str()?.to_ascii_lowercase();
-    if let Some((_, suffix)) = name.rsplit_once(".so.") {
-        return (!suffix.is_empty()).then(|| suffix.to_owned());
-    }
-    let stem = name
-        .strip_prefix("libglfw.")
-        .and_then(|name| name.strip_suffix(".dylib"))
-        .or_else(|| {
-            name.strip_prefix("glfw")
-                .and_then(|name| name.strip_suffix(".dll"))
-        })?;
-    (!stem.is_empty()).then(|| stem.trim_start_matches(['-', '.']).to_owned())
-}
-
 fn same_executable(left: &str, right: &str) -> bool {
     if left == right {
         return true;
@@ -997,76 +920,6 @@ pub(crate) fn settings_text_area(lines: Vec<String>) -> TextArea<'static> {
     editor
 }
 
-pub(crate) fn parse_tag_values(input: &str) -> Result<Vec<String>, String> {
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Quote {
-        None,
-        Single,
-        Double,
-    }
-
-    let mut values = Vec::new();
-    let mut current = String::new();
-    let mut quote = Quote::None;
-    let mut started = false;
-    let mut characters = input.chars().peekable();
-    while let Some(character) = characters.next() {
-        match (quote, character) {
-            (Quote::None, character) if character.is_whitespace() => {
-                if started {
-                    values.push(std::mem::take(&mut current));
-                    started = false;
-                }
-            }
-            (Quote::None, '\'') => {
-                quote = Quote::Single;
-                started = true;
-            }
-            (Quote::None, '"') => {
-                quote = Quote::Double;
-                started = true;
-            }
-            (Quote::Single, '\'') => quote = Quote::None,
-            (Quote::Double, '"') => quote = Quote::None,
-            (Quote::Double, '\\') if matches!(characters.peek(), Some('"' | '\\')) => {
-                current.push(characters.next().unwrap_or_default());
-                started = true;
-            }
-            (_, character) => {
-                current.push(character);
-                started = true;
-            }
-        }
-    }
-    if quote != Quote::None {
-        return Err("Quoted value is missing its closing quote.".to_owned());
-    }
-    if started {
-        values.push(current);
-    }
-    let mut seen = BTreeSet::new();
-    values.retain(|value| seen.insert(value.clone()));
-    Ok(values)
-}
-
-pub(crate) fn format_tag_values(values: &[String]) -> String {
-    values
-        .iter()
-        .map(|value| {
-            if !value.is_empty()
-                && !value
-                    .chars()
-                    .any(|character| character.is_whitespace() || matches!(character, '\'' | '"'))
-            {
-                value.clone()
-            } else {
-                format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 pub(crate) fn parse_environment(value: &str) -> Result<BTreeMap<String, String>, String> {
     let mut environment = BTreeMap::new();
     for assignment in parse_tag_values(value)? {
@@ -1120,7 +973,7 @@ pub(crate) fn tagged_value_lines(
     let mut spans = prefix;
     let mut used = 0usize;
     for value in values {
-        let badge_width = value.chars().count() + 2;
+        let badge_width = Span::raw(value).width() + 2;
         let separator = usize::from(used > 0);
         if used > 0 && used + separator + badge_width > available {
             lines.push(Line::from(spans));
@@ -1149,22 +1002,7 @@ pub(crate) fn tagged_value_lines(
 }
 
 pub(crate) fn tagged_row_count(values: &[String], width: u16) -> usize {
-    if values.is_empty() {
-        return 1;
-    }
-    let available = width.saturating_sub(20) as usize;
-    let mut rows = 1;
-    let mut used = 0usize;
-    for value in values {
-        let badge_width = value.chars().count() + 2;
-        let separator = usize::from(used > 0);
-        if used > 0 && used + separator + badge_width > available {
-            rows += 1;
-            used = 0;
-        }
-        used += usize::from(used > 0) + badge_width;
-    }
-    rows
+    tagged_value_lines(Vec::new(), false, false, values, "", width).len()
 }
 
 pub(crate) fn auto_label() -> Span<'static> {
@@ -1305,6 +1143,7 @@ pub(crate) fn resolution_items(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::settings::format_tag_values;
 
     #[test]
     fn memory_steps_move_and_clamp() {
@@ -1389,7 +1228,12 @@ mod tests {
         let cache = temp.path().join("cache/java/installations.json");
         std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
         std::fs::write(&cache, "[]").unwrap();
-        let mut picker = JavaPicker::with_cache("/auto/java".to_owned(), Some(cache.clone()));
+        let mut picker = JavaPicker::with_cache(
+            "/auto/java".to_owned(),
+            Some(cache.clone()),
+            temp.path().to_owned(),
+            BTreeMap::new(),
+        );
         *picker.load.lock().unwrap() = LoadState::Loaded(vec![JavaInstallation {
             path: "/cached/java".into(),
             version: Some("21".to_owned()),
@@ -1401,6 +1245,48 @@ mod tests {
         assert!(!cache.exists());
         assert!(!picker.refresh_started);
         assert!(matches!(*picker.load.lock().unwrap(), LoadState::Idle));
+    }
+
+    #[test]
+    fn java_picker_cache_and_workers_are_bound_to_the_captured_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("java");
+        std::fs::write(&path, b"java").unwrap();
+        let cache = temp.path().join("installations.json");
+        let environment = BTreeMap::from([("JAVA_TEST_CONTEXT".to_owned(), "first".to_owned())]);
+        let installations = vec![JavaInstallation {
+            path: path.clone(),
+            version: Some("21".to_owned()),
+        }];
+        crate::instance::java::save_installation_cache_in(
+            &cache,
+            &installations,
+            temp.path(),
+            &environment,
+        )
+        .unwrap();
+        let detected = path.to_string_lossy().into_owned();
+        let mut picker = JavaPicker::with_cache(
+            detected.clone(),
+            Some(cache.clone()),
+            temp.path().to_owned(),
+            environment.clone(),
+        );
+        assert!(
+            matches!(&*picker.load.lock().unwrap(), LoadState::Loaded(found) if *found == installations)
+        );
+        picker.refresh_started = true;
+        let generation = picker.generation.load(Ordering::Relaxed);
+        picker.set_context(detected.clone(), temp.path().to_owned(), environment);
+        assert_eq!(picker.generation.load(Ordering::Relaxed), generation);
+        let changed = BTreeMap::from([("JAVA_TEST_CONTEXT".to_owned(), "second".to_owned())]);
+        picker.set_context(detected, temp.path().join("other"), changed.clone());
+        assert_eq!(picker.generation.load(Ordering::Relaxed), generation + 1);
+        assert!(!picker.refresh_started);
+        assert!(matches!(*picker.load.lock().unwrap(), LoadState::Idle));
+        assert!(!cache.exists());
+        assert_eq!(picker.cwd, temp.path().join("other"));
+        assert_eq!(picker.environment, changed);
     }
 
     #[test]
@@ -1485,7 +1371,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            bundled_glfw_version(temp.path(), "1.21.1").as_deref(),
+            crate::instance::glfw::bundled_glfw_version(temp.path(), "1.21.1").as_deref(),
             Some("3.3.3")
         );
         let mut picker = GlfwPicker::with_bundled_version(Some("3.3.3".to_owned()));
@@ -1494,19 +1380,6 @@ mod tests {
         assert_eq!(
             picker.selection().options[0].badge,
             Some(SettingsPickerBadge::Bundled)
-        );
-    }
-
-    #[test]
-    fn glfw_library_names_are_recognized() {
-        assert!(is_glfw_library_name("libglfw.so.3"));
-        assert!(is_glfw_library_name("libglfw.3.dylib"));
-        assert!(is_glfw_library_name("glfw3.dll"));
-        assert!(!is_glfw_library_name("libglfw.so.backup"));
-        assert!(!is_glfw_library_name("libGL.so"));
-        assert_eq!(
-            glfw_version_from_path(Path::new("/usr/lib/libglfw.so.3.4")).as_deref(),
-            Some("3.4")
         );
     }
 
@@ -1540,10 +1413,10 @@ mod tests {
     }
 
     #[test]
-    fn tag_values_drop_exact_duplicates_without_reordering() {
+    fn tag_values_preserve_repeated_options_and_their_operands() {
         assert_eq!(
-            parse_tag_values("-Xmx2G '-Dlabel=hello world' -Xmx2G").unwrap(),
-            ["-Xmx2G", "-Dlabel=hello world"]
+            parse_tag_values("--add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.util=ALL-UNNAMED").unwrap(),
+            ["--add-opens", "java.base/java.lang=ALL-UNNAMED", "--add-opens", "java.base/java.util=ALL-UNNAMED"]
         );
     }
 
@@ -1562,6 +1435,7 @@ mod tests {
         );
         assert!(parse_environment("=missing").is_err());
         assert!(parse_environment("KEY=one KEY=two").is_err());
+        assert!(parse_environment("KEY=one KEY=one").is_err());
     }
 
     #[test]

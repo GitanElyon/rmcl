@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// modal editor for settings belonging to the selected Minecraft instance.
-
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -18,8 +16,10 @@ use crate::{
     auth::{Account, AccountType},
     config::{
         SETTINGS,
+        settings::{format_tag_values, parse_tag_values},
         theme::{BORDER_STYLE, THEME},
     },
+    instance::glfw::bundled_glfw_version,
     instance::loader::GameVersion,
     instance::models::{
         InstanceConfig, LaunchCommand, ModLoader, memory_kib, normalize_memory_value,
@@ -32,12 +32,12 @@ use crate::{
                 DisplayResolution, GlfwChoice, GlfwPicker, JavaChoice, JavaPicker,
                 ResolutionChoice, ResolutionPickerAction, SettingsPicker, SettingsPickerAction,
                 SettingsPickerBadge, SettingsPickerOption, adjust_memory, auto_label,
-                bundled_glfw_version, bundled_label as bundled_badge, default_label,
-                default_resolution, display_resolutions, environment_labels, format_tag_values,
-                handle_resolution_picker_key, handle_text_area_input, is_default_resolution,
-                parse_environment, parse_tag_values, render_memory_gauge, render_settings_picker,
-                resolution_choices, resolution_items, settings_text_area, tagged_row_count,
-                tagged_value_lines, toggle_window_mode, window_mode_title,
+                bundled_label as bundled_badge, default_label, default_resolution,
+                display_resolutions, environment_labels, handle_resolution_picker_key,
+                handle_text_area_input, is_default_resolution, parse_environment,
+                render_memory_gauge, render_settings_picker, resolution_choices, resolution_items,
+                settings_text_area, tagged_row_count, tagged_value_lines, toggle_window_mode,
+                window_mode_title,
             },
         },
         search::SearchState,
@@ -94,6 +94,7 @@ pub struct State {
     account_picker: SettingsPicker,
     accounts: Vec<Account>,
     meta_dir: std::path::PathBuf,
+    minecraft_dir: std::path::PathBuf,
     display_resolutions: Vec<DisplayResolution>,
     runtime_update_pending: bool,
     save_retry_pending: bool,
@@ -113,9 +114,16 @@ pub enum Action {
 
 impl State {
     pub fn new(instance: &InstanceConfig, meta_dir: &std::path::Path) -> Self {
+        let minecraft_dir = crate::config::SETTINGS
+            .read()
+            .paths
+            .resolve_instances_dir()
+            .join(&instance.name)
+            .join(crate::storage::MINECRAFT_DIR_NAME);
         Self::with_accounts(
             instance,
             meta_dir,
+            &minecraft_dir,
             crate::auth::AccountStore::load().accounts,
         )
     }
@@ -123,16 +131,24 @@ impl State {
     pub fn with_accounts(
         instance: &InstanceConfig,
         meta_dir: &std::path::Path,
+        minecraft_dir: &std::path::Path,
         accounts: Vec<Account>,
     ) -> Self {
-        let auto_java_path = SETTINGS
-            .read()
-            .paths
-            .effective_java_path()
-            .map(str::to_owned)
-            .unwrap_or_else(crate::instance::java::detect_java_path);
+        let settings = SETTINGS.read();
+        let cwd = minecraft_dir.to_owned();
+        let environment = crate::instance::java::merge_environment(
+            &settings.defaults.environment,
+            &instance.environment,
+        );
+        let auto_java_path = crate::instance::java::resolve_java_path_in(
+            settings.paths.effective_java_path(),
+            &cwd,
+            &environment,
+        );
+        drop(settings);
         let java_cache = crate::storage::MetadataPaths::new(meta_dir).java_installations();
-        let mut java_picker = JavaPicker::with_cache(auto_java_path, Some(java_cache));
+        let mut java_picker =
+            JavaPicker::with_cache(auto_java_path, Some(java_cache), cwd, environment);
         java_picker.set_current(instance.java_path.as_deref());
         let desktop = crate::instance::desktop::exists(&instance.name);
         Self {
@@ -160,6 +176,7 @@ impl State {
             account_picker: SettingsPicker::default(),
             accounts,
             meta_dir: meta_dir.to_path_buf(),
+            minecraft_dir: minecraft_dir.to_owned(),
             display_resolutions: display_resolutions(),
             runtime_update_pending: false,
             save_retry_pending: false,
@@ -407,6 +424,7 @@ impl State {
                     .unwrap_or(0);
             }
             ChoicePicker::Java => {
+                self.refresh_java_context();
                 self.java_picker.open(self.draft.java_path.as_deref());
                 self.java_picker.initialize();
             }
@@ -772,6 +790,7 @@ impl State {
     }
 
     fn toggle_auto_java(&mut self) -> Action {
+        self.refresh_java_context();
         let Some(current) = self.draft.java_path.as_deref() else {
             self.draft.java_path = Some(self.java_picker.detected_path().to_owned());
             self.error = None;
@@ -939,7 +958,10 @@ impl State {
                 Err(error) => invalid(self, error),
             },
             7 => match parse_environment(value) {
-                Ok(environment) => self.draft.environment = environment,
+                Ok(environment) => {
+                    self.draft.environment = environment;
+                    self.refresh_java_context();
+                }
                 Err(error) => invalid(self, error),
             },
             9 if value.is_empty() => {
@@ -964,6 +986,16 @@ impl State {
             14 => self.draft.glfw_path = (!value.is_empty()).then(|| value.to_owned()),
             _ => {}
         }
+    }
+
+    pub(in crate::tui) fn text_input_active(&self) -> bool {
+        !self.runtime_update_pending
+            && self.choice_picker.is_none()
+            && if self.picker.is_some() {
+                self.picker_search.active
+            } else {
+                self.editing.is_some()
+            }
     }
 
     pub fn handle_key(&mut self, key: &KeyEvent) -> Action {
@@ -1108,6 +1140,23 @@ impl State {
 
     pub fn invalidate_java_cache(&mut self) {
         self.java_picker.invalidate_cache();
+        self.refresh_java_context();
+    }
+
+    fn refresh_java_context(&mut self) {
+        let settings = SETTINGS.read();
+        let environment = crate::instance::java::merge_environment(
+            &settings.defaults.environment,
+            &self.draft.environment,
+        );
+        let detected = crate::instance::java::resolve_java_path_in(
+            settings.paths.effective_java_path(),
+            &self.minecraft_dir,
+            &environment,
+        );
+        drop(settings);
+        self.java_picker
+            .set_context(detected, self.minecraft_dir.clone(), environment);
     }
 
     pub fn cancel_runtime_change(&mut self) -> Option<(Box<InstanceConfig>, bool)> {
@@ -1742,6 +1791,79 @@ mod tests {
     use crate::instance::WindowMode;
     use chrono::Utc;
 
+    #[test]
+    fn dispatch_repeats_picker_search_without_snapshot_toggle_or_selection() {
+        use crate::tui::{app::FocusedArea, tests::harness::UiHarness};
+        use crossterm::event::{KeyEventKind, KeyModifiers};
+
+        let mut ui = UiHarness::new();
+        ui.add_instance("Picker Search");
+        let config = ui.app.instances_state.selected_instance().unwrap();
+        let mut state = State::with_accounts(
+            config,
+            &ui.app.instance_manager.meta_dir,
+            &ui.instance_path(&config.name).join("minecraft"),
+            Vec::new(),
+        );
+        state.picker = Some(VersionPicker::Game);
+        state.game_versions = Arc::new(Mutex::new(LoadState::Loaded(vec![GameVersion {
+            id: "1.21.1".to_owned(),
+            stable: true,
+        }])));
+        state.picker_search.activate();
+        ui.app.instance_settings = Some(state);
+        ui.app.focused = FocusedArea::InstanceSettings;
+        assert!(ui.key_event(KeyEvent::new_with_kind(
+            KeyCode::Char('s'),
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat
+        )));
+        let state = ui.app.instance_settings.as_ref().unwrap();
+        assert_eq!(state.picker_search.query, "s");
+        assert!(!state.show_snapshots);
+        assert!(!ui.key_event(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat
+        )));
+        assert_eq!(
+            ui.app.instance_settings.as_ref().unwrap().picker,
+            Some(VersionPicker::Game)
+        );
+        assert!(ui.key_event(KeyEvent::new_with_kind(
+            KeyCode::Backspace,
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat
+        )));
+        assert!(
+            ui.app
+                .instance_settings
+                .as_ref()
+                .unwrap()
+                .picker_search
+                .query
+                .is_empty()
+        );
+        ui.key(KeyCode::Enter);
+        assert!(
+            !ui.app
+                .instance_settings
+                .as_ref()
+                .unwrap()
+                .picker_search
+                .active
+        );
+        assert!(!ui.key_event(KeyEvent::new_with_kind(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat
+        )));
+        assert_eq!(
+            ui.app.instance_settings.as_ref().unwrap().picker,
+            Some(VersionPicker::Game)
+        );
+    }
+
     fn instance() -> InstanceConfig {
         InstanceConfig {
             name: "test".to_owned(),
@@ -2233,6 +2355,15 @@ mod tests {
         assert!(lines.len() > 1);
         assert_eq!(tagged_row_count(&state.draft.jvm_args, 48), lines.len());
         assert!(lines.iter().any(|line| line.to_string().contains("second")));
+        let values = vec![
+            "界界界界界".to_owned(),
+            "abcdefghijklmn".to_owned(),
+            "e\u{301}".to_owned(),
+        ];
+        let lines = tagged_field_lines(&state, 6, "JVM args", &values, "", 48);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(tagged_row_count(&values, 48), lines.len());
+        assert!(lines.iter().all(|line| line.width() <= 48));
     }
 
     #[test]
@@ -2298,7 +2429,12 @@ mod tests {
             cached_mc_token: None,
             cached_mc_token_expires_at: None,
         }];
-        let mut state = State::with_accounts(&instance(), temp.path(), accounts);
+        let mut state = State::with_accounts(
+            &instance(),
+            temp.path(),
+            &temp.path().join("minecraft"),
+            accounts,
+        );
         state.selected = 10;
         state.begin_edit();
         assert_eq!(state.choice_index, 0);

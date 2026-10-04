@@ -6,10 +6,6 @@ use crate::launch_profile::model::Arguments;
 use crate::launch_profile::rules::{FeatureSet, OsCondition, Rule, RuleAction};
 use std::path::PathBuf;
 
-// owns the path buffers + FeatureSet so each test just calls
-// fx.template_ctx() and fx.rule_ctx() instead of declaring four PathBufs
-// and a RuleContext inline. all tests use linux/x86_64; if a test needs
-// a different OS it sets it explicitly.
 struct Fixture {
     lib: PathBuf,
     nat: PathBuf,
@@ -181,10 +177,6 @@ fn missing_main_class_returns_error() {
 
 #[tokio::test]
 async fn end_to_end_resolve_then_render_modern_forge_shape() {
-    // exercises the full pipeline: load a synthetic vanilla profile
-    // from disk, load a synthetic loader profile with inheritsFrom,
-    // resolve the chain, then render args. catches integration bugs
-    // that unit tests of each layer would miss.
     use crate::launch_profile::resolve;
     use tempfile::TempDir;
 
@@ -239,12 +231,10 @@ async fn end_to_end_resolve_then_render_modern_forge_shape() {
     let fx = Fixture::new();
     let rendered = render_args(&merged, &fx.rule_ctx(), &fx.template_ctx()).unwrap();
 
-    // child main_class wins after merge
     assert_eq!(
         rendered.main_class,
         "cpw.mods.bootstraplauncher.BootstrapLauncher"
     );
-    // game args: parent first then child
     assert_eq!(
         rendered.game,
         vec![
@@ -256,7 +246,6 @@ async fn end_to_end_resolve_then_render_modern_forge_shape() {
             "forge_client"
         ]
     );
-    // jvm args: parent first then child
     assert_eq!(
         rendered.jvm,
         vec![

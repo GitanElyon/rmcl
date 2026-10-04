@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -82,6 +83,24 @@ pub struct BulkUpdatePlan {
 pub static PENDING_UPDATE_SNAPSHOTS: LazyLock<Arc<Mutex<Vec<PendingUpdateSnapshot>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
 
+struct RunningCheck {
+    instance: InstanceConfig,
+    inventory: Vec<ProviderProject>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl RunningCheck {
+    fn matches(&self, instance: &InstanceConfig, manifest: &ContentManifest) -> bool {
+        self.instance.created == instance.created
+            && self.instance.game_version == instance.game_version
+            && self.instance.loader == instance.loader
+            && self.inventory == resolved_inventory(manifest)
+    }
+}
+
+static RUNNING_CHECKS: LazyLock<Mutex<HashMap<std::path::PathBuf, RunningCheck>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 impl UpdateSnapshot {
     pub fn load(path: &std::path::Path) -> Option<Self> {
         std::fs::read(path)
@@ -109,17 +128,6 @@ impl UpdateSnapshot {
                 >= RECHECK_AFTER_SECONDS
     }
 
-    /// Keeps known updates for entries whose check failed this round so a flaky
-    /// network or a rate limited provider does not drop labels that were correct.
-    fn carry_over(&mut self, previous: &Self) {
-        for failure in &self.failures {
-            if let Some(update) = previous.update_for(&failure.installed) {
-                self.updates.push(update.clone());
-            }
-        }
-        sort_updates(&mut self.updates);
-    }
-
     pub fn update_for(&self, installed: &ProviderProject) -> Option<&AvailableUpdate> {
         self.updates.iter().find(|update| {
             update.installed.provider == installed.provider
@@ -129,31 +137,167 @@ impl UpdateSnapshot {
     }
 }
 
-pub fn spawn(instance: InstanceConfig, manifest: ContentManifest, path: std::path::PathBuf) {
-    tokio::spawn(async move {
-        let previous =
-            UpdateSnapshot::load(&path).filter(|previous| previous.applies_to(&instance));
-        let mut snapshot = scan(&instance, &manifest).await;
-        if let Some(previous) = previous {
-            snapshot.carry_over(&previous);
+pub fn spawn(
+    instance: InstanceConfig,
+    manifest: ContentManifest,
+    path: std::path::PathBuf,
+    priority: Vec<ProviderProject>,
+    previous: Option<UpdateSnapshot>,
+) {
+    spawn_with_registry(
+        instance,
+        manifest,
+        path,
+        priority,
+        previous,
+        Arc::new(super::provider::ProviderRegistry::configured(
+            crate::net::HttpClient::new(),
+        )),
+    );
+}
+
+pub(crate) fn is_running(
+    instance: &InstanceConfig,
+    manifest: &ContentManifest,
+    path: &std::path::Path,
+) -> bool {
+    RUNNING_CHECKS.lock().is_ok_and(|checks| {
+        checks
+            .get(path)
+            .is_some_and(|check| !check.task.is_finished() && check.matches(instance, manifest))
+    })
+}
+
+pub(crate) fn cancel(path: Option<&std::path::Path>) {
+    if let Ok(mut checks) = RUNNING_CHECKS.lock() {
+        checks.retain(|check_path, check| {
+            if path.is_none_or(|path| path == check_path) {
+                check.task.abort();
+                if let Ok(mut pending) = PENDING_UPDATE_SNAPSHOTS.lock() {
+                    pending.retain(|pending| {
+                        pending.instance_name != check.instance.name
+                            || pending.instance_created != check.instance.created
+                    });
+                }
+                false
+            } else {
+                true
+            }
+        });
+    }
+}
+
+pub(crate) fn spawn_with_registry(
+    instance: InstanceConfig,
+    manifest: ContentManifest,
+    path: std::path::PathBuf,
+    priority: Vec<ProviderProject>,
+    previous: Option<UpdateSnapshot>,
+    registry: Arc<super::provider::ProviderRegistry>,
+) -> bool {
+    let Ok(mut checks) = RUNNING_CHECKS.lock() else {
+        return false;
+    };
+    if let Some(check) = checks.get(&path) {
+        if !check.task.is_finished() && check.matches(&instance, &manifest) {
+            return false;
         }
-        if let Ok(bytes) = serde_json::to_vec_pretty(&snapshot)
-            && let Err(error) = crate::storage::write_atomic(&path, &bytes)
-        {
-            tracing::debug!("Could not cache content update snapshot: {error}");
-        }
-        if let Ok(mut pending) = PENDING_UPDATE_SNAPSHOTS.lock() {
-            pending.push(PendingUpdateSnapshot {
-                instance_name: instance.name,
-                instance_created: instance.created,
-                snapshot,
-            });
-            crate::feedback::request_redraw();
-        }
+        check.task.abort();
+    }
+    let check_path = path.clone();
+    let check_instance = instance.clone();
+    let inventory = resolved_inventory(&manifest);
+    let task = tokio::spawn(async move {
+        let previous = previous
+            .or_else(|| UpdateSnapshot::load(&path))
+            .filter(|previous| previous.applies_to(&instance));
+        let snapshot = scan_with_registry(
+            &instance,
+            &manifest,
+            &priority,
+            registry,
+            previous.as_ref(),
+            |snapshot| publish_current_snapshot(&instance, snapshot.clone(), &path, false),
+        )
+        .await;
+        publish_current_snapshot(&instance, snapshot, &path, true);
     });
+    checks.insert(
+        check_path,
+        RunningCheck {
+            instance: check_instance,
+            inventory,
+            task,
+        },
+    );
+    true
+}
+
+fn publish_current_snapshot(
+    instance: &InstanceConfig,
+    snapshot: UpdateSnapshot,
+    path: &std::path::Path,
+    complete: bool,
+) {
+    let Ok(checks) = RUNNING_CHECKS.lock() else {
+        return;
+    };
+    if checks
+        .get(path)
+        .is_none_or(|check| check.task.id() != tokio::task::id())
+    {
+        return;
+    }
+    // Hold the check registry through persistence and publication so a replaced
+    // worker cannot overwrite its successor's snapshot.
+    if complete
+        && let Ok(bytes) = serde_json::to_vec_pretty(&snapshot)
+        && let Err(error) = crate::storage::write_atomic(path, &bytes)
+    {
+        tracing::debug!("Could not cache content update snapshot: {error}");
+    }
+    publish_snapshot(instance, snapshot);
+}
+
+fn publish_snapshot(instance: &InstanceConfig, snapshot: UpdateSnapshot) {
+    if let Ok(mut pending) = PENDING_UPDATE_SNAPSHOTS.lock() {
+        pending.retain(|pending| {
+            pending.instance_name != instance.name
+                || pending.instance_created != instance.created
+                || pending.snapshot.game_version != snapshot.game_version
+                || pending.snapshot.loader != snapshot.loader
+        });
+        pending.push(PendingUpdateSnapshot {
+            instance_name: instance.name.clone(),
+            instance_created: instance.created,
+            snapshot,
+        });
+        crate::feedback::request_redraw();
+    }
 }
 
 pub async fn scan(instance: &InstanceConfig, manifest: &ContentManifest) -> UpdateSnapshot {
+    scan_with_registry(
+        instance,
+        manifest,
+        &[],
+        Arc::new(super::provider::ProviderRegistry::configured(
+            crate::net::HttpClient::new(),
+        )),
+        None,
+        |_| {},
+    )
+    .await
+}
+
+pub(super) async fn scan_with_registry(
+    instance: &InstanceConfig,
+    manifest: &ContentManifest,
+    priority: &[ProviderProject],
+    registry: Arc<super::provider::ProviderRegistry>,
+    previous: Option<&UpdateSnapshot>,
+    mut publish: impl FnMut(&UpdateSnapshot),
+) -> UpdateSnapshot {
     let mut projects = manifest
         .files
         .iter()
@@ -176,92 +320,125 @@ pub async fn scan(instance: &InstanceConfig, manifest: &ContentManifest) -> Upda
             && left.0.project_id == right.0.project_id
             && left.0.version_id == right.0.version_id
     });
-    let inventory = projects
+    let inventory = resolved_inventory(manifest);
+    let priority = priority
         .iter()
-        .map(|(project, _)| project.clone())
-        .collect();
-
-    let slots = Arc::new(tokio::sync::Semaphore::new(8));
-    // one registry (and therefore one pooled http client) for the whole scan
-    let registry = Arc::new(
-        crate::instance::content::provider::ProviderRegistry::configured(
-            crate::net::HttpClient::new(),
-        ),
-    );
-    let mut tasks = tokio::task::JoinSet::new();
-    for (installed, kind) in projects {
-        let slots = slots.clone();
-        let registry = registry.clone();
-        let game_version = instance.game_version.clone();
-        let loader = instance.loader;
-        tasks.spawn(async move {
-            let result = async {
-                let _permit = slots
-                    .acquire_owned()
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let provider = registry.get(&installed.provider).ok_or_else(|| {
-                    format!("{} content provider is unavailable", installed.provider)
-                })?;
-                let versions = provider
-                    .compatible_versions(&installed.project_id, kind, &game_version, loader)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let Some(newest) = crate::instance::content::provider::newest_version(&versions)
-                else {
-                    return Ok(None);
-                };
-                // a modpack pins files that are often not tagged for the exact
-                // game version of the instance, so the installed version can be
-                // missing from the compatible list. asking the provider for it
-                // directly is the only way to tell "up to date" from "unknown".
-                let current = match versions
+        .enumerate()
+        .rev()
+        .map(|(index, project)| {
+            (
+                (&project.provider, &project.project_id, &project.version_id),
+                index,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    projects.sort_by_key(|(project, _)| {
+        priority
+            .get(&(&project.provider, &project.project_id, &project.version_id))
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    let mut snapshot = UpdateSnapshot {
+        game_version: instance.game_version.clone(),
+        loader: instance.loader,
+        inventory,
+        checked_at: 0,
+        updates: previous
+            .into_iter()
+            .flat_map(|previous| previous.updates.iter())
+            .filter(|update| {
+                projects
                     .iter()
-                    .find(|version| version.id == installed.version_id)
-                {
-                    Some(current) => current.clone(),
-                    None => provider
-                        .version(&installed.version_id)
-                        .await
-                        .map_err(|error| error.to_string())?,
-                };
-                let target = crate::instance::content::provider::is_newer(newest, &current)
-                    .then(|| newest.clone());
-                Ok::<_, String>(target.map(|target| (Some(current), target)))
-            }
-            .await;
-            (installed, kind, result)
-        });
+                    .any(|(installed, _)| installed == &update.installed)
+            })
+            .cloned()
+            .collect(),
+        failures: Vec::new(),
+    };
+    if projects.is_empty() {
+        snapshot.checked_at = chrono::Utc::now().timestamp();
+        return snapshot;
     }
-
-    let mut updates = Vec::new();
-    let mut failures = Vec::new();
-    while let Some(result) = tasks.join_next().await {
+    let total = projects.len() as u64;
+    let progress = crate::feedback::progress::ProgressTask::start("Checking content updates");
+    progress.set_progress(0, total);
+    let mut completed = 0;
+    let mut projects = projects.into_iter();
+    let mut tasks = tokio::task::JoinSet::new();
+    loop {
+        while tasks.len() < 8 {
+            let Some((installed, kind)) = projects.next() else {
+                break;
+            };
+            let registry = registry.clone();
+            let game_version = instance.game_version.clone();
+            let loader = instance.loader;
+            tasks.spawn(async move {
+                let result = async {
+                    let provider = registry.get(&installed.provider).ok_or_else(|| {
+                        format!("{} content provider is unavailable", installed.provider)
+                    })?;
+                    let versions = provider
+                        .compatible_versions(&installed.project_id, kind, &game_version, loader)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let Some(newest) =
+                        crate::instance::content::provider::newest_version(&versions)
+                    else {
+                        return Ok(None);
+                    };
+                    // Packs can pin versions omitted from the compatible list.
+                    let current = match versions
+                        .iter()
+                        .find(|version| version.id == installed.version_id)
+                    {
+                        Some(current) => current.clone(),
+                        None => provider
+                            .version(&installed.version_id)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    };
+                    let target =
+                        super::provider::is_newer(newest, &current).then(|| newest.clone());
+                    Ok::<_, String>(target.map(|target| (Some(current), target)))
+                }
+                .await;
+                (installed, kind, result)
+            });
+        }
+        let Some(result) = tasks.join_next().await else {
+            break;
+        };
+        if let Ok((installed, _, Ok(_))) = &result {
+            snapshot
+                .updates
+                .retain(|update| &update.installed != installed);
+        }
         match result {
-            Ok((installed, kind, Ok(Some((current, target))))) => updates.push(AvailableUpdate {
-                installed,
-                current,
-                target,
-                kind,
-            }),
+            Ok((installed, kind, Ok(Some((current, target))))) => {
+                snapshot.updates.push(AvailableUpdate {
+                    installed,
+                    current,
+                    target,
+                    kind,
+                })
+            }
             Ok((_, _, Ok(None))) => {}
-            Ok((installed, kind, Err(reason))) => failures.push(UpdateCheckFailure {
+            Ok((installed, kind, Err(reason))) => snapshot.failures.push(UpdateCheckFailure {
                 installed,
                 kind,
                 reason,
             }),
             Err(error) => tracing::debug!("Content update task failed: {error}"),
         }
+        completed += 1;
+        progress.set_sub_action(format!("{completed}/{total} item(s) checked"));
+        progress.set_progress(completed, total);
+        publish(&snapshot);
     }
-    sort_updates(&mut updates);
-    UpdateSnapshot {
-        game_version: instance.game_version.clone(),
-        loader: instance.loader,
-        inventory,
-        checked_at: chrono::Utc::now().timestamp(),
-        updates,
-        failures,
-    }
+    sort_updates(&mut snapshot.updates);
+    snapshot.checked_at = chrono::Utc::now().timestamp();
+    snapshot
 }
 
 fn sort_updates(updates: &mut [AvailableUpdate]) {
@@ -293,83 +470,153 @@ pub async fn plan_bulk(
     manifest: &ContentManifest,
     minecraft_dir: &std::path::Path,
     requests: Vec<UpdateRequest>,
-    mut conflicts: Vec<UpdateConflict>,
+    conflicts: Vec<UpdateConflict>,
+    progress: Option<&crate::feedback::progress::ProgressTaskHandle>,
 ) -> BulkUpdatePlan {
     let registry = crate::instance::content::provider::ProviderRegistry::configured(
         crate::net::HttpClient::new(),
     );
-    let projected_manifest = project_updates(manifest, minecraft_dir, &requests);
-    let mut accepted = Vec::new();
-    let mut roots = Vec::new();
-    for request in requests {
-        let root = InstallRoot {
-            provider: request.update.installed.provider.clone(),
-            project_id: request.update.installed.project_id.clone(),
-            title: request.title.clone(),
-            version: request.update.target.clone(),
-            installed_path: Some(request.installed_path.clone()),
-            kind: request.update.kind,
-            target_world: request.target_world.clone(),
-            force_reinstall: false,
-        };
-        let mut resolution_manifest = projected_manifest.clone();
-        if let Ok(relative_path) = request.installed_path.strip_prefix(minecraft_dir)
-            && let Some(current) = manifest.record(relative_path)
-            && let Some(projected) = resolution_manifest
-                .files
-                .iter_mut()
-                .find(|record| record.relative_path == relative_path)
+    plan_bulk_with_registry(
+        &registry,
+        instance,
+        manifest,
+        minecraft_dir,
+        requests,
+        conflicts,
+        progress,
+    )
+    .await
+}
+
+pub(super) async fn plan_bulk_with_registry(
+    registry: &super::provider::ProviderRegistry,
+    instance: &InstanceConfig,
+    manifest: &ContentManifest,
+    minecraft_dir: &std::path::Path,
+    mut requests: Vec<UpdateRequest>,
+    mut conflicts: Vec<UpdateConflict>,
+    progress: Option<&crate::feedback::progress::ProgressTaskHandle>,
+) -> BulkUpdatePlan {
+    loop {
+        let request_count = requests.len();
+        if let Some(progress) = progress
+            && request_count > 0
         {
-            projected.resolution = current.resolution.clone();
+            progress.set_progress(0, request_count as u64);
         }
-        let plan = match super::dependencies::resolve(
-            &registry,
-            &resolution_manifest,
-            minecraft_dir,
-            instance,
-            root,
-        )
-        .await
-        {
-            Ok(plan) => plan,
-            Err(error) => {
-                conflicts.push(UpdateConflict {
-                    title: request.title,
-                    installed_path: request.installed_path,
-                    reason: error.to_string(),
-                });
-                continue;
-            }
-        };
-        let mut proposed = accepted.clone();
-        proposed.push(plan.clone());
-        if let Err(error) = super::dependencies::merge(proposed) {
-            conflicts.push(UpdateConflict {
-                title: request.title,
-                installed_path: request.installed_path,
-                reason: error.to_string(),
-            });
-            continue;
-        }
-        roots.push(PlannedRootUpdate {
-            title: request.title,
-            installed_path: request.installed_path,
-            current_version: request.update.current.as_ref().map_or_else(
-                || request.update.installed.version_id.clone(),
-                |version| version.version_number.clone(),
-            ),
-            target: request.update.target,
-        });
-        accepted.push(plan);
-    }
-    BulkUpdatePlan {
-        dependency_plan: super::dependencies::merge(accepted).unwrap_or(DependencyPlan {
+        let mut completed = 0;
+        let projected_manifest = project_updates(manifest, minecraft_dir, &requests);
+        let mut accepted = Vec::new();
+        let mut survivors = Vec::new();
+        let mut dependency_plan = DependencyPlan {
             items: Vec::new(),
             root_count: 0,
             optional_dependencies: 0,
-        }),
-        roots,
-        conflicts,
+        };
+        for request in requests {
+            if let Some(progress) = progress {
+                progress.set_sub_action(format!(
+                    "Checking {} ({}/{request_count})",
+                    request.title,
+                    completed + 1
+                ));
+            }
+            let root = InstallRoot {
+                provider: request.update.installed.provider.clone(),
+                project_id: request.update.installed.project_id.clone(),
+                title: request.title.clone(),
+                version: request.update.target.clone(),
+                installed_path: Some(request.installed_path.clone()),
+                kind: request.update.kind,
+                target_world: request.target_world.clone(),
+                force_reinstall: false,
+            };
+            let mut resolution_manifest = projected_manifest.clone();
+            if let Ok(relative_path) = request.installed_path.strip_prefix(minecraft_dir)
+                && let Some(current) = manifest.record(relative_path)
+                && let Some(projected) = resolution_manifest
+                    .files
+                    .iter_mut()
+                    .find(|record| record.relative_path == relative_path)
+            {
+                *projected = current.clone();
+            }
+            let mut plan = match super::dependencies::resolve(
+                registry,
+                &resolution_manifest,
+                minecraft_dir,
+                instance,
+                root,
+            )
+            .await
+            {
+                Ok(plan) => plan,
+                Err(error) => {
+                    conflicts.push(UpdateConflict {
+                        title: request.title,
+                        installed_path: request.installed_path,
+                        reason: error.to_string(),
+                    });
+                    completed += 1;
+                    if let Some(progress) = progress {
+                        progress.set_progress(completed, request_count as u64);
+                    }
+                    continue;
+                }
+            };
+            for item in &mut plan.items {
+                item.expected_record = item
+                    .installed_path
+                    .as_ref()
+                    .and_then(|path| path.strip_prefix(minecraft_dir).ok())
+                    .and_then(|relative| manifest.record(relative))
+                    .cloned();
+            }
+            let mut proposed = accepted.clone();
+            proposed.push(plan.clone());
+            match super::dependencies::merge(proposed) {
+                Ok(merged) => dependency_plan = merged,
+                Err(error) => {
+                    conflicts.push(UpdateConflict {
+                        title: request.title,
+                        installed_path: request.installed_path,
+                        reason: error.to_string(),
+                    });
+                    completed += 1;
+                    if let Some(progress) = progress {
+                        progress.set_progress(completed, request_count as u64);
+                    }
+                    continue;
+                }
+            }
+            accepted.push(plan);
+            survivors.push(request);
+            completed += 1;
+            if let Some(progress) = progress {
+                progress.set_progress(completed, request_count as u64);
+            }
+        }
+        if survivors.len() != request_count {
+            requests = survivors;
+            continue;
+        }
+        let roots = survivors
+            .into_iter()
+            .map(|request| PlannedRootUpdate {
+                current_version: request.update.current.as_ref().map_or_else(
+                    || request.update.installed.version_id.clone(),
+                    |version| version.version_number.clone(),
+                ),
+                title: request.title,
+                installed_path: request.installed_path,
+                target: request.update.target,
+            })
+            .collect();
+        return BulkUpdatePlan {
+            dependency_plan,
+            roots,
+            conflicts,
+        };
     }
 }
 
@@ -397,6 +644,7 @@ fn project_updates(
                 version_id: request.update.target.id.clone(),
             },
         };
+        record.provider_aliases.clear();
     }
     projected
 }
@@ -498,46 +746,6 @@ mod tests {
             ..snapshot
         };
         assert!(expired.is_stale(&manifest));
-    }
-
-    #[test]
-    fn failed_checks_keep_the_previously_known_update() {
-        let installed = ProviderProject {
-            provider: "modrinth".to_owned(),
-            project_id: "project".to_owned(),
-            version_id: "old".to_owned(),
-        };
-        let previous = UpdateSnapshot {
-            game_version: "1.21.1".to_owned(),
-            loader: ModLoader::Fabric,
-            inventory: vec![installed.clone()],
-            checked_at: 0,
-            updates: vec![AvailableUpdate {
-                installed: installed.clone(),
-                current: Some(version("old")),
-                target: version("new"),
-                kind: ContentKind::Mod,
-            }],
-            failures: Vec::new(),
-        };
-        let mut offline = UpdateSnapshot {
-            updates: Vec::new(),
-            failures: vec![UpdateCheckFailure {
-                installed: installed.clone(),
-                kind: ContentKind::Mod,
-                reason: "request timed out".to_owned(),
-            }],
-            ..previous.clone()
-        };
-
-        offline.carry_over(&previous);
-
-        assert_eq!(
-            offline
-                .update_for(&installed)
-                .map(|update| &update.target.id),
-            Some(&"new".to_owned())
-        );
     }
 
     #[test]

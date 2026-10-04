@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// responsive grid of screenshot thumbnails rendered directly in the terminal.
-// images load lazily on background threads as they scroll into view,
-// and get converted to terminal graphics via ratatui-image protocols.
-
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -15,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::Span,
-    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Paragraph, ScrollbarState},
 };
 use ratatui_image::{Resize, StatefulImage, protocol::StatefulProtocol};
 use unicode_segmentation::UnicodeSegmentation;
@@ -23,8 +19,6 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::config::theme::THEME;
 use crate::instance::screenshots::ScreenshotEntry;
 
-// grid cell sizing constraints in terminal columns.
-// the grid auto-fits columns within these bounds depending on terminal width
 const TARGET_CELL_WIDTH: u16 = 34;
 const MIN_CELL_WIDTH: u16 = 24;
 const MAX_CELL_WIDTH: u16 = 52;
@@ -91,6 +85,8 @@ impl Default for ScreenshotsState {
 
 impl ScreenshotsState {
     pub fn start_load(&mut self, instances_dir: &Path, instance_name: &str) {
+        self.pending_entries = Arc::new(Mutex::new(None));
+        self.pending_images = Arc::new(Mutex::new(Vec::new()));
         self.loading = true;
         self.loaded_for = Some(instance_name.to_string());
         self.entries.clear();
@@ -223,6 +219,7 @@ impl ScreenshotsState {
 
     pub fn remove_path(&mut self, path: &Path) {
         self.entries.retain(|entry| entry.path != path);
+        self.pending_images = Arc::new(Mutex::new(Vec::new()));
         self.protocols.clear();
         self.requested.clear();
 
@@ -293,9 +290,13 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut ScreenshotsState) -> bool {
                 .get(state.selected)
                 .and_then(|index| state.entries.get(*index))
                 && let Some(dir) = entry.path.parent()
-                && let Err(e) = open::that_detached(dir)
+                && let Err(error) = open::that_detached(dir)
             {
-                tracing::error!("Failed to open directory: {}", e);
+                tracing::error!("Failed to open directory: {}", error);
+                crate::feedback::errors::push_message(
+                    tracing::Level::ERROR,
+                    format!("Could not open {}: {error}", dir.display()),
+                );
             }
             true
         }
@@ -303,9 +304,13 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut ScreenshotsState) -> bool {
             if let Some(entry) = filtered
                 .get(state.selected)
                 .and_then(|index| state.entries.get(*index))
-                && let Err(e) = open::that_detached(&entry.path)
+                && let Err(error) = open::that_detached(&entry.path)
             {
-                tracing::error!("Failed to open file: {}", e);
+                tracing::error!("Failed to open file: {}", error);
+                crate::feedback::errors::push_message(
+                    tracing::Level::ERROR,
+                    format!("Could not open {}: {error}", entry.path.display()),
+                );
             }
             true
         }
@@ -373,9 +378,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut ScreenshotsState, is_fo
     let cols = target_cols.clamp(min_cols, max_cols);
     let cell_width = area.width / cols as u16;
 
-    // figure out how tall each thumbnail should be in terminal rows.
-    // need the font's pixel aspect ratio to keep screenshots from
-    // looking stretched since terminal cells aren't square
+    // Terminal cells are not square; use the font's aspect ratio to avoid stretching.
     let (img_w, img_h) = state
         .entries
         .first()
@@ -453,17 +456,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut ScreenshotsState, is_fo
         height: area.height.saturating_sub(2),
     };
     frame.render_stateful_widget(
-        Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("\u{25b2}"))
-            .style(
-                Style::default()
-                    .fg(theme.text_dim())
-                    .add_modifier(Modifier::BOLD),
-            )
-            .thumb_symbol("\u{2551}")
-            .track_symbol(Some(""))
-            .end_symbol(Some("\u{25bc}")),
+        super::scrollbar(theme.text_dim()),
         scrollbar_area,
         &mut state.scrollbar_state,
     );

@@ -4,6 +4,32 @@
 use super::*;
 
 #[test]
+fn minecraft_prefix_comes_from_the_manifest_used_for_import() {
+    use std::io::Write;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let archive_path = tmp.path().join("pack.zip");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive_path).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    zip.start_file("Decoy/mmc-pack.json", options).unwrap();
+    zip.write_all(b"{}").unwrap();
+    zip.start_file("mmc-pack.json", options).unwrap();
+    zip.write_all(br#"{"components":[{"uid":"net.minecraft","version":"1.21"}]}"#)
+        .unwrap();
+    zip.start_file(".minecraft/options.txt", options).unwrap();
+    zip.write_all(b"correct").unwrap();
+    zip.finish().unwrap();
+
+    let destination = tmp.path().join("minecraft");
+    assert_eq!(build_summary(&archive_path).unwrap().override_count, 1);
+    extract_mmc_archive(&archive_path, &destination).unwrap();
+    assert_eq!(
+        std::fs::read(destination.join("options.txt")).unwrap(),
+        b"correct"
+    );
+}
+
+#[test]
 fn parse_mmc_pack_json() {
     let json = r#"{
             "formatVersion": 1,
@@ -39,9 +65,6 @@ fn parse_mmc_pack_vanilla() {
     assert!(pack.loader().0.is_none());
 }
 
-// builds an in-memory mmc-style pack zip and verifies that
-// extract_mmc_archive copies only the .minecraft/ subtree into the
-// destination, preserving relative paths and skipping siblings.
 #[test]
 fn extract_mmc_archive_copies_minecraft_subtree() {
     use std::io::Write;
@@ -51,9 +74,6 @@ fn extract_mmc_archive_copies_minecraft_subtree() {
     let dest = tmp.path().join("instance/.minecraft");
     std::fs::create_dir_all(&dest).unwrap();
 
-    // Pack/ is the prefix; only .minecraft/ entries should land in dest.
-    // mmc-style pack: a root dir "Pack/" wrapping the .minecraft tree
-    // plus a sibling mmc-pack.json that should NOT be extracted.
     {
         let file = std::fs::File::create(&archive_path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
@@ -74,13 +94,11 @@ fn extract_mmc_archive_copies_minecraft_subtree() {
 
     extract_mmc_archive(&archive_path, &dest).expect("extract");
 
-    // .minecraft/ entries must have been copied with their relative paths
     let options = std::fs::read(dest.join("options.txt")).expect("options.txt");
     assert_eq!(options, b"lang:en_us");
     let modjar = std::fs::read(dest.join("mods/test-mod.jar")).expect("mods/test-mod.jar");
     assert_eq!(modjar, b"jar-bytes");
 
-    // and the sibling outside .minecraft/ must not have been copied
     assert!(
         !dest.join("mmc-pack.json").exists(),
         "mmc-pack.json should not land in the instance dir"
@@ -108,4 +126,29 @@ fn extract_mmc_archive_rejects_path_traversal() {
 
     assert!(error.to_string().contains("archive path"));
     assert!(!tmp.path().join("escaped.txt").exists());
+}
+
+#[test]
+fn mmc_extraction_rejects_windows_reserved_components_on_every_platform() {
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    for entry in [
+        "Pack/.minecraft/config/NUL.txt",
+        "Pack/.minecraft/config/file:stream",
+        r"Pack/.minecraft/config\..\..\escaped.txt",
+    ] {
+        let path = temp.path().join("pack.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("Pack/mmc-pack.json", options).unwrap();
+        zip.write_all(b"{}").unwrap();
+        zip.start_file(entry, options).unwrap();
+        zip.write_all(b"unsafe").unwrap();
+        zip.finish().unwrap();
+        assert!(
+            extract_mmc_archive(&path, &temp.path().join("minecraft")).is_err(),
+            "{entry}"
+        );
+        assert!(!temp.path().join("escaped.txt").exists());
+    }
 }

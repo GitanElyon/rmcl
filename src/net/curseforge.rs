@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// curseforge api client. responses are mapped into the same app-facing
-// project/version types used by discovery, so the tui stays provider-neutral.
-
 use serde::Deserialize;
 
 use crate::instance::{ContentKind, ModLoader};
@@ -21,10 +18,19 @@ const SHADERS_CLASS_ID: u32 = 6552;
 const DATA_PACKS_CLASS_ID: u32 = 6945;
 pub const MODPACKS_CLASS_ID: u32 = 4471;
 
+// Keys supplied for rmcl must not be reused by forks or rebranded applications
+const DEFAULT_API_KEY: &str = "$2a$10$j2eThhfsaLOAJIMwP7RbwO4D/Tp2NUE16LNalqguv04T7I5jGu8H2";
+
 pub fn api_key() -> Option<&'static str> {
-    option_env!("CURSEFORGE_API_KEY")
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
+    select_api_key(option_env!("CURSEFORGE_API_KEY"), DEFAULT_API_KEY)
+}
+
+fn select_api_key(
+    build_key: Option<&'static str>,
+    default_key: &'static str,
+) -> Option<&'static str> {
+    let key = build_key.unwrap_or(default_key).trim();
+    (!key.is_empty()).then_some(key)
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,19 +241,8 @@ async fn get<T: serde::de::DeserializeOwned>(
     api_key: &str,
     url: &str,
 ) -> Result<T, NetError> {
-    let response = client
-        .inner()
-        .get(url)
-        .header("x-api-key", api_key)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        return Err(NetError::StatusError {
-            status: response.status().as_u16(),
-            url: url.to_owned(),
-        });
-    }
-    Ok(response.json().await?)
+    super::request_json_with_retry(url, || client.inner().get(url).header("x-api-key", api_key))
+        .await
 }
 
 async fn post<B: serde::Serialize + ?Sized, T: serde::de::DeserializeOwned>(
@@ -256,20 +251,14 @@ async fn post<B: serde::Serialize + ?Sized, T: serde::de::DeserializeOwned>(
     url: &str,
     body: &B,
 ) -> Result<T, NetError> {
-    let response = client
-        .inner()
-        .post(url)
-        .header("x-api-key", api_key)
-        .json(body)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        return Err(NetError::StatusError {
-            status: response.status().as_u16(),
-            url: url.to_owned(),
-        });
-    }
-    Ok(response.json().await?)
+    super::request_json_with_retry(url, || {
+        client
+            .inner()
+            .post(url)
+            .header("x-api-key", api_key)
+            .json(body)
+    })
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]

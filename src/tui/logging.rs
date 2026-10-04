@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// sets up the tracing subscriber stack: file logging, tui-logger widget, and
-// our custom StatusLayer that feeds WARN/ERROR events into the error toast system.
-// also keeps an in-memory ring buffer of log lines for the log overlay viewer.
-
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -19,12 +15,11 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use std::sync::LazyLock;
 
-use crate::feedback::errors::{self as error_buffer, ErrorEvent};
+use crate::feedback::errors as error_buffer;
 
 const MINECRAFT_LOG_TARGET: &str = "mc_instance";
 const DEFAULT_FILE_FILTER: &str = "warn,rmcl=trace";
 
-// capped at 5000 lines so it doesn't eat all the ram if something goes haywire
 static APP_LOG_LINES: LazyLock<Arc<Mutex<Vec<String>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
 
@@ -32,7 +27,14 @@ pub fn get_app_logs() -> Vec<String> {
     APP_LOG_LINES.lock().map(|l| l.clone()).unwrap_or_default()
 }
 
-fn push_app_log(line: String) {
+#[cfg(test)]
+pub(crate) fn clear_app_logs() {
+    if let Ok(mut lines) = APP_LOG_LINES.lock() {
+        lines.clear();
+    }
+}
+
+pub(crate) fn push_app_log(line: String) {
     if let Ok(mut lines) = APP_LOG_LINES.lock() {
         lines.push(line);
         if lines.len() > 5000 {
@@ -44,10 +46,8 @@ fn push_app_log(line: String) {
 
 // returns a WorkerGuard that must be held alive for the duration of the
 // program, otherwise the file logging thread gets dropped immediately.
-// yes, you will spend 30 minutes debugging "why aren't my logs writing"
-// before you remember this. ask me how i know.
 pub fn init() -> WorkerGuard {
-    let log_dir = match dirs_next::cache_dir() {
+    let log_dir = match dirs::cache_dir() {
         Some(d) => d.join("rmcl"),
         None => std::path::PathBuf::from("./cache"),
     };
@@ -86,11 +86,9 @@ pub fn init() -> WorkerGuard {
                 should_record_app_log(metadata.target(), *metadata.level())
             })),
         )
-        .with(
-            StatusLayer::new(error_buffer::ERROR_EVENTS.clone()).with_filter(filter_fn(
-                |metadata| should_record_app_log(metadata.target(), *metadata.level()),
-            )),
-        )
+        .with(StatusLayer.with_filter(filter_fn(|metadata| {
+            should_record_app_log(metadata.target(), *metadata.level())
+        })))
         .init();
 
     guard
@@ -118,16 +116,7 @@ fn open_log_writer(log_dir: &Path) -> (NonBlocking, WorkerGuard) {
     }
 }
 
-// custom tracing layer that intercepts all log events:
-// - everything gets appended to the in-memory log buffer for the overlay viewer
-// - WARN and ERROR additionally get pushed as error toasts
 struct StatusLayer;
-
-impl StatusLayer {
-    fn new(_events: Arc<Mutex<std::collections::VecDeque<ErrorEvent>>>) -> Self {
-        Self
-    }
-}
 
 impl<S: Subscriber> Layer<S> for StatusLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
@@ -150,12 +139,7 @@ impl<S: Subscriber> Layer<S> for StatusLayer {
         }
 
         if level <= Level::WARN && should_record_app_log(target, level) {
-            error_buffer::push_error(ErrorEvent {
-                id: 0,
-                level,
-                message: visitor.message,
-                pushed_at: std::time::Instant::now(),
-            });
+            error_buffer::push_message(level, visitor.message);
         }
     }
 }

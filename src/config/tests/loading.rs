@@ -4,6 +4,28 @@
 use super::*;
 
 #[test]
+fn saving_settings_removes_deleted_environment_keys_and_keeps_retained_comments() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[defaults.environment]\nKEEP = 'old' # retained\nREMOVE = 'gone'\n[unknown]\nvalue = 1\n",
+    )
+    .unwrap();
+    let mut config = Config::default();
+    config
+        .defaults
+        .environment
+        .insert("KEEP".to_owned(), "new".to_owned());
+    write_config_document(&path, &config).unwrap();
+    let source = std::fs::read_to_string(&path).unwrap();
+    assert!(!source.contains("REMOVE"));
+    assert!(source.contains("# retained"));
+    assert!(source.contains("[unknown]"));
+    assert_eq!(load_config(&path).unwrap().defaults.environment.len(), 1);
+}
+
+#[test]
 fn load_config_from_valid_toml() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.toml");

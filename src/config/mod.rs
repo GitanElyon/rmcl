@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// config loading: reads config.toml from the platform config dir, creates defaults if missing.
-// everything lands in the SETTINGS static so the rest of the app can just grab it.
-
 use config::{Config as ConfigLoader, ConfigError, File};
 use std::fs;
 use std::io;
@@ -17,12 +14,11 @@ pub use settings::Config;
 
 #[must_use]
 pub fn get_config_path() -> PathBuf {
-    dirs_next::config_dir()
+    dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("rmcl")
 }
 
-// seeds the config file from the bundled default on first run
 fn ensure_config_exists() -> PathBuf {
     let config_path = get_config_path().join("config.toml");
     if !config_path.exists() {
@@ -90,7 +86,7 @@ pub(crate) fn upgrade_config_file(path: &std::path::Path) -> io::Result<bool> {
 }
 
 pub(crate) fn migrate_legacy_data_paths(path: &std::path::Path) -> io::Result<bool> {
-    let Some(data_dir) = dirs_next::data_dir() else {
+    let Some(data_dir) = dirs::data_dir() else {
         return Ok(false);
     };
     migrate_legacy_data_paths_from(path, &data_dir)
@@ -255,6 +251,13 @@ pub static SETTINGS: LazyLock<ConfigStore> = LazyLock::new(|| {
 
 fn write_config_document(path: &std::path::Path, config: &Config) -> io::Result<()> {
     write_merged_toml_document(path, config, |document| {
+        if let Some(environment) = document
+            .get_mut("defaults")
+            .and_then(|defaults| defaults.get_mut("environment"))
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            environment.retain(|key, _| config.defaults.environment.contains_key(key));
+        }
         if config.paths.java_path.is_none()
             && let Some(paths) = document
                 .get_mut("paths")

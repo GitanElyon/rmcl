@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// theme resolution: loads theme.toml, picks a base theme (builtin or custom file),
-// then layers user color overrides on top. supports loading .toml themes from the
-// config/theme/ directory or by absolute path.
-
 use std::path::Path;
 use std::sync::{Arc, LazyLock, RwLock};
 
@@ -101,15 +97,17 @@ fn ensure_theme_exists(path: &Path) {
     let _ = std::fs::write(path, include_str!("../../assets/theme.toml"));
 }
 
-// start from a base theme, then override individual colors if the user specified any
-fn resolve_app_theme(config: &ThemeConfig) -> Box<dyn Theme> {
-    let base = load_base_theme(&config.theme);
+fn resolve_app_theme(config: &ThemeConfig) -> std::io::Result<Box<dyn Theme>> {
+    let base = load_base_theme(&config.theme)?;
+    if ratatui_themekit::no_color_active() {
+        return Ok(resolve_theme("catppuccin"));
+    }
 
     let Some(overrides) = &config.custom else {
-        return base;
+        return Ok(base);
     };
 
-    Box::new(CustomTheme {
+    Ok(Box::new(CustomTheme {
         name: format!("{} (customized)", base.name()),
         id: base.id().to_owned(),
         accent: overrides.accent.unwrap_or_else(|| base.accent()),
@@ -131,11 +129,10 @@ fn resolve_app_theme(config: &ThemeConfig) -> Box<dyn Theme> {
         border: overrides.border.unwrap_or_else(|| base.border()),
         surface: overrides.surface.unwrap_or_else(|| base.surface()),
         background: overrides.background.unwrap_or_else(|| base.background()),
-    })
+    }))
 }
 
-// tries to find the theme: absolute path > config/theme/<name> > config/theme/<name>.toml > builtin
-fn load_base_theme(name: &str) -> Box<dyn Theme> {
+fn load_base_theme(name: &str) -> std::io::Result<Box<dyn Theme>> {
     let path = if Path::new(name).is_absolute() {
         Some(std::path::PathBuf::from(name))
     } else {
@@ -153,20 +150,27 @@ fn load_base_theme(name: &str) -> Box<dyn Theme> {
         }
     };
 
-    if let Some(path) = path
-        && let Ok(content) = std::fs::read_to_string(&path)
-    {
-        match toml::from_str::<CustomTheme>(&content) {
-            Ok(custom) => return Box::new(custom),
-            Err(e) => tracing::warn!(
-                "Failed to parse theme file {}: {e}. Theme files need top-level \
-                 name, id and accent keys (not nested under [theme]).",
-                path.display()
-            ),
-        }
+    if path.is_none() && ratatui_themekit::available_theme_ids().contains(&name) {
+        return Ok(resolve_theme(name));
     }
-
-    resolve_theme(name)
+    let path = path.unwrap_or_else(|| {
+        super::get_config_path()
+            .join("theme")
+            .join(format!("{name}.toml"))
+    });
+    let content = std::fs::read_to_string(&path).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("failed to load theme {}: {error}", path.display()),
+        )
+    })?;
+    let custom = toml::from_str::<CustomTheme>(&content).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid theme {}: {error}", path.display()),
+        )
+    })?;
+    Ok(Box::new(custom))
 }
 
 pub struct ThemeStore(RwLock<Arc<dyn Theme>>);
@@ -221,7 +225,11 @@ pub static THEME: LazyLock<ThemeStore> = LazyLock::new(|| {
     let config = THEME_CONFIG
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    ThemeStore(RwLock::new(Arc::from(resolve_app_theme(&config))))
+    let theme = resolve_app_theme(&config).unwrap_or_else(|error| {
+        tracing::error!("Could not load theme: {error}");
+        resolve_theme("catppuccin")
+    });
+    ThemeStore(RwLock::new(Arc::from(theme)))
 });
 
 pub static BORDER_STYLE: LazyLock<BorderStyleStore> = LazyLock::new(|| {
@@ -239,10 +247,10 @@ pub fn current_theme_config() -> ThemeConfig {
 }
 
 pub fn apply_theme(theme: String, border_style: BorderStyle) -> std::io::Result<()> {
-    validate_theme_name(&theme)?;
     let mut config = current_theme_config();
     config.theme = theme;
     config.border_style = border_style.clone();
+    let resolved = resolve_app_theme(&config)?;
     super::write_merged_toml_document(
         &super::get_config_path().join("theme.toml"),
         &config,
@@ -252,7 +260,7 @@ pub fn apply_theme(theme: String, border_style: BorderStyle) -> std::io::Result<
             }
         },
     )?;
-    THEME.set(resolve_app_theme(&config));
+    THEME.set(resolved);
     BORDER_STYLE.set(border_style);
     *THEME_CONFIG
         .write()
@@ -261,42 +269,13 @@ pub fn apply_theme(theme: String, border_style: BorderStyle) -> std::io::Result<
     Ok(())
 }
 
-fn validate_theme_name(name: &str) -> std::io::Result<()> {
-    if ratatui_themekit::available_theme_ids().contains(&name) {
-        return Ok(());
-    }
-    let path = if Path::new(name).is_absolute() {
-        std::path::PathBuf::from(name)
-    } else {
-        let directory = super::get_config_path().join("theme");
-        let direct = directory.join(name);
-        if direct.exists() {
-            direct
-        } else {
-            directory.join(format!("{name}.toml"))
-        }
-    };
-    let content = std::fs::read_to_string(&path).map_err(|error| {
-        std::io::Error::new(
-            error.kind(),
-            format!("failed to load theme {}: {error}", path.display()),
-        )
-    })?;
-    toml::from_str::<CustomTheme>(&content).map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("invalid theme {}: {error}", path.display()),
-        )
-    })?;
-    Ok(())
-}
-
 pub fn reload_theme() -> std::io::Result<()> {
     let path = super::get_config_path().join("theme.toml");
     let content = std::fs::read_to_string(path)?;
     let config: ThemeConfig = toml::from_str(&content)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    THEME.set(resolve_app_theme(&config));
+    let resolved = resolve_app_theme(&config)?;
+    THEME.set(resolved);
     BORDER_STYLE.set(config.border_style.clone());
     *THEME_CONFIG
         .write()

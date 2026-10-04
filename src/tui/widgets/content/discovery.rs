@@ -896,6 +896,13 @@ pub enum DiscoveryActionResult {
         project_id: String,
         result: Result<Vec<VersionInfo>, String>,
     },
+    /// The filtered fetch found nothing, so the task retried unfiltered.
+    /// Drain opens the Minecraft version picker instead of a dead end.
+    VersionsUnfiltered {
+        request_id: u64,
+        project_id: String,
+        result: Result<Vec<VersionInfo>, String>,
+    },
     Dependencies {
         request_id: u64,
         project_id: String,
@@ -1364,11 +1371,8 @@ impl DiscoveryState {
 
     pub(crate) fn set_filter_loader(&mut self, loader: ModLoader) {
         if self.filter_loader != loader {
-            *self
-                .filter_game_versions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                crate::tui::widgets::popups::LoadState::Idle;
+            self.filter_game_versions =
+                Arc::new(Mutex::new(crate::tui::widgets::popups::LoadState::Idle));
         }
         self.filter_loader = loader;
     }
@@ -2550,6 +2554,35 @@ impl DiscoveryState {
                         Err(error) => popup.error = Some(error),
                     }
                 }
+                DiscoveryActionResult::VersionsUnfiltered {
+                    request_id,
+                    project_id,
+                    result,
+                } => {
+                    let Some(popup) = self.version_popup.as_mut().filter(|popup| {
+                        popup.request_id == request_id && popup.project_id == project_id
+                    }) else {
+                        continue;
+                    };
+                    popup.loading = false;
+                    match result {
+                        Ok(versions) if !versions.is_empty() => {
+                            popup.all_game_versions = true;
+                            popup.selecting_minecraft_version = true;
+                            popup.minecraft_versions = minecraft_versions(&versions);
+                            popup.versions = versions;
+                            popup.selected = 0;
+                            popup.error = None;
+                        }
+                        Ok(_) => {
+                            popup.minecraft_versions = Vec::new();
+                            popup.versions = Vec::new();
+                            popup.selected = 0;
+                            popup.error = None;
+                        }
+                        Err(error) => popup.error = Some(error),
+                    }
+                }
                 DiscoveryActionResult::Dependencies {
                     request_id,
                     project_id,
@@ -2643,6 +2676,21 @@ impl DiscoveryState {
 
     pub fn take_orphan_cleanup(&mut self) -> Option<Vec<PathBuf>> {
         self.pending_orphan_cleanup.take()
+    }
+
+    pub(in crate::tui) fn text_input_active(&self) -> bool {
+        if let Some(popup) = &self.version_popup {
+            return popup.selecting_world && !popup.confirming && popup.worlds.search.active;
+        }
+        if self.project_page_open() {
+            return false;
+        }
+        if self.sort_panel_open && !self.search.active {
+            return self.sort_panel_focused
+                && self.filter_version_picker_open
+                && self.filter_version_search.active;
+        }
+        self.search.active
     }
 
     fn should_load_more(&self) -> bool {
@@ -3002,6 +3050,29 @@ fn loader_slug(loader: ModLoader) -> Option<&'static str> {
         ModLoader::NeoForge => Some("neoforge"),
         ModLoader::Quilt => Some("quilt"),
     }
+}
+
+/// One popup version fetch: compatible versions for `game_version`
+/// (empty means unfiltered) plus the installed version when missing.
+pub async fn fetch_popup_versions(
+    provider: &dyn crate::instance::content::provider::ContentProvider,
+    project_id: &str,
+    kind: ContentKind,
+    game_version: &str,
+    loader: ModLoader,
+    current_version_id: Option<&str>,
+) -> Result<Vec<VersionInfo>, String> {
+    let mut versions = provider
+        .compatible_versions(project_id, kind, game_version, loader)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Some(current) = current_version_id
+        && !versions.iter().any(|version| version.id == current)
+        && let Ok(version) = provider.version(current).await
+    {
+        versions.push(version);
+    }
+    Ok(versions)
 }
 
 pub(crate) fn provider_project_entry(

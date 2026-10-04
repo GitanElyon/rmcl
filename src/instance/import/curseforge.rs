@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// curseforge modpack archives: manifest.json references provider file ids,
-// while the overrides directory contains configs and other bundled files.
-
 use std::path::Path;
 
 use serde::Deserialize;
@@ -65,7 +62,8 @@ fn parse(path: &Path) -> Result<Manifest, String> {
     let entry = archive
         .by_name("manifest.json")
         .map_err(|_| "Missing manifest.json in CurseForge pack".to_owned())?;
-    serde_json::from_reader(entry).map_err(|error| format!("Invalid CurseForge manifest: {error}"))
+    let raw = super::read_pack_manifest(entry)?;
+    serde_json::from_slice(&raw).map_err(|error| format!("Invalid CurseForge manifest: {error}"))
 }
 
 fn loader(manifest: &Manifest) -> (ModLoader, Option<String>) {
@@ -96,7 +94,7 @@ fn loader(manifest: &Manifest) -> (ModLoader, Option<String>) {
 pub fn build_summary(path: &Path) -> Result<ImportSummary, String> {
     let manifest = parse(path)?;
     let (loader, loader_version) = loader(&manifest);
-    let override_count = count_overrides(path, &manifest.overrides)?;
+    let override_count = super::override_files(path, &[&manifest.overrides])?.len();
     Ok(ImportSummary {
         name: manifest.name,
         pack_version: manifest.version,
@@ -116,6 +114,7 @@ pub async fn execute_import(
     manager: &InstanceManager,
     config: &InstanceConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    crate::instance::manager::validate_name(&config.name)?;
     let minecraft_dir = manager
         .instances_dir
         .join(&config.name)
@@ -130,15 +129,18 @@ async fn download_files(
     manifest: &Manifest,
     minecraft_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let api_key =
-        crate::net::curseforge::api_key().ok_or("CurseForge API key is not configured")?;
-    let client = crate::net::HttpClient::new();
     let ids = manifest
         .files
         .iter()
         .filter(|file| file.required)
         .map(|file| file.file_id)
         .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let api_key =
+        crate::net::curseforge::api_key().ok_or("CurseForge API key is not configured")?;
+    let client = crate::net::HttpClient::new();
     let versions = crate::net::curseforge::fetch_file_versions(&client, api_key, &ids).await?;
     if versions.len() != ids.len() {
         return Err(format!(
@@ -178,14 +180,18 @@ async fn download_files(
 
 pub(super) async fn owned_files(path: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     let manifest = parse(path)?;
-    let api_key = crate::net::curseforge::api_key()
-        .ok_or_else(|| "CurseForge API key is not configured".to_owned())?;
+    let overrides = super::override_files(path, &[manifest.overrides.trim_matches('/')])?;
     let ids = manifest
         .files
         .iter()
         .filter(|file| file.required)
         .map(|file| file.file_id)
         .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(overrides);
+    }
+    let api_key = crate::net::curseforge::api_key()
+        .ok_or_else(|| "CurseForge API key is not configured".to_owned())?;
     let versions =
         crate::net::curseforge::fetch_file_versions(&crate::net::HttpClient::new(), api_key, &ids)
             .await
@@ -197,7 +203,7 @@ pub(super) async fn owned_files(path: &Path) -> Result<Vec<std::path::PathBuf>, 
             ids.len()
         ));
     }
-    versions
+    let mut files: Vec<_> = versions
         .into_iter()
         .map(|version| {
             version
@@ -205,24 +211,13 @@ pub(super) async fn owned_files(path: &Path) -> Result<Vec<std::path::PathBuf>, 
                 .iter()
                 .find(|file| file.primary)
                 .or_else(|| version.files.first())
-                .map(|file| std::path::PathBuf::from("mods").join(&file.filename))
                 .ok_or_else(|| format!("CurseForge file '{}' has no artifact", version.id))
+                .and_then(|file| super::portable_pack_path(&format!("mods/{}", file.filename)))
+                .map(std::path::PathBuf::from)
         })
-        .collect()
-}
-
-fn count_overrides(path: &Path, root: &str) -> Result<usize, String> {
-    let root = root.trim_matches('/');
-    if root.is_empty() {
-        return Ok(0);
-    }
-    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    let archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
-    let prefix = format!("{root}/");
-    Ok(archive
-        .file_names()
-        .filter(|name| name.starts_with(&prefix) && !name.ends_with('/'))
-        .count())
+        .collect::<Result<_, _>>()?;
+    files.extend(overrides);
+    Ok(files)
 }
 
 fn extract_overrides(
@@ -231,33 +226,7 @@ fn extract_overrides(
     root: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     progress::set_action("Extracting overrides...");
-    let file = std::fs::File::open(path)?;
-    let mut archive = zip::ZipArchive::new(file)?;
-    let root = root.trim_matches('/');
-    if root.is_empty() {
-        return Ok(());
-    }
-    for index in 0..archive.len() {
-        let mut entry = archive.by_index(index)?;
-        let enclosed = entry.enclosed_name().ok_or("Unsafe override path")?;
-        let Ok(relative) = enclosed.strip_prefix(root) else {
-            continue;
-        };
-        if relative.as_os_str().is_empty() {
-            continue;
-        }
-        let destination = minecraft_dir.join(relative);
-        if entry.is_dir() {
-            std::fs::create_dir_all(destination)?;
-            continue;
-        }
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut destination = std::fs::File::create(destination)?;
-        std::io::copy(&mut entry, &mut destination)?;
-    }
-    Ok(())
+    super::archive::extract_overrides(path, minecraft_dir, &[root])
 }
 
 #[cfg(test)]

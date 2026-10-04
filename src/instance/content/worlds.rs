@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// world save scanning. worlds are always directories (never zips) and store
-// their icon as icon.png. also computes an approximate size from top-level
-// files + region data so the user gets some sense of how chonky their world is.
-
 use std::{fs::File, path::Path};
 
 use flate2::read::GzDecoder;
@@ -14,7 +10,9 @@ use super::entry::{ContentEntry, WorldDetails, WorldGameMode};
 use super::{fallback_icon_large, make_icon_pixels};
 
 pub fn scan_one_world(path: &Path, file_stem: &str, enabled: bool) -> ContentEntry {
-    let icon_bytes = std::fs::read(path.join("icon.png")).ok();
+    let icon_bytes = File::open(path.join("icon.png"))
+        .ok()
+        .and_then(super::read_local_metadata);
     let icon_lines = icon_bytes
         .as_ref()
         .and_then(|bytes| make_icon_pixels(bytes, 12, 6))
@@ -159,7 +157,8 @@ impl WorldMetadata {
 fn read_world_metadata(world_dir: &Path) -> Option<WorldMetadata> {
     let path = world_dir.join("level.dat");
     let file = File::open(&path).ok()?;
-    match fastnbt::from_reader::<_, LevelDat>(GzDecoder::new(file)) {
+    let bytes = super::read_local_metadata(GzDecoder::new(file))?;
+    match fastnbt::from_bytes::<LevelDat>(&bytes) {
         Ok(level) => Some(level.data),
         Err(error) => {
             tracing::debug!(
@@ -204,7 +203,6 @@ fn dir_size_approx(path: &Path) -> u64 {
             }
         }
     }
-    // Check region folder too (main chunk data)
     let region = path.join("region");
     if let Ok(rd) = std::fs::read_dir(region) {
         for entry in rd.flatten() {

@@ -4,7 +4,6 @@
 use super::super::packs::extract_description;
 use serde_json::json;
 
-// every case exercises a distinct match arm in extract_description.
 #[rstest::rstest]
 #[case::string(json!("Simple pack"), "Simple pack")]
 #[case::object_with_text(json!({"text": "Hello world"}), "Hello world")]

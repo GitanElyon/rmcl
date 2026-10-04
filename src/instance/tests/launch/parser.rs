@@ -1,6 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
+#[test]
+fn plain_output_emits_before_eof_and_bounds_pending_lines() {
+    let mut parser = super::MinecraftLogParser::new();
+    let mut emitted = Vec::new();
+    for _ in 0..300 {
+        emitted.extend(parser.push_line(super::LogStream::Stdout, "plain output"));
+    }
+    assert!(!emitted.is_empty());
+    emitted.extend(parser.flush());
+    assert_eq!(
+        emitted.iter().map(|event| event.lines.len()).sum::<usize>(),
+        300
+    );
+    assert!(emitted.iter().all(|event| event.lines.len() <= 128));
+}
+
 use super::*;
 
 fn parse_all(lines: &[(LogStream, &str)]) -> Vec<ParsedLogEvent> {

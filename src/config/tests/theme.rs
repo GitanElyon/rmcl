@@ -3,8 +3,6 @@
 
 use super::*;
 
-// cover every BorderStyle variant. a mutation that swaps two arms of the
-// match (e.g. Rounded -> Plain) would slip past testing just one variant.
 #[rstest::rstest]
 #[case::plain(BorderStyle::Plain, BorderType::Plain)]
 #[case::rounded(BorderStyle::Rounded, BorderType::Rounded)]
@@ -51,11 +49,41 @@ fn resolve_with_overrides_keeps_base() {
         }),
         ..ThemeConfig::default()
     };
-    let theme = resolve_app_theme(&config);
-    assert_eq!(theme.accent(), Color::Red);
+    let theme = resolve_app_theme(&config).unwrap();
+    assert_eq!(
+        theme.accent(),
+        if ratatui_themekit::no_color_active() {
+            resolve_theme("dracula").accent()
+        } else {
+            Color::Red
+        }
+    );
     let base = resolve_theme("dracula");
     assert_eq!(theme.text(), base.text());
     assert_eq!(theme.error(), base.error());
+}
+
+#[test]
+fn missing_and_invalid_custom_themes_are_errors() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("theme.toml");
+    let config = ThemeConfig {
+        theme: path.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    assert!(resolve_app_theme(&config).is_err());
+    std::fs::write(&path, "bad theme").unwrap();
+    assert!(resolve_app_theme(&config).is_err());
+    std::fs::write(&path, include_str!("../../../assets/example-theme.toml")).unwrap();
+    let theme = resolve_app_theme(&config).unwrap();
+    assert_eq!(
+        theme.id(),
+        if ratatui_themekit::no_color_active() {
+            "no-color"
+        } else {
+            "my-theme"
+        }
+    );
 }
 
 #[test]
@@ -83,7 +111,6 @@ fn custom_theme_file_parses() {
         toml::from_str::<CustomTheme>("name = \"X\"\nid = \"x\"\naccent = \"#f97316\"\n").unwrap();
     assert_eq!(minimal.accent, Color::Rgb(249, 115, 22));
 
-    // the two failure modes users hit: nesting under [theme], or omitting name/id
     assert!(
         toml::from_str::<CustomTheme>("[theme]\nname = \"X\"\nid = \"x\"\naccent = \"Red\"\n")
             .is_err()

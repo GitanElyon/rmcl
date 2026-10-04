@@ -16,6 +16,43 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+#[test]
+fn dispatch_repeats_import_version_search_but_not_import_confirmation() {
+    use crate::tui::{app::FocusedArea, tests::harness::UiHarness};
+    use crossterm::event::KeyEventKind;
+
+    let mut ui = UiHarness::new();
+    ui.app.focused = FocusedArea::ImportPopup;
+    ui.app.instances_state.show_import_popup = true;
+    IMPORT_STATE.lock().unwrap().step = ImportStep::Version;
+    IMPORT_STATE.lock().unwrap().version_search.activate();
+    assert!(ui.key_event(KeyEvent::new_with_kind(
+        KeyCode::Char('i'),
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat
+    )));
+    assert_eq!(IMPORT_STATE.lock().unwrap().version_search.query, "i");
+    assert!(!ui.key_event(KeyEvent::new_with_kind(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat
+    )));
+    {
+        let mut state = IMPORT_STATE.lock().unwrap();
+        state.step = ImportStep::Confirm;
+        state.summary = Some(summary());
+    }
+    assert!(!ui.key_event(KeyEvent::new_with_kind(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat
+    )));
+    assert!(take_result().is_none());
+    assert!(ui.app.instances_state.show_import_popup);
+    ui.key(KeyCode::Enter);
+    assert_eq!(take_result().unwrap().summary.name, "Test Pack");
+}
+
 fn summary() -> ImportSummary {
     ImportSummary {
         name: "Test Pack".to_owned(),

@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// global progress state shared between background tasks and the status bar widget.
-// background tasks set the action/progress, the render loop reads it every frame.
-
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,7 +12,7 @@ pub struct ProgressState {
     pub progress: Option<(u64, u64)>,
     pub sub_action: Option<String>,
     tasks: BTreeMap<u64, TaskState>,
-    legacy_active: bool,
+    legacy: Option<TaskState>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,7 +28,6 @@ static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct ProgressTask {
     id: u64,
-    finished: bool,
 }
 
 #[derive(Clone)]
@@ -56,10 +52,7 @@ impl ProgressTask {
         }
         tracing::info!("{}", action);
         super::request_redraw();
-        Self {
-            id,
-            finished: false,
-        }
+        Self { id }
     }
 
     pub fn handle(&self) -> ProgressTaskHandle {
@@ -78,15 +71,13 @@ impl ProgressTask {
         update_task_progress(self.id, current, total);
     }
 
-    pub fn finish(mut self) {
-        self.remove();
-        self.finished = true;
+    pub fn finish(self) {
+        drop(self);
     }
 
-    pub fn fail(mut self, error: impl std::fmt::Display) {
+    pub fn fail(self, error: impl std::fmt::Display) {
         tracing::debug!("Progress task failed: {error}");
-        self.remove();
-        self.finished = true;
+        drop(self);
     }
 
     fn remove(&self) {
@@ -141,18 +132,21 @@ fn update_task_progress(id: u64, current: u64, total: u64) {
 
 impl Drop for ProgressTask {
     fn drop(&mut self) {
-        if !self.finished {
-            self.remove();
-        }
+        self.remove();
     }
 }
 
 fn refresh_visible(state: &mut ProgressState) {
-    if let Some((_, task)) = state.tasks.last_key_value() {
+    if let Some(task) = state
+        .tasks
+        .last_key_value()
+        .map(|(_, task)| task)
+        .or(state.legacy.as_ref())
+    {
         state.current_action = Some(task.action.clone());
         state.sub_action.clone_from(&task.sub_action);
         state.progress = task.progress;
-    } else if !state.legacy_active {
+    } else {
         state.current_action = None;
         state.sub_action = None;
         state.progress = None;
@@ -163,9 +157,16 @@ pub fn set_action(text: impl Into<String>) {
     let text = text.into();
     match PROGRESS.lock() {
         Ok(mut state) => {
-            state.legacy_active = true;
-            state.current_action = Some(text.clone());
-            state.progress = None;
+            let sub_action = state
+                .legacy
+                .as_ref()
+                .and_then(|task| task.sub_action.clone());
+            state.legacy = Some(TaskState {
+                action: text.clone(),
+                sub_action,
+                progress: None,
+            });
+            refresh_visible(&mut state);
             super::request_redraw();
         }
         Err(e) => {
@@ -178,7 +179,10 @@ pub fn set_action(text: impl Into<String>) {
 pub fn set_progress(current: u64, total: u64) {
     match PROGRESS.lock() {
         Ok(mut state) => {
-            state.progress = Some((current, total));
+            if let Some(task) = state.legacy.as_mut() {
+                task.progress = Some((current, total));
+            }
+            refresh_visible(&mut state);
             super::request_redraw();
         }
         Err(e) => {
@@ -191,7 +195,10 @@ pub fn set_sub_action(text: impl Into<String>) {
     let text = text.into();
     match PROGRESS.lock() {
         Ok(mut state) => {
-            state.sub_action = Some(text.clone());
+            if let Some(task) = state.legacy.as_mut() {
+                task.sub_action = Some(text.clone());
+            }
+            refresh_visible(&mut state);
             super::request_redraw();
         }
         Err(e) => {
@@ -204,7 +211,7 @@ pub fn set_sub_action(text: impl Into<String>) {
 pub fn clear() {
     match PROGRESS.lock() {
         Ok(mut state) => {
-            state.legacy_active = false;
+            state.legacy = None;
             refresh_visible(&mut state);
             super::request_redraw();
         }

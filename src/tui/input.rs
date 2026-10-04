@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// keybindings and input dispatch.
-// the general pattern: check which area is focused, give it first crack at the
-// keypress, and fall through to global bindings if nobody claimed it.
-// vim-style navigation (j/k/g/G) where it makes sense.
-
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -27,6 +22,9 @@ impl App {
             if let Err(error) = self.handle_key_event(KeyEvent::new(code, event.modifiers)) {
                 tracing::error!("Mouse scroll handling failed: {error}");
             }
+            return;
+        }
+        if self.handle_log_selection_mouse(event) {
             return;
         }
         if event.kind != MouseEventKind::Down(MouseButton::Left) {
@@ -55,14 +53,65 @@ impl App {
         let link = self
             .active_discovery_state_mut()
             .and_then(|state| state.project_link_at(event.column, event.row));
-        if let Some(link) = link
-            && let Err(error) = open::that_detached(link)
+        if let Some(link) = link {
+            let result = project_link_url(link).and_then(|url| open::that_detached(url.as_str()));
+            if let Err(error) = result {
+                tracing::warn!("Failed to open project link: {error}");
+            }
+        }
+    }
+
+    fn handle_log_selection_mouse(&mut self, event: MouseEvent) -> bool {
+        if !matches!(
+            event.kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+        ) {
+            return false;
+        }
+        if self
+            .content_update_popup
+            .as_ref()
+            .is_some_and(widgets::content::update::State::visible)
+            || self.provider_conflict.is_some()
+            || self.modpack_versions_state.is_some()
+            || self.modpack_update_popup.is_some()
         {
-            tracing::warn!("Failed to open project link {link}: {error}");
+            return false;
+        }
+        if self.focused == FocusedArea::OverviewExpanded && !self.log_filter_open {
+            let lines = self.overlay_filtered_lines();
+            self.log_selection.handle_mouse(
+                event,
+                self.log_overlay_inner,
+                self.log_overlay_scroll,
+                &lines,
+            )
+        } else if self.focused == FocusedArea::Content
+            && self.content_tab == widgets::content::ContentTab::Logs
+            && self.content_mode == widgets::content::ContentMode::Installed
+            && !self.logs_state.filter_open
+        {
+            widgets::logs_viewer::handle_selection_mouse(event, &mut self.logs_state)
+        } else {
+            false
         }
     }
 
     pub(super) fn handle_key_event(&mut self, key_event: KeyEvent) -> color_eyre::Result<()> {
+        if self.content_update_popup.as_ref().is_some_and(|update| {
+            update.phase != widgets::content::update::Phase::Applying
+                && self
+                    .instances_state
+                    .selected_instance()
+                    .map(|instance| instance.name.as_str())
+                    != Some(update.instance_name.as_str())
+        }) && let Some(popup) = self.content_update_popup.take()
+        {
+            popup.cancel();
+            return Ok(());
+        }
         if self
             .content_update_popup
             .as_ref()
@@ -99,14 +148,29 @@ impl App {
                         .map(|(_, candidate)| candidate.clone())
                         .collect::<Vec<_>>();
                     if let Some(project) = project
-                        && let Some((instance_name, _)) = &self.content_manifest
+                        && let Some((instance_name, cached)) = &self.content_manifest
                     {
-                        let manifest_path = crate::storage::InstancePaths::new(
+                        let paths = crate::storage::InstancePaths::new(
                             self.instance_manager.instances_dir.join(instance_name),
-                        )
-                        .content_manifest();
-                        let updated =
-                            crate::instance::ContentManifest::update(&manifest_path, |manifest| {
+                        );
+                        let manifest_path = paths.content_manifest();
+                        let expected = cached.record(&relative_path).cloned();
+                        let updated = crate::instance::ContentManifest::update(
+                            &manifest_path,
+                            |manifest| {
+                                if expected.is_none()
+                                    || manifest.record(&relative_path) != expected.as_ref()
+                                {
+                                    return Err(crate::instance::content::manifest::ManifestError::InvalidPath(
+                                        format!("Ownership of '{}' changed; refresh before selecting a provider", relative_path.display()),
+                                    ));
+                                }
+                                if let Some(record) = &expected {
+                                    crate::instance::content::local::validate_record(
+                                        &paths.minecraft(),
+                                        record,
+                                    )?;
+                                }
                                 if let Some(record) = manifest
                                     .files
                                     .iter_mut()
@@ -117,10 +181,18 @@ impl App {
                                     record.provider_aliases = aliases;
                                 }
                                 Ok(manifest.clone())
-                            })?;
-                        self.content_manifest = Some((instance_name.clone(), updated));
-                        self.provider_conflict = None;
-                        self.reconciliation_for = None;
+                            },
+                        );
+                        match updated {
+                            Ok(updated) => {
+                                self.content_manifest = Some((instance_name.clone(), updated));
+                                self.provider_conflict = None;
+                                self.reconciliation_for = None;
+                            }
+                            Err(error) => {
+                                tracing::error!("Could not save provider selection: {error}")
+                            }
+                        }
                     }
                 }
                 KeyCode::Esc => {
@@ -135,10 +207,24 @@ impl App {
 
         // log overlay eats all input when open, including its own search sub-mode
         if self.focused == FocusedArea::OverviewExpanded {
+            if self.log_filter_open {
+                if widgets::logs_viewer::handle_level_filter_key(
+                    &key_event,
+                    &mut self.log_filter_open,
+                    &mut self.log_filter_selected,
+                    &mut self.log_level_filters,
+                ) {
+                    self.log_selection.clear();
+                    self.log_overlay_scroll = 0;
+                }
+                return Ok(());
+            }
             if self.log_overlay_search.active {
+                self.log_selection.clear();
                 match key_event.code {
                     KeyCode::Enter => {
                         self.log_overlay_search.confirm();
+                        self.log_overlay_scroll = 0;
                     }
                     KeyCode::Esc => {
                         self.log_overlay_search.deactivate();
@@ -155,6 +241,7 @@ impl App {
             }
             match key_event.code {
                 KeyCode::Char('O') | KeyCode::Esc => {
+                    self.log_selection.clear();
                     self.focused = self.pre_overlay_focused;
                     self.log_overlay_search.deactivate();
                     return Ok(());
@@ -169,16 +256,30 @@ impl App {
                     self.log_overlay_scroll = self.log_overlay_scroll.saturating_sub(1);
                     return Ok(());
                 }
-                KeyCode::Char('G') => {
+                KeyCode::Char('G') | KeyCode::End => {
                     self.log_overlay_scroll = self.log_overlay_max_scroll;
                     return Ok(());
                 }
-                KeyCode::Char('g') => {
+                KeyCode::Char('g') | KeyCode::Home => {
                     self.log_overlay_scroll = 0;
                     return Ok(());
                 }
                 KeyCode::Char('/') => {
+                    self.log_selection.clear();
                     self.log_overlay_search.activate();
+                    return Ok(());
+                }
+                KeyCode::Char('f') => {
+                    self.log_filter_open = true;
+                    self.log_filter_selected = 0;
+                    return Ok(());
+                }
+                KeyCode::Char('y') => {
+                    self.log_selection.finish();
+                    widgets::logs_viewer::yank_selection(
+                        &self.log_selection,
+                        &self.overlay_filtered_lines(),
+                    );
                     return Ok(());
                 }
                 _ => {
@@ -211,7 +312,15 @@ impl App {
                                 .accounts
                                 .get(index)
                                 .map(|account| account.uuid.clone());
-                            self.account_state.store.remove(index);
+                            if let Err(error) = self.account_state.store.remove(index) {
+                                error_buffer::push_message(
+                                    tracing::Level::ERROR,
+                                    error.to_string(),
+                                );
+                                self.focused = FocusedArea::Account;
+                                confirm_popup::clear_pending();
+                                return Ok(());
+                            }
                             if let Some(removed_uuid) = removed_uuid {
                                 for instance in &mut self.instances_state.instances {
                                     if instance.preferred_account.as_deref()
@@ -256,11 +365,9 @@ impl App {
                             FocusedArea::Settings
                         }
                         Some(confirm_popup::ConfirmTarget::Content { name, path, .. }) => {
-                            let orphaned = self.orphan_dependencies_after_removing(&path);
-                            match delete_content_path(&path) {
-                                Ok(()) => {
+                            match self.delete_content_path(&path, false) {
+                                Ok(orphaned) => {
                                     self.remove_content_path_from_states(&path);
-                                    self.remove_content_path_from_manifest(&path);
                                     if !orphaned.is_empty() {
                                         confirm_popup::set_pending_orphan_dependencies(orphaned);
                                         return Ok(());
@@ -274,10 +381,9 @@ impl App {
                         }
                         Some(confirm_popup::ConfirmTarget::OrphanDependencies { paths }) => {
                             for path in paths {
-                                match delete_content_path(&path) {
-                                    Ok(()) => {
+                                match self.delete_content_path(&path, true) {
+                                    Ok(_) => {
                                         self.remove_content_path_from_states(&path);
-                                        self.remove_content_path_from_manifest(&path);
                                     }
                                     Err(error) => tracing::error!(
                                         "Failed to remove unused dependency '{}': {}",
@@ -304,6 +410,7 @@ impl App {
                             match crate::storage::clear_disposable_caches(&meta_dir) {
                                 Ok(()) => {
                                     self.reset_discovery_states();
+                                    self.settings_state.invalidate_java_cache(None);
                                     if let Some(state) = self.global_settings.as_mut() {
                                         state.invalidate_java_cache();
                                     }
@@ -415,8 +522,6 @@ impl App {
             }
         }
 
-        // content area delegates to whichever tab is active.
-        // worlds use the same list navigation without the toggle
         if self.focused == FocusedArea::Content
             && self.content_mode == widgets::content::ContentMode::Installed
             && let Some(state) = self.active_discovery_state_mut()
@@ -522,16 +627,8 @@ impl App {
                         if let Some(state) = self.active_discovery_state_mut() {
                             state.begin_world_selection(worlds);
                         }
-                    } else if matches!(
-                        kind,
-                        Some(
-                            crate::instance::ContentKind::Mod
-                                | crate::instance::ContentKind::DataPack
-                        )
-                    ) {
+                    } else {
                         self.spawn_active_discovery_dependencies();
-                    } else if let Some(state) = self.active_discovery_state_mut() {
-                        state.begin_confirmation();
                     }
                 }
                 return Ok(());
@@ -562,6 +659,7 @@ impl App {
         } else if self.focused == FocusedArea::Content {
             if self.content_tab == widgets::content::ContentTab::Logs {
                 if key_event.code == KeyCode::Char('d')
+                    && !self.logs_state.filter_open
                     && !self.logs_state.search.active
                     && !self.logs_state.viewer_search.active
                 {
@@ -620,7 +718,10 @@ impl App {
                     }
                     return Ok(());
                 }
-                if key_event.code == KeyCode::Enter && !self.worlds_state.search.active {
+                if key_event.code == KeyCode::Enter
+                    && !key_event.modifiers.contains(KeyModifiers::SHIFT)
+                    && !self.worlds_state.search.active
+                {
                     self.open_world_datapacks = self
                         .worlds_state
                         .selected_entry()
@@ -687,6 +788,12 @@ impl App {
         }
 
         if self.focused == FocusedArea::Account
+            && widgets::account::handle_key(&key_event, &mut self.account_state)
+        {
+            return Ok(());
+        }
+
+        if self.focused == FocusedArea::Account
             && let KeyCode::Char('d') = key_event.code
             && let Some(index) = self.account_state.list_state.selected
             && let Some(account) = self.account_state.store.accounts.get(index)
@@ -696,12 +803,6 @@ impl App {
                 index,
             });
             self.focused = FocusedArea::ConfirmDelete;
-            return Ok(());
-        }
-
-        if self.focused == FocusedArea::Account
-            && widgets::account::handle_key(&key_event, &mut self.account_state)
-        {
             return Ok(());
         }
 
@@ -956,7 +1057,6 @@ impl App {
                     return Ok(());
                 }
 
-                // global keybindings (uppercase = area switch, lowercase = action)
                 match key_event.code {
                     KeyCode::Char('q') => self.exit = true,
                     KeyCode::Esc
@@ -1049,7 +1149,6 @@ impl App {
                             }
                         }
                     }
-                    // shift+enter = open .minecraft folder in file manager
                     KeyCode::Enter
                         if self.focused == FocusedArea::Instances
                             && !self.instances_state.search.active
@@ -1061,12 +1160,15 @@ impl App {
                                 .instances_dir
                                 .join(&instance.name)
                                 .join(crate::storage::MINECRAFT_DIR_NAME);
-                            if let Err(e) = open::that_detached(&dir) {
-                                tracing::error!("Failed to open instance directory: {}", e);
+                            if let Err(error) = open::that_detached(&dir) {
+                                tracing::error!("Failed to open instance directory: {}", error);
+                                error_buffer::push_message(
+                                    tracing::Level::ERROR,
+                                    format!("Could not open {}: {error}", dir.display()),
+                                );
                             }
                         }
                     }
-                    // plain enter = focus the content area for the selected instance
                     KeyCode::Enter
                         if self.focused == FocusedArea::Instances
                             && !self.instances_state.search.active =>
@@ -1110,7 +1212,6 @@ impl App {
                             }
                         }
                     }
-                    // esc = kill running instance. brutal but effective
                     KeyCode::Esc
                         if self.focused == FocusedArea::Instances
                             && !self.instances_state.search.active =>
@@ -1279,8 +1380,7 @@ impl App {
                 widgets::popups::modpack_update::Action::Reinstall => "reinstall",
             };
             let progress = crate::feedback::progress::ProgressTask::start(format!(
-                "Preparing modpack {action} for {}",
-                instance.name
+                "Preparing modpack {action}"
             ));
             let manager = crate::instance::InstanceManager::new(instances_dir, meta_dir);
             let result =
@@ -1414,7 +1514,9 @@ impl App {
         }
     }
 
-    fn active_discovery_state(&self) -> Option<&widgets::content::discovery::DiscoveryState> {
+    pub(super) fn active_discovery_state(
+        &self,
+    ) -> Option<&widgets::content::discovery::DiscoveryState> {
         match self.content_tab {
             widgets::content::ContentTab::Mods => Some(&self.mods_discovery_state),
             widgets::content::ContentTab::ResourcePacks => {
@@ -1495,11 +1597,14 @@ impl App {
         {
             return;
         }
-        let state =
-            widgets::content::update::State::checking(kind, target_world.clone(), source_entries);
+        let mut state = widgets::content::update::State::checking(
+            instance.name.clone(),
+            kind,
+            target_world.clone(),
+            source_entries,
+        );
         let pending = state.pending.clone();
-        self.content_update_popup = Some(state);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let progress = crate::feedback::progress::ProgressTask::start("Preparing updates");
             let snapshot = cached_snapshot.expect("checked above");
             let target_directory = target_world
@@ -1551,6 +1656,7 @@ impl App {
                 &paths.minecraft(),
                 requests,
                 conflicts,
+                Some(&progress.handle()),
             )
             .await;
             progress.finish();
@@ -1561,6 +1667,8 @@ impl App {
                 crate::feedback::request_redraw();
             }
         });
+        state.abort_handle = Some(task.abort_handle());
+        self.content_update_popup = Some(state);
     }
 
     fn handle_content_update_key(&mut self, key_event: KeyEvent) {
@@ -1568,8 +1676,11 @@ impl App {
             return;
         };
         match (state.phase, key_event.code) {
-            (widgets::content::update::Phase::Checking, KeyCode::Esc)
-            | (widgets::content::update::Phase::Review, KeyCode::Esc)
+            (widgets::content::update::Phase::Checking, KeyCode::Esc) => {
+                state.cancel();
+                self.content_update_popup = None;
+            }
+            (widgets::content::update::Phase::Review, KeyCode::Esc)
             | (widgets::content::update::Phase::Conflicts, KeyCode::Esc) => {
                 self.content_update_popup = None;
             }
@@ -1601,6 +1712,10 @@ impl App {
         let Some(state) = self.content_update_popup.as_mut() else {
             return;
         };
+        if state.instance_name != instance.name {
+            self.content_update_popup = None;
+            return;
+        }
         let Some(plan) = state.plan.as_ref().map(|plan| plan.dependency_plan.clone()) else {
             return;
         };
@@ -1795,49 +1910,66 @@ impl App {
             let registry = crate::instance::content::provider::ProviderRegistry::configured(
                 crate::net::HttpClient::new(),
             );
+            let primary_version = if request.game_version_overrides.len() == 1 {
+                request.game_version_overrides[0].clone()
+            } else if request.all_game_versions {
+                String::new()
+            } else {
+                instance.game_version.clone()
+            };
+            let current_version_id = request.current_version_id.clone();
+            let mut fallback = false;
             let result = match registry.get(&request.provider) {
-                Some(provider) => match provider
-                    .compatible_versions(
+                Some(provider) => {
+                    let mut primary = widgets::content::discovery::fetch_popup_versions(
+                        provider,
                         &request.project_id,
                         kind,
-                        if request.game_version_overrides.len() == 1 {
-                            &request.game_version_overrides[0]
-                        } else if request.all_game_versions {
-                            ""
-                        } else {
-                            &instance.game_version
-                        },
+                        &primary_version,
                         instance.loader,
+                        current_version_id.as_deref(),
                     )
-                    .await
-                {
-                    Ok(mut versions) => {
-                        if request.game_version_overrides.len() > 1 {
-                            versions.retain(|version| {
-                                version.game_versions.iter().any(|game_version| {
-                                    request.game_version_overrides.contains(game_version)
-                                })
-                            });
-                        }
-                        if let Some(current) = request.current_version_id.as_deref()
-                            && !versions.iter().any(|version| version.id == current)
-                            && let Ok(version) = provider.version(current).await
-                        {
-                            versions.push(version);
-                        }
-                        if let Ok(bytes) = serde_json::to_vec_pretty(&versions) {
-                            let _ = crate::storage::write_atomic(&version_cache, &bytes);
-                        }
-                        Ok(versions)
-                    }
-                    Err(error) => match std::fs::read(&version_cache)
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                    .await;
+                    if let Ok(versions) = &mut primary
+                        && request.game_version_overrides.len() > 1
                     {
-                        Some(versions) => Ok(versions),
-                        None => Err(error.to_string()),
-                    },
-                },
+                        versions.retain(|version| {
+                            version.game_versions.iter().any(|game_version| {
+                                request.game_version_overrides.contains(game_version)
+                            })
+                        });
+                    }
+                    if let Ok(versions) = &primary
+                        && let Ok(bytes) = serde_json::to_vec_pretty(versions)
+                    {
+                        let _ = crate::storage::write_atomic(&version_cache, &bytes);
+                    }
+                    match primary {
+                        // The list facet matched but no file fits this
+                        // version/loader: retry unfiltered so the popup offers
+                        // the version picker instead of a dead end.
+                        Ok(versions) if versions.is_empty() && !request.all_game_versions => {
+                            fallback = true;
+                            widgets::content::discovery::fetch_popup_versions(
+                                provider,
+                                &request.project_id,
+                                kind,
+                                "",
+                                instance.loader,
+                                current_version_id.as_deref(),
+                            )
+                            .await
+                        }
+                        Ok(versions) => Ok(versions),
+                        Err(error) => match std::fs::read(&version_cache)
+                            .ok()
+                            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                        {
+                            Some(versions) => Ok(versions),
+                            None => Err(error),
+                        },
+                    }
+                }
                 None => Err(format!(
                     "{} content provider is unavailable",
                     request.provider
@@ -1845,10 +1977,18 @@ impl App {
             };
             widgets::content::DiscoveryState::push_action_result(
                 &request.pending,
-                widgets::content::discovery::DiscoveryActionResult::Versions {
-                    request_id: request.request_id,
-                    project_id: request.project_id,
-                    result,
+                if fallback {
+                    widgets::content::discovery::DiscoveryActionResult::VersionsUnfiltered {
+                        request_id: request.request_id,
+                        project_id: request.project_id,
+                        result,
+                    }
+                } else {
+                    widgets::content::discovery::DiscoveryActionResult::Versions {
+                        request_id: request.request_id,
+                        project_id: request.project_id,
+                        result,
+                    }
                 },
             );
         });
@@ -1901,96 +2041,25 @@ impl App {
                         "Invalid datapack target world".to_owned(),
                     ));
                 }
-                tokio::fs::create_dir_all(&destination)
-                    .await
-                    .map_err(crate::net::NetError::from)?;
                 let registry =
                     crate::instance::content::provider::ProviderRegistry::configured(client);
-                if let Some(plan) = &request.dependency_plan {
-                    let installed = crate::instance::content::dependencies::install(
-                        &registry,
-                        &manifest_path,
-                        &minecraft_dir,
-                        plan,
+                let plan = request.dependency_plan.as_ref().ok_or_else(|| {
+                    crate::net::NetError::Parse(
+                        "Installation has no resolved dependency plan".to_owned(),
                     )
-                    .await?;
-                    return Ok::<_, crate::net::NetError>(
-                        widgets::content::discovery::InstallCompletion {
-                            path: installed.root_path,
-                            replaced: installed.replaced,
-                            skipped: installed.skipped,
-                            orphaned_dependencies: installed.orphaned_dependencies,
-                        },
-                    );
-                }
-                let provider = registry.get(&request.provider).ok_or_else(|| {
-                    crate::net::NetError::Parse(format!(
-                        "{} content provider is unavailable",
-                        request.provider
-                    ))
                 })?;
-                let outcome = provider
-                    .download_version(
-                        &request.version,
-                        &destination,
-                        request.installed_path.as_deref(),
-                    )
-                    .await?;
-                let (path, skipped) = match outcome {
-                    crate::net::modrinth::DownloadOutcome::Downloaded(path) => (path, false),
-                    crate::net::modrinth::DownloadOutcome::SkippedExisting(path) => (path, true),
-                };
-                let replaced = request.installed_path.is_some() && !skipped;
-                let relative_path = path
-                    .strip_prefix(&minecraft_dir)
-                    .map_err(|error| crate::net::NetError::Parse(error.to_string()))?
-                    .to_path_buf();
-                let fingerprint = crate::instance::content::manifest::fingerprint(&path)?;
-                let record = crate::instance::ContentFileRecord {
-                    relative_path,
-                    kind,
-                    enabled: !path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.ends_with(".disabled")),
-                    fingerprint,
-                    resolution: crate::instance::Resolution::Resolved {
-                        project: crate::instance::ProviderProject {
-                            provider: request.provider.clone(),
-                            project_id: request.project_id.clone(),
-                            version_id: request.version.id.clone(),
-                        },
-                    },
-                    provider_aliases: Vec::new(),
-                    provider_checks: vec![request.provider.clone()],
-                    required_dependencies: Vec::new(),
-                    automatic_dependency: false,
-                    cleanup_eligible: false,
-                };
-                crate::instance::ContentManifest::update(&manifest_path, |manifest| {
-                    if let Some(old_path) = request.installed_path.as_ref()
-                        && let Ok(relative) = old_path.strip_prefix(&minecraft_dir)
-                        && old_path != &path
-                    {
-                        manifest.remove(relative);
-                    }
-                    manifest.upsert(record);
-                    Ok(())
-                })
-                .map_err(|error| crate::net::NetError::Parse(error.to_string()))?;
-                if !skipped
-                    && let Some(old_path) = request
-                        .installed_path
-                        .as_ref()
-                        .filter(|old_path| old_path.as_path() != path.as_path())
-                {
-                    delete_content_path(old_path).map_err(crate::net::NetError::from)?;
-                }
+                let installed = crate::instance::content::dependencies::install(
+                    &registry,
+                    &manifest_path,
+                    &minecraft_dir,
+                    plan,
+                )
+                .await?;
                 Ok::<_, crate::net::NetError>(widgets::content::discovery::InstallCompletion {
-                    path,
-                    replaced,
-                    skipped,
-                    orphaned_dependencies: Vec::new(),
+                    path: installed.root_path,
+                    replaced: installed.replaced,
+                    skipped: installed.skipped,
+                    orphaned_dependencies: installed.orphaned_dependencies,
                 })
             }
             .await
@@ -2168,19 +2237,44 @@ impl App {
         self.focused = FocusedArea::ConfirmDelete;
     }
 
-    fn orphan_dependencies_after_removing(
-        &self,
+    fn delete_content_path(
+        &mut self,
         path: &std::path::Path,
-    ) -> Vec<std::path::PathBuf> {
-        self.content_manifest_for_path(path)
-            .map(|(manifest, relative_path, minecraft_dir)| {
-                manifest
-                    .orphaned_dependencies_after_removing(&relative_path)
-                    .into_iter()
-                    .map(|relative| minecraft_dir.join(relative))
-                    .collect()
-            })
-            .unwrap_or_default()
+        orphan_only: bool,
+    ) -> std::io::Result<Vec<std::path::PathBuf>> {
+        let instance = self
+            .instances_state
+            .selected_instance()
+            .ok_or_else(|| std::io::Error::other("No instance is selected"))?;
+        let name = instance.name.clone();
+        let paths =
+            crate::storage::InstancePaths::new(self.instance_manager.instances_dir.join(&name));
+        let minecraft_dir = paths.minecraft();
+        let relative = crate::instance::content::local::relative_path(&minecraft_dir, path)?;
+        let manifest = match self
+            .content_manifest
+            .as_ref()
+            .filter(|(cached_name, _)| cached_name == &name)
+        {
+            Some((_, manifest)) => manifest.clone(),
+            None => crate::instance::ContentManifest::load(&paths.content_manifest())
+                .map_err(std::io::Error::other)?,
+        };
+        let expected = manifest
+            .files
+            .iter()
+            .filter(|record| record.relative_path.starts_with(&relative))
+            .cloned()
+            .collect::<Vec<_>>();
+        let (manifest, orphaned) = crate::instance::content::local::remove(
+            &paths.content_manifest(),
+            &minecraft_dir,
+            path,
+            &expected,
+            orphan_only,
+        )?;
+        self.content_manifest = Some((name, manifest));
+        Ok(orphaned)
     }
 
     fn content_manifest_for_path(
@@ -2230,37 +2324,6 @@ impl App {
         }
     }
 
-    fn remove_content_path_from_manifest(&mut self, path: &std::path::Path) {
-        let Some(instance) = self.instances_state.selected_instance() else {
-            return;
-        };
-        let instance_paths = crate::storage::InstancePaths::new(
-            self.instance_manager.instances_dir.join(&instance.name),
-        );
-        let minecraft_dir = instance_paths.minecraft();
-        let Ok(relative_path) = path.strip_prefix(&minecraft_dir) else {
-            return;
-        };
-        if let Some((instance_name, manifest)) = self.content_manifest.as_mut()
-            && *instance_name == instance.name
-        {
-            manifest.remove(relative_path);
-        }
-        if let Err(error) = crate::instance::ContentManifest::update(
-            &instance_paths.content_manifest(),
-            |manifest| {
-                manifest.remove(relative_path);
-                Ok(())
-            },
-        ) {
-            tracing::warn!(
-                "Failed to remove '{}' from the content manifest: {}",
-                relative_path.display(),
-                error
-            );
-        }
-    }
-
     fn open_instance_settings(&mut self, return_focus: FocusedArea) {
         let Some(instance) = self.instances_state.selected_instance().cloned() else {
             return;
@@ -2268,6 +2331,10 @@ impl App {
         let mut state = widgets::popups::instance_settings::State::with_accounts(
             &instance,
             &self.instance_manager.meta_dir,
+            &crate::storage::InstancePaths::new(
+                self.instance_manager.instances_dir.join(&instance.name),
+            )
+            .minecraft(),
             self.account_state.store.accounts.clone(),
         );
         if self
@@ -2294,7 +2361,7 @@ impl App {
                     );
                 }
                 if outcome.content_updates_enabled {
-                    self.spawn_selected_content_update_check();
+                    self.queue_content_update_checks();
                 }
                 if outcome.restart_required && outcome.restart_changed {
                     error_buffer::push_message(
@@ -2396,6 +2463,11 @@ impl App {
     }
 
     pub(super) fn reset_discovery_states(&mut self) {
+        crate::instance::content::updates::cancel(None);
+        self.reconciliation_for = None;
+        for cached in self.cached_instance_content.values_mut() {
+            cached.reconciliation_for = None;
+        }
         self.mods_discovery_state =
             widgets::content::DiscoveryState::new(crate::instance::ContentKind::Mod);
         self.resource_packs_discovery_state =
@@ -2404,6 +2476,13 @@ impl App {
             widgets::content::DiscoveryState::new(crate::instance::ContentKind::Shader);
         self.datapacks_discovery_state =
             widgets::content::DiscoveryState::new(crate::instance::ContentKind::DataPack);
+    }
+
+    pub(super) fn queue_content_update_checks(&mut self) {
+        self.content_update_check_pending = true;
+        for cached in self.cached_instance_content.values_mut() {
+            cached.update_check_pending = true;
+        }
     }
 
     pub(super) fn spawn_selected_content_update_check(&self) {
@@ -2420,15 +2499,61 @@ impl App {
             self.instance_manager.instances_dir.join(&instance.name),
         )
         .content_updates();
-        crate::instance::content::updates::spawn(instance, manifest.clone(), path);
+        crate::instance::content::updates::spawn(
+            instance,
+            manifest.clone(),
+            path,
+            self.content_update_priority(),
+            self.content_update_snapshot
+                .as_ref()
+                .map(|(_, snapshot)| snapshot.clone()),
+        );
+    }
+
+    pub(super) fn active_installed_content_state(
+        &self,
+    ) -> &widgets::content::list::ContentListState {
+        match self.content_tab {
+            widgets::content::ContentTab::ResourcePacks => &self.resource_packs_state,
+            widgets::content::ContentTab::Shaders => &self.shaders_state,
+            widgets::content::ContentTab::Worlds => &self.world_datapacks_state,
+            _ => &self.mods_state,
+        }
+    }
+
+    pub(super) fn content_update_priority(&self) -> Vec<crate::instance::ProviderProject> {
+        [
+            self.active_installed_content_state(),
+            &self.mods_state,
+            &self.resource_packs_state,
+            &self.shaders_state,
+            &self.world_datapacks_state,
+        ]
+        .into_iter()
+        .flat_map(|state| {
+            state
+                .filtered_indices()
+                .into_iter()
+                .filter_map(|index| state.entries[index].provider_project.clone())
+                .chain(
+                    state
+                        .entries
+                        .iter()
+                        .filter_map(|entry| entry.provider_project.clone()),
+                )
+        })
+        .collect()
     }
 }
 
-fn delete_content_path(path: &std::path::Path) -> std::io::Result<()> {
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path),
-        Ok(_) => std::fs::remove_file(path),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+pub(super) fn project_link_url(link: &str) -> std::io::Result<reqwest::Url> {
+    let url = reqwest::Url::parse(link)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Project links must use HTTP or HTTPS",
+        ));
     }
+    Ok(url)
 }

@@ -1,12 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// integration tests for the retry envelope in src/net/mod.rs. wiremock
-// stands in for live upstream APIs so we can assert that 5xx responses
-// retry, 4xx responses fail fast, and the cap (MAX_RETRIES = 3, total
-// 4 attempts) is honoured. these tests exercise public HttpClient methods,
-// not the private retry helper directly.
-//
 // Tokio time is paused in retrying tests so the production backoff remains
 // covered without adding wall-clock delay to the suite.
 
@@ -32,14 +26,11 @@ fn client_without_timeout() -> HttpClient {
     reqwest::Client::builder().build().unwrap().into()
 }
 
-// ---------- get_json (via get_with_retry) ----------
-
 #[tokio::test(start_paused = true)]
 async fn get_json_retries_5xx_then_succeeds() {
     let server = MockServer::start().await;
     let attempts = Arc::new(AtomicUsize::new(0));
 
-    // first request: 503. second request: 200.
     Mock::given(method("GET"))
         .and(path("/api"))
         .respond_with(move |_: &wiremock::Request| {
@@ -58,12 +49,34 @@ async fn get_json_retries_5xx_then_succeeds() {
     assert!(result.ok);
 }
 
+#[tokio::test(start_paused = true)]
+async fn get_json_retries_rate_limit() {
+    let server = MockServer::start().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("GET"))
+        .and(path("/limited"))
+        .respond_with(move |_: &wiremock::Request| {
+            if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(429)
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({"ok": true}))
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let result: ApiResponse = client_without_timeout()
+        .get_json(&format!("{}/limited", server.uri()))
+        .await
+        .unwrap();
+    assert!(result.ok);
+}
+
 #[tokio::test]
 async fn get_json_fails_fast_on_4xx() {
     let server = MockServer::start().await;
 
-    // expect(1) makes wiremock panic on drop if the mock matches more than
-    // once. that's how we assert "no retries" without watching the clock.
     Mock::given(method("GET"))
         .and(path("/api"))
         .respond_with(ResponseTemplate::new(404))
@@ -86,8 +99,6 @@ async fn get_json_fails_fast_on_4xx() {
 async fn get_json_gives_up_after_max_retries() {
     let server = MockServer::start().await;
 
-    // MAX_RETRIES = 3 means we expect exactly 4 attempts before giving up.
-    // expect(4) asserts that.
     Mock::given(method("GET"))
         .and(path("/api"))
         .respond_with(ResponseTemplate::new(503))
@@ -123,8 +134,6 @@ async fn get_bytes_limited_rejects_oversized_responses() {
         .unwrap_err();
     assert!(error.to_string().contains("8-byte limit"));
 }
-
-// ---------- download_file ----------
 
 #[tokio::test(start_paused = true)]
 async fn download_file_retries_5xx_then_succeeds() {
@@ -178,4 +187,113 @@ async fn download_file_fails_fast_on_4xx() {
         format!("{err:?}").contains("404"),
         "expected 404 in error, got: {err:?}"
     );
+}
+
+#[tokio::test]
+async fn cancelled_downloads_preserve_the_destination_and_remove_all_staging_files() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    for verified in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(connection.read(&mut request).await.unwrap() > 0);
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("content.jar");
+        std::fs::write(&destination, b"original").unwrap();
+        let directory = temp.path().to_owned();
+        let target = destination.clone();
+        let download = tokio::spawn(async move {
+            let client = client_without_timeout();
+            let url = format!("http://{address}/content.jar");
+            if verified {
+                let version = serde_json::from_value(json!({
+                    "id": "version", "name": "Version", "version_number": "1",
+                    "game_versions": [], "loaders": [],
+                    "files": [{"url": url, "filename": "content.jar", "size": 100, "primary": true}]
+                }))
+                .unwrap();
+                rmcl::net::modrinth::download_version_file_for_update(
+                    &client, &version, &directory, &target,
+                )
+                .await
+                .map(|_| ())
+            } else {
+                download_file(&client, &url, &target, |_, _| {}).await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if std::fs::read_dir(temp.path()).unwrap().any(|entry| {
+                    let entry = entry.unwrap();
+                    // Windows directory metadata can lag writes to an open file.
+                    entry.path() != destination
+                        && std::fs::File::open(entry.path()).is_ok_and(|mut file| {
+                            matches!(std::io::Read::read(&mut file, &mut [0]), Ok(1))
+                        })
+                }) {
+                    break;
+                }
+                assert!(
+                    !download.is_finished(),
+                    "download finished before cancellation"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        download.abort();
+        assert!(download.await.unwrap_err().is_cancelled());
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"original");
+        assert_eq!(
+            std::fs::read_dir(temp.path()).unwrap().count(),
+            1,
+            "verified={verified}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn flowing_downloads_can_take_longer_than_thirty_seconds() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut connection, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        assert!(connection.read(&mut request).await.unwrap() > 0);
+        connection
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nx")
+            .await
+            .unwrap();
+        for _ in 0..7 {
+            tokio::time::sleep(std::time::Duration::from_millis(4500)).await;
+            if connection.write_all(b"x").await.is_err() {
+                break;
+            }
+        }
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("slow.bin");
+    let result = download_file(
+        &HttpClient::new(),
+        &format!("http://{address}/slow"),
+        &path,
+        |_, _| {},
+    )
+    .await;
+    server.await.unwrap();
+    result.unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), b"xxxxxxxx");
 }

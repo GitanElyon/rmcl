@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// shared pack.mcmeta scanning for resource packs and shader packs.
-
 use std::path::Path;
 
 use serde::Deserialize;
@@ -112,7 +110,8 @@ fn read_metadata_from_zip(path: &Path) -> (String, Option<Vec<u8>>) {
     let description = archive
         .by_name("pack.mcmeta")
         .ok()
-        .and_then(|entry| serde_json::from_reader::<_, PackMcMeta>(entry).ok())
+        .and_then(super::read_local_metadata)
+        .and_then(|bytes| serde_json::from_slice::<PackMcMeta>(&bytes).ok())
         .map(|meta| extract_description(&meta.pack.description))
         .unwrap_or_default();
     let icon_bytes = super::read_icon_from_zip(&mut archive);
@@ -120,10 +119,16 @@ fn read_metadata_from_zip(path: &Path) -> (String, Option<Vec<u8>>) {
 }
 
 fn read_metadata_from_dir(path: &Path) -> (String, Option<Vec<u8>>) {
-    let description = std::fs::read_to_string(path.join("pack.mcmeta"))
+    let description = std::fs::File::open(path.join("pack.mcmeta"))
         .ok()
-        .and_then(|content| serde_json::from_str::<PackMcMeta>(&content).ok())
+        .and_then(super::read_local_metadata)
+        .and_then(|bytes| serde_json::from_slice::<PackMcMeta>(&bytes).ok())
         .map(|meta| extract_description(&meta.pack.description))
         .unwrap_or_default();
-    (description, std::fs::read(path.join("pack.png")).ok())
+    (
+        description,
+        std::fs::File::open(path.join("pack.png"))
+            .ok()
+            .and_then(super::read_local_metadata),
+    )
 }

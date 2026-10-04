@@ -42,8 +42,6 @@ fn error_level_renders() {
     insta::assert_snapshot!(term.backend());
 }
 
-// info-level events hit the catch-all `_` arm in the label match; previously
-// there was no test covering it.
 #[test]
 fn info_level_renders() {
     let term = render(event(Level::INFO, "Reloaded config"), 40, 5);

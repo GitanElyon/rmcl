@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// base frame that all popups render inside. handles the border, title bar,
-// keybind footer, and optional search indicator. content is injected via closure
-// so each popup type only worries about its inner area.
-
 use ratatui::{
     buffer::{Buffer, CellDiffOption},
     layout::{Alignment, Rect},
@@ -40,7 +36,6 @@ impl<'a> Widget for PopupFrame<'a> {
             })
             .collect::<Vec<_>>();
 
-        // clear first so the popup doesn't layer on top of whatever was underneath
         Clear.render(area, buf);
 
         if let Some(bg) = self.bg {

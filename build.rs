@@ -11,7 +11,6 @@ fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let out = Path::new(&out_dir);
 
-    // compile RmclShim.java into a jar that gets embedded via include_bytes!
     let status = Command::new("javac")
         .arg("-source")
         .arg("8")
@@ -25,7 +24,6 @@ fn main() {
 
     assert!(status.success(), "javac failed to compile RmclShim.java");
 
-    // package into a jar
     let jar_path = out.join("rmcl-shim.jar");
     let status = Command::new("jar")
         .arg("cfe")

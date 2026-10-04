@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// live minecraft process log parser.
-//
 // disk launch logs stay raw, but the tui needs enough structure to color and
 // group output sanely. this parser keeps stdout/stderr as a hint, frames
 // multiline java/jvm/native bursts into events, then assigns a semantic level.
@@ -123,7 +121,10 @@ impl MinecraftLogParser {
 
         // only hard starts split events. this keeps stacktraces and native
         // loader bursts together even when they arrive one line at a time.
-        if should_split(current.kind, analysis.kind) {
+        if should_split(current.kind, analysis.kind)
+            || current.lines.len() >= 128
+            || current.lines.iter().map(String::len).sum::<usize>() >= 64 * 1024
+        {
             let finished = self.current.take().map(finish_event);
             self.current = Some(PendingEvent::new(stream, line, normalized, analysis));
             finished.into_iter().collect()

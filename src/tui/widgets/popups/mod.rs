@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// shared utilities for popup widgets: layout helpers, word wrapping, keybind rendering.
-// individual popup types live in their own submodules.
-
 pub mod base;
 pub mod confirm;
 pub mod error;
@@ -41,8 +38,6 @@ pub(crate) fn compare_game_versions(a: &str, b: &str) -> std::cmp::Ordering {
     a_parts.len().cmp(&b_parts.len())
 }
 
-// figures out the (width, height) a text block will need after word wrapping.
-// used to size popups before rendering so they fit their content snugly.
 pub fn word_wrap_size(text: &str, max_inner_width: usize) -> (usize, usize) {
     if text.is_empty() || max_inner_width == 0 {
         return (0, 1);

@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// neoforge: the forge fork that broke away after 1.20.1.
-// uses a different versioning scheme where neoforge versions map to
-// minecraft versions by dropping the "1." prefix (e.g. MC 1.21 = NF 21.x).
-// like forge, installation requires running their installer jar.
-
 use std::path::Path;
 
 use serde::Deserialize;
@@ -30,15 +25,11 @@ struct NeoForgeMavenVersions {
 fn game_version_to_neoforge_prefix(game_version: &str) -> Option<String> {
     let parts: Vec<&str> = game_version.split('.').collect();
     match parts.as_slice() {
-        // "1.21" → prefix "21.0."
         ["1", minor] => Some(format!("{}.0.", minor)),
-        // "1.20.4" → prefix "20.4."
         ["1", minor, patch] => Some(format!("{}.{}.", minor, patch)),
-        // "26.1.2" → prefix "26.1.2."
         [major, minor, patch] if leading_u32(major).is_some_and(|major| major >= 26) => {
             Some(format!("{major}.{minor}.{patch}."))
         }
-        // "26.1" → prefix "26.1."
         [major, minor] if leading_u32(major).is_some_and(|major| major >= 26) => {
             Some(format!("{major}.{minor}."))
         }
@@ -80,7 +71,6 @@ pub async fn fetch_neoforge_versions(
     fetch_neoforge_versions_from(client, NEOFORGE_API_BASE, game_version).await
 }
 
-// same as fetch_neoforge_versions but lets tests point at a wiremock server.
 pub async fn fetch_neoforge_versions_from(
     client: &HttpClient,
     api_url: &str,
@@ -113,8 +103,6 @@ pub async fn fetch_neoforge_versions_from(
     Ok(versions)
 }
 
-// reverse-engineers minecraft versions from neoforge version numbers.
-// e.g. neoforge "21.0.x" means MC 1.21, "20.4.x" means MC 1.20.4
 pub async fn fetch_neoforge_game_versions(
     client: &HttpClient,
 ) -> Result<Vec<GameVersion>, NetError> {

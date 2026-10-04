@@ -1,16 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// quilt mod loader: fabric fork with a nearly identical metadata API.
-// if you're getting deja vu reading this after fabric.rs, that's why.
-
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::feedback::progress::set_sub_action;
 use crate::instance::loader::GameVersion;
-use crate::net::{HttpClient, NetError, download_file};
+use crate::net::{HttpClient, NetError, download_loader_libraries};
 
 const QUILT_META_BASE: &str = "https://meta.quiltmc.org/v3";
 
@@ -48,8 +44,6 @@ pub async fn fetch_quilt_game_versions(client: &HttpClient) -> Result<Vec<GameVe
     fetch_quilt_game_versions_from(client, QUILT_META_BASE).await
 }
 
-// same as fetch_quilt_game_versions but lets tests point at a wiremock
-// server. quilt mirrors the fabric API shape.
 pub async fn fetch_quilt_game_versions_from(
     client: &HttpClient,
     meta_base: &str,
@@ -152,40 +146,19 @@ pub async fn download_quilt_libraries(
     profile: &QuiltProfile,
     meta_dir: &Path,
 ) -> Result<(), NetError> {
-    let libraries_dir = crate::storage::MetadataPaths::new(meta_dir).libraries();
     tracing::debug!(
         "Resolving {} Quilt libraries into {}",
         profile.libraries.len(),
-        libraries_dir.display()
+        crate::storage::MetadataPaths::new(meta_dir)
+            .libraries()
+            .display()
     );
-
-    for lib in &profile.libraries {
-        let maven_path = match crate::instance::loader::maven::maven_coord_to_path(&lib.name) {
-            Some(p) => p,
-            None => {
-                return Err(NetError::Parse(format!(
-                    "Invalid Maven coordinate: {}",
-                    lib.name
-                )));
-            }
-        };
-
-        let dest = libraries_dir.join(&maven_path);
-
-        if dest.exists() {
-            tracing::debug!("Quilt library already exists: {}", lib.name);
-            continue;
-        }
-
-        let base_url = lib.url.trim_end_matches('/');
-        let download_url = format!("{}/{}", base_url, maven_path);
-
-        set_sub_action(&lib.name);
-        tracing::info!("Downloading Quilt library: {}", lib.name);
-        tracing::trace!("Quilt library destination: {}", dest.display());
-
-        download_file(client, &download_url, &dest, |_, _| {}).await?;
-    }
+    let libraries: Vec<_> = profile
+        .libraries
+        .iter()
+        .map(|lib| (lib.name.as_str(), lib.url.as_str()))
+        .collect();
+    download_loader_libraries(client, libraries, meta_dir, "Quilt").await?;
 
     tracing::debug!("Quilt library resolution complete for {}", profile.id);
     Ok(())

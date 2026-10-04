@@ -1,12 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// mojang-format launch profile types. mirrors the on-disk JSON schema
-// used by vanilla versions, forge installer output, neoforge installer
-// output, fabric profiles, and quilt profiles. parsing is lossless for
-// the fields we care about; unknown fields are silently dropped (serde
-// default behavior) - which is fine because we write upstream JSON
-// byte-for-byte on the install side.
+// Unknown JSON fields are dropped when parsing, but installer paths write the
+// upstream bytes unchanged, so this model never strips fields from the cache.
 
 use serde::{Deserialize, Serialize};
 
@@ -33,8 +29,7 @@ pub struct LaunchProfile {
     // present only in rmcl <= 0.3.0's stripped loader-profile shape.
     // we deserialize it so the launch-time legacy-detection predicate
     // can confirm "this really is our old format, not an upstream
-    // profile that happens to omit arguments". skipped on serialize so
-    // we never propagate this field outward.
+    // profile that happens to omit arguments". The resolver discards this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game_arguments: Option<Vec<String>>,
 }
@@ -70,16 +65,29 @@ pub struct Library {
     pub downloads: Option<LibraryDownloads>,
     pub rules: Option<Vec<Rule>>,
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub natives: Option<std::collections::HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extract: Option<LibraryExtract>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct LibraryDownloads {
     pub artifact: Option<Artifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifiers: Option<std::collections::HashMap<String, Artifact>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct LibraryExtract {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Artifact {
     pub url: String,
+    #[serde(default)]
     pub path: String,
     pub sha1: String,
     pub size: u64,

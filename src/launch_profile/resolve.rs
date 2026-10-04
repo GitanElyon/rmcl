@@ -1,25 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// resolves the `inheritsFrom` chain of a parsed `LaunchProfile`. mojang's
-// version JSON allows a profile to inherit from another profile by id; the
-// loaders (forge / neoforge / fabric / quilt) use this to layer their
-// additions on top of a vanilla base. this module walks the chain and
-// returns a single flat profile.
-//
-// merge semantics (per the mojang launcher and the major third-party
-// launchers that interoperate with it):
-//   - scalar fields: child wins if Some, else parent.
-//   - libraries and arguments: parent ++ child (parent first). child
-//     entries are appended after parent's.
-//   - merge_into preserves parent's inherits_from so resolve() can keep
-//     walking; resolve() clears the final result's inherits_from after
-//     the loop exits.
-//
-// pure function `merge_into` handles the field-by-field merge math.
-// async `resolve` does the chain walking with cycle detection and a depth
-// cap. tests cover both layers independently.
-
 use std::path::Path;
 
 use super::model::{Arguments, LaunchProfile};
@@ -68,8 +49,6 @@ pub fn merge_into(child: LaunchProfile, parent: LaunchProfile) -> LaunchProfile 
 // version and any classifier. used as the dedup key when merging library
 // lists from a child profile on top of its parent.
 fn coord_key(name: &str) -> &str {
-    // mojang maven coords are `group:artifact:version[:classifier]`. take
-    // everything up to the second colon.
     let mut it = name.match_indices(':').map(|(i, _)| i);
     it.next();
     it.next().map_or(name, |i| &name[..i])
@@ -123,6 +102,14 @@ pub async fn resolve(
     let mut depth = 0;
 
     while let Some(parent_id) = current.inherits_from.clone() {
+        if !crate::storage::safe_relative_path(Path::new(&parent_id))
+            || Path::new(&parent_id).components().count() != 1
+        {
+            return Err(ResolveError::ParseError(
+                parent_id,
+                "Invalid inherited version ID".to_owned(),
+            ));
+        }
         depth += 1;
         if depth > MAX_INHERITANCE_DEPTH {
             return Err(ResolveError::DepthExceeded(MAX_INHERITANCE_DEPTH));

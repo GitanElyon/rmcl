@@ -3,7 +3,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::instance::content::provider::{ContentProvider, FingerprintQuery, ProviderRegistry};
 use crate::instance::{
@@ -14,7 +13,10 @@ use crate::net::modrinth::{
     DependencyType, ProjectInfo, VersionDependency, VersionInfo, VersionType,
 };
 
-static NEXT_INSTALL_ID: AtomicU64 = AtomicU64::new(1);
+use super::local::{
+    FileTransaction, StagingDirectory, relative_path, require_absent, validate_record,
+};
+use super::manifest::ContentLock;
 
 #[derive(Debug, Clone)]
 pub struct InstallRoot {
@@ -37,6 +39,7 @@ pub struct PlannedInstall {
     pub installed_path: Option<PathBuf>,
     pub kind: ContentKind,
     pub destination: PathBuf,
+    pub expected_record: Option<ContentFileRecord>,
     pub provider_aliases: Vec<ProviderProject>,
     pub required_dependencies: Vec<ProviderProject>,
     pub automatic_dependency: bool,
@@ -100,48 +103,27 @@ pub async fn install(
     minecraft_dir: &Path,
     plan: &DependencyPlan,
 ) -> Result<InstallResult, NetError> {
-    let root = plan
-        .items
+    plan.items
         .first()
         .ok_or_else(|| NetError::Parse("Dependency plan is empty".to_owned()))?;
-    for item in &plan.items {
-        tokio::fs::create_dir_all(&item.destination).await?;
-    }
-    let staging = create_staging_directory(minecraft_dir).await?;
-
-    let result = install_staged(registry, manifest_path, minecraft_dir, &staging, plan).await;
-    if let Err(error) = tokio::fs::remove_dir_all(&staging).await
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(
-            "Failed to remove dependency install staging directory '{}': {error}",
-            staging.display()
-        );
-    }
-    result.map(|(root_path, orphaned_dependencies)| InstallResult {
-        root_path,
-        replaced: root.replacement,
-        skipped: !plan.items.iter().any(PlannedInstall::needs_download),
-        orphaned_dependencies,
+    let staging = StagingDirectory::new(minecraft_dir)?;
+    let recovery_path = staging.path().to_owned();
+    let staged = stage_downloads(registry, staging.path(), plan).await?;
+    let manifest_path = manifest_path.to_owned();
+    let minecraft_dir = minecraft_dir.to_owned();
+    let plan = plan.clone();
+    // The blocking job owns both the staging files and the lifetime lock, even
+    // if the caller stops awaiting it after the commit has started.
+    tokio::task::spawn_blocking(move || {
+        commit_install(&manifest_path, &minecraft_dir, staging, &staged, &plan)
     })
-}
-
-fn staging_directory(minecraft_dir: &Path) -> PathBuf {
-    minecraft_dir.join(format!(
-        ".rmcl-install-{}",
-        NEXT_INSTALL_ID.fetch_add(1, Ordering::Relaxed)
-    ))
-}
-
-async fn create_staging_directory(minecraft_dir: &Path) -> Result<PathBuf, NetError> {
-    loop {
-        let staging = staging_directory(minecraft_dir);
-        match tokio::fs::create_dir(&staging).await {
-            Ok(()) => return Ok(staging),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
-        }
-    }
+    .await
+    .map_err(|error| {
+        NetError::TaskFailed(format!(
+            "Content commit task failed: {error}; recovery location '{}'",
+            recovery_path.display()
+        ))
+    })?
 }
 
 struct StagedFile {
@@ -150,19 +132,11 @@ struct StagedFile {
     target: PathBuf,
 }
 
-struct CommittedFile {
-    target: PathBuf,
-    old_path: Option<PathBuf>,
-    backup: Option<PathBuf>,
-}
-
-async fn install_staged(
+async fn stage_downloads(
     registry: &ProviderRegistry,
-    manifest_path: &Path,
-    minecraft_dir: &Path,
     staging: &Path,
     plan: &DependencyPlan,
-) -> Result<(PathBuf, Vec<PathBuf>), NetError> {
+) -> Result<Vec<StagedFile>, NetError> {
     let mut staged = Vec::new();
     let mut targets = HashSet::new();
     for (index, item) in plan.items.iter().enumerate() {
@@ -187,22 +161,17 @@ async fn install_staged(
                 item.title
             ))
         })?;
+        let mut file_name = file_name.to_os_string();
+        if item.installed_path.as_ref().is_some_and(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "disabled")
+        }) {
+            file_name.push(".disabled");
+        }
         let target = item.destination.join(file_name);
         if !targets.insert(target.clone()) {
             return Err(NetError::Parse(format!(
                 "Multiple selected projects install '{}'",
-                target.display()
-            )));
-        }
-        if target.exists()
-            && item
-                .installed_path
-                .as_ref()
-                .is_none_or(|installed| installed != &target)
-        {
-            return Err(NetError::Parse(format!(
-                "Cannot install '{}' because '{}' already exists",
-                item.title,
                 target.display()
             )));
         }
@@ -212,45 +181,44 @@ async fn install_staged(
             target,
         });
     }
+    Ok(staged)
+}
 
-    let mut committed = Vec::new();
-    for (index, file) in staged.iter().enumerate() {
-        let item = &plan.items[file.item];
-        let old_path = item.installed_path.clone();
-        let backup = if let Some(old_path) = old_path.as_ref() {
-            let backup = staging.join(format!("backup-{index}"));
-            if let Err(error) = tokio::fs::rename(old_path, &backup).await {
-                rollback_files(&committed).await;
-                return Err(error.into());
-            }
-            Some(backup)
-        } else {
-            None
-        };
-        if let Err(error) = tokio::fs::rename(&file.source, &file.target).await {
-            if let (Some(old_path), Some(backup)) = (&old_path, &backup) {
-                let _ = tokio::fs::rename(backup, old_path).await;
-            }
-            rollback_files(&committed).await;
-            return Err(error.into());
-        }
-        committed.push(CommittedFile {
-            target: file.target.clone(),
-            old_path,
-            backup,
-        });
+fn commit_install(
+    manifest_path: &Path,
+    minecraft_dir: &Path,
+    staging: StagingDirectory,
+    staged: &[StagedFile],
+    plan: &DependencyPlan,
+) -> Result<InstallResult, NetError> {
+    let lock =
+        ContentLock::acquire(manifest_path).map_err(|error| NetError::Parse(error.to_string()))?;
+    let mut manifest = lock
+        .load()
+        .map_err(|error| NetError::Parse(error.to_string()))?;
+    let previous = manifest.clone();
+    validate_install(plan, &manifest, minecraft_dir, staged, staging.path())?;
+    let root = &plan.items[0];
+    let root_path = if root.needs_download() {
+        staged
+            .iter()
+            .find(|file| file.item == 0)
+            .map(|file| file.target.clone())
+    } else {
+        root.installed_path.clone()
     }
+    .ok_or_else(|| NetError::Parse("Installed root path is missing".to_owned()))?;
 
-    let previous =
-        ContentManifest::load(manifest_path).map_err(|error| NetError::Parse(error.to_string()))?;
-    let records = match build_records(plan, &previous, minecraft_dir, &staged) {
-        Ok(records) => records,
-        Err(error) => {
-            rollback_files(&committed).await;
-            return Err(error);
+    let mut transaction = FileTransaction::new(staging);
+    let result = (|| {
+        for (index, file) in staged.iter().enumerate() {
+            if let Some(old_path) = &plan.items[file.item].installed_path {
+                let backup = transaction.staging().join(format!("backup-{index}"));
+                transaction.move_path(old_path, &backup)?;
+            }
+            transaction.move_path(&file.source, &file.target)?;
         }
-    };
-    if let Err(error) = ContentManifest::update(manifest_path, |manifest| {
+        let records = build_records(plan, &manifest, minecraft_dir, staged)?;
         for (old_relative, record) in &records {
             if let Some(old_relative) = old_relative
                 && old_relative != &record.relative_path
@@ -259,46 +227,200 @@ async fn install_staged(
             }
             manifest.upsert(record.clone());
         }
-        Ok(())
-    }) {
-        rollback_files(&committed).await;
-        return Err(NetError::Parse(error.to_string()));
-    }
-    for committed in &committed {
-        if let Some(backup) = &committed.backup
-            && let Err(error) = tokio::fs::remove_file(backup).await
-        {
-            tracing::warn!(
-                "Failed to remove dependency install backup '{}': {error}",
-                backup.display()
-            );
-        }
-    }
-
-    let orphaned_dependencies = match ContentManifest::load(manifest_path) {
-        Ok(updated) => updated
+        let orphaned_dependencies = manifest
             .orphaned_dependencies()
             .into_iter()
             .map(|relative| minecraft_dir.join(relative))
-            .collect(),
-        Err(error) => {
-            tracing::warn!("Failed to check for unused dependencies: {error}");
-            Vec::new()
+            .collect();
+        lock.save_if_unchanged(&manifest, &previous)
+            .map_err(|error| NetError::Parse(error.to_string()))?;
+        Ok(InstallResult {
+            root_path,
+            replaced: root.replacement,
+            skipped: !plan.items.iter().any(PlannedInstall::needs_download),
+            orphaned_dependencies,
+        })
+    })();
+    transaction.finish(result)
+}
+
+fn validate_install(
+    plan: &DependencyPlan,
+    manifest: &ContentManifest,
+    minecraft_dir: &Path,
+    staged: &[StagedFile],
+    staging: &Path,
+) -> Result<(), NetError> {
+    reject_final_incompatibilities(&plan.items, manifest, minecraft_dir)?;
+    let mut old_paths = HashMap::new();
+    for (index, item) in plan.items.iter().enumerate() {
+        relative_path(minecraft_dir, &item.destination.join(".rmcl-path-check"))?;
+        if let Some(path) = &item.installed_path {
+            let relative = relative_path(minecraft_dir, path)?;
+            let expected = item.expected_record.as_ref().ok_or_else(|| {
+                NetError::Parse(format!(
+                    "Installation of '{}' has no expected ownership record",
+                    item.title
+                ))
+            })?;
+            if expected.relative_path != relative || manifest.record(&relative) != Some(expected) {
+                return Err(NetError::Parse(format!(
+                    "Ownership of '{}' changed; refresh before retrying",
+                    path.display()
+                )));
+            }
+            validate_record(minecraft_dir, expected)?;
+            if old_paths.insert(path.canonicalize()?, index).is_some() {
+                return Err(NetError::Parse(format!(
+                    "Multiple selected projects replace '{}'",
+                    path.display()
+                )));
+            }
+        } else if item.expected_record.is_some()
+            || manifest.files.iter().any(|record| {
+                record.enabled
+                    && record.kind == item.kind
+                    && record.matches_project(&item.provider, &item.project_id)
+                    && minecraft_dir.join(&record.relative_path).parent()
+                        == Some(item.destination.as_path())
+            })
+        {
+            return Err(NetError::Parse(format!(
+                "Installed project '{}' changed; refresh before retrying",
+                item.title
+            )));
         }
-    };
-    let root = &plan.items[0];
-    let root_path = if root.needs_download() {
-        staged
+    }
+    for item in &plan.items {
+        std::fs::create_dir_all(&item.destination)?;
+    }
+    let staging = staging.canonicalize()?;
+    let mut targets = HashSet::new();
+    for file in staged {
+        let target_relative = relative_path(minecraft_dir, &file.target)?;
+        if let Some(owner) = manifest.record(&target_relative)
+            && Some(owner) != plan.items[file.item].expected_record.as_ref()
+        {
+            return Err(NetError::Parse(format!(
+                "Content manifest already owns '{}'",
+                file.target.display()
+            )));
+        }
+        let metadata = std::fs::symlink_metadata(&file.source)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || !file.source.canonicalize()?.starts_with(&staging)
+        {
+            return Err(NetError::Parse(format!(
+                "Invalid staged content '{}'",
+                file.source.display()
+            )));
+        }
+        let physical_target = match std::fs::symlink_metadata(&file.target) {
+            Ok(metadata) if !metadata.file_type().is_symlink() => {
+                let target = file.target.canonicalize()?;
+                if old_paths.get(&target) != Some(&file.item) {
+                    require_absent(&file.target)?;
+                }
+                target
+            }
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("'{}' already exists", file.target.display()),
+                )
+                .into());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                file.target
+                    .parent()
+                    .ok_or_else(|| NetError::Parse("Content target has no parent".to_owned()))?
+                    .canonicalize()?
+                    .join(file.target.file_name().ok_or_else(|| {
+                        NetError::Parse("Content target has no filename".to_owned())
+                    })?)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !targets.insert(physical_target) {
+            return Err(NetError::Parse(format!(
+                "Multiple selected projects install '{}'",
+                file.target.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn reject_final_incompatibilities(
+    items: &[PlannedInstall],
+    manifest: &ContentManifest,
+    minecraft_dir: &Path,
+) -> Result<(), NetError> {
+    for item in items {
+        let world = if item.kind == ContentKind::DataPack {
+            item.destination.parent()
+        } else {
+            items
+                .first()
+                .filter(|root| root.kind == ContentKind::DataPack)
+                .and_then(|root| root.destination.parent())
+        };
+        for dependency in item
+            .version
+            .dependencies
             .iter()
-            .find(|file| file.item == 0)
-            .map(|file| file.target.clone())
-            .ok_or_else(|| NetError::Parse("Installed root file is missing".to_owned()))
-    } else {
-        root.installed_path
-            .clone()
-            .ok_or_else(|| NetError::Parse("Installed root path is missing".to_owned()))
-    }?;
-    Ok((root_path, orphaned_dependencies))
+            .filter(|dependency| dependency.dependency_type == DependencyType::Incompatible)
+        {
+            let matches = |project: &ProviderProject| {
+                project.provider == item.provider
+                    && dependency
+                        .project_id
+                        .as_ref()
+                        .is_none_or(|id| project.project_id == *id)
+                    && dependency
+                        .version_id
+                        .as_ref()
+                        .is_none_or(|id| project.version_id == *id)
+            };
+            let selected = items.iter().any(|selected| {
+                (selected.kind != ContentKind::DataPack || selected.destination.parent() == world)
+                    && (matches(&selected.identity())
+                        || selected.provider_aliases.iter().any(&matches))
+            });
+            let installed = manifest
+                .files
+                .iter()
+                .filter(|record| record.enabled)
+                .any(|record| {
+                    let replaced = items.iter().any(|replacement| {
+                        replacement.needs_download()
+                            && replacement.installed_path.as_deref()
+                                == Some(minecraft_dir.join(&record.relative_path).as_path())
+                    });
+                    !replaced
+                        && (record.kind != ContentKind::DataPack
+                            || record_in_target(record, record.kind, world))
+                        && record
+                            .resolved_project()
+                            .into_iter()
+                            .chain(record.provider_aliases.iter())
+                            .any(&matches)
+                });
+            if selected || installed {
+                return Err(NetError::Parse(format!(
+                    "'{}' is incompatible with project '{}'",
+                    item.title,
+                    dependency
+                        .project_id
+                        .as_deref()
+                        .or(dependency.version_id.as_deref())
+                        .unwrap_or("unknown")
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn build_records(
@@ -350,7 +472,9 @@ fn build_records(
                 ContentFileRecord {
                     relative_path,
                     kind: item.kind,
-                    enabled: true,
+                    enabled: !path
+                        .extension()
+                        .is_some_and(|extension| extension == "disabled"),
                     fingerprint: crate::instance::content::manifest::fingerprint(&path)?,
                     resolution: crate::instance::Resolution::Resolved {
                         project: item.identity(),
@@ -366,28 +490,7 @@ fn build_records(
         .collect()
 }
 
-async fn rollback_files(committed: &[CommittedFile]) {
-    for committed in committed.iter().rev() {
-        if let Err(error) = tokio::fs::remove_file(&committed.target).await
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                "Failed to remove rolled back content '{}': {error}",
-                committed.target.display()
-            );
-        }
-        if let (Some(old_path), Some(backup)) = (&committed.old_path, &committed.backup)
-            && let Err(error) = tokio::fs::rename(backup, old_path).await
-        {
-            tracing::warn!(
-                "Failed to restore rolled back content '{}': {error}",
-                old_path.display()
-            );
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ProjectKey {
     provider: String,
     project_id: String,
@@ -410,8 +513,7 @@ struct Node {
     installed: Option<InstalledMatch>,
     automatic_dependency: bool,
     cleanup_eligible: bool,
-    exact: bool,
-    dependencies: Vec<ProjectKey>,
+    dependencies: Vec<(ProjectKey, VersionDependency)>,
     optional_dependencies: usize,
     incompatible: Vec<Incompatible>,
 }
@@ -422,6 +524,7 @@ struct InstalledMatch {
     identity: ProviderProject,
     aliases: Vec<ProviderProject>,
     automatic_dependency: bool,
+    record: ContentFileRecord,
 }
 
 #[derive(Debug, Clone)]
@@ -434,8 +537,8 @@ struct Incompatible {
 struct Requirement {
     parent: ProjectKey,
     parent_version_id: String,
+    target: ProjectKey,
     dependency: VersionDependency,
-    ancestors: Vec<ProjectKey>,
 }
 
 pub async fn resolve(
@@ -464,6 +567,11 @@ pub async fn resolve(
     let remote_matches = resolve_installed_files(provider, manifest).await?;
     let root_key = ProjectKey::new(&root.provider, root.project_id.clone());
     let root_installed = installed_root(manifest, minecraft_dir, &root, &remote_matches);
+    if root.installed_path.is_some() && root_installed.is_none() {
+        return Err(NetError::Parse(
+            "Installed root ownership is missing; refresh before retrying".to_owned(),
+        ));
+    }
     let mut nodes = HashMap::from([(
         root_key.clone(),
         Node {
@@ -472,7 +580,6 @@ pub async fn resolve(
             version: root_version.clone(),
             automatic_dependency: false,
             cleanup_eligible: false,
-            exact: true,
             installed: root_installed,
             dependencies: Vec::new(),
             optional_dependencies: 0,
@@ -480,102 +587,166 @@ pub async fn resolve(
         },
     )]);
     let mut queue = VecDeque::new();
-    expand_node(
-        provider,
-        &root_key,
-        &root_version,
-        vec![root_key.clone()],
-        &mut nodes,
-        &mut queue,
-    )
-    .await?;
+    expand_node(provider, &root_key, &root_version, &mut nodes, &mut queue).await?;
 
-    while let Some(requirement) = queue.pop_front() {
-        if nodes
-            .get(&requirement.parent)
-            .is_none_or(|parent| parent.version.id != requirement.parent_version_id)
-        {
-            continue;
-        }
-        let exact = requirement.dependency.version_id.is_some();
-        let parent_kind = nodes
-            .get(&requirement.parent)
-            .map(|node| node.kind)
-            .unwrap_or(root.kind);
-        let choice = resolve_requirement(
-            provider,
-            manifest,
-            &remote_matches,
-            instance,
-            parent_kind,
-            root.target_world.as_deref(),
-            &requirement.dependency,
-        )
-        .await?;
-        if choice.kind == ContentKind::DataPack && root.target_world.is_none() {
-            return Err(NetError::Parse(format!(
-                "Datapack dependency '{}' requires a target world",
-                choice.title
-            )));
-        }
-        let key = ProjectKey::new(provider.id(), choice.version.project_id.clone());
-        if requirement.ancestors.contains(&key) {
-            return Err(NetError::Parse(format!(
-                "Dependency cycle detected at '{}'",
-                choice.title
-            )));
-        }
-        if let Some(parent) = nodes.get_mut(&requirement.parent)
-            && !parent.dependencies.contains(&key)
-        {
-            parent.dependencies.push(key.clone());
-        }
-
-        let replace_selection = match nodes.get(&key) {
-            Some(existing)
-                if exact && existing.exact && existing.version.id != choice.version.id =>
-            {
-                return Err(NetError::Parse(format!(
-                    "Conflicting required versions for '{}': '{}' and '{}'",
-                    choice.title, existing.version.version_number, choice.version.version_number
-                )));
+    let mut seen = HashSet::new();
+    let mut errors = Vec::new();
+    let mut check_progress = false;
+    loop {
+        if check_progress {
+            let order = reachable_order(&root_key, &nodes);
+            let mut selections = order
+                .iter()
+                .map(|key| {
+                    (
+                        key.clone(),
+                        nodes.get(key).map(|node| node.version.id.clone()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            selections.sort_unstable();
+            let pending = queue
+                .iter()
+                .map(|requirement| {
+                    (
+                        requirement.parent.clone(),
+                        requirement.parent_version_id.clone(),
+                        requirement.target.clone(),
+                        requirement.dependency.version_id.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if !seen.insert((selections, pending)) {
+                return Err(NetError::Parse("Dependency selection did not converge: a dependency cycle or conflicting version requirements keep changing selected versions".to_owned()));
             }
-            Some(existing) => exact && !existing.exact && existing.version.id != choice.version.id,
-            None => true,
-        };
-        if !replace_selection {
+        }
+        check_progress = false;
+
+        for _ in 0..queue.len() {
+            let Some(requirement) = queue.pop_front() else {
+                break;
+            };
+            if !reachable_order(&root_key, &nodes).contains(&requirement.parent)
+                || nodes
+                    .get(&requirement.parent)
+                    .is_none_or(|parent| parent.version.id != requirement.parent_version_id)
+            {
+                continue;
+            }
+            if let Some(existing) = nodes.get(&requirement.target)
+                && (requirement.target == root_key
+                    || requirement
+                        .dependency
+                        .version_id
+                        .as_ref()
+                        .is_none_or(|version| version == &existing.version.id))
+            {
+                continue;
+            }
+            let parent_kind = nodes[&requirement.parent].kind;
+            let choice = match resolve_requirement(
+                provider,
+                manifest,
+                &remote_matches,
+                instance,
+                parent_kind,
+                root.target_world.as_deref(),
+                &requirement.dependency,
+            )
+            .await
+            {
+                Ok(choice) => choice,
+                Err(error) => {
+                    errors.push((requirement.parent, requirement.parent_version_id, error));
+                    continue;
+                }
+            };
+            if choice.kind == ContentKind::DataPack && root.target_world.is_none() {
+                errors.push((
+                    requirement.parent,
+                    requirement.parent_version_id,
+                    NetError::Parse(format!(
+                        "Datapack dependency '{}' requires a target world",
+                        choice.title
+                    )),
+                ));
+                continue;
+            }
+            let key = requirement.target;
+            let replace_selection = match nodes.get(&key) {
+                None => true,
+                Some(existing) => {
+                    key != root_key
+                        && requirement.dependency.version_id.is_some()
+                        && existing.version.id != choice.version.id
+                        && active_exact_requirements(&root_key, &nodes)
+                            .get(&key)
+                            .is_some_and(|requirements| {
+                                requirements.iter().all(|requirement| {
+                                    requirement.dependency.version_id.as_deref()
+                                        == Some(choice.version.id.as_str())
+                                })
+                            })
+                }
+            };
+            if !replace_selection {
+                continue;
+            }
+
+            check_progress |= nodes.contains_key(&key);
+            nodes.insert(
+                key.clone(),
+                Node {
+                    title: choice.title,
+                    kind: choice.kind,
+                    version: choice.version.clone(),
+                    installed: choice.installed,
+                    automatic_dependency: choice.automatic_dependency,
+                    cleanup_eligible: choice.cleanup_eligible,
+                    dependencies: Vec::new(),
+                    optional_dependencies: 0,
+                    incompatible: Vec::new(),
+                },
+            );
+            if let Err(error) =
+                expand_node(provider, &key, &choice.version, &mut nodes, &mut queue).await
+            {
+                errors.push((key, choice.version.id, error));
+            }
+        }
+        if !queue.is_empty() {
             continue;
         }
 
-        let mut ancestors = requirement.ancestors;
-        ancestors.push(key.clone());
-        nodes.insert(
-            key.clone(),
-            Node {
-                title: choice.title,
-                kind: choice.kind,
-                version: choice.version.clone(),
-                installed: choice.installed,
-                automatic_dependency: choice.automatic_dependency,
-                cleanup_eligible: choice.cleanup_eligible,
-                exact,
-                dependencies: Vec::new(),
-                optional_dependencies: 0,
-                incompatible: Vec::new(),
-            },
-        );
-        expand_node(
-            provider,
-            &key,
-            &choice.version,
-            ancestors,
-            &mut nodes,
-            &mut queue,
-        )
-        .await?;
+        let order = reachable_order(&root_key, &nodes);
+        errors.retain(|(key, version, _)| {
+            order.contains(key)
+                && nodes
+                    .get(key)
+                    .is_some_and(|node| node.version.id == *version)
+        });
+        let (mut retry, conflict) = retry_requirements(&root_key, &nodes);
+        retry.retain(|requirement| {
+            !errors.iter().any(|(key, version, _)| {
+                key == &requirement.parent && version == &requirement.parent_version_id
+            })
+        });
+        if !retry.is_empty() {
+            queue.extend(retry);
+            check_progress = true;
+            continue;
+        }
+        if let Some((_, _, error)) = errors.into_iter().next() {
+            return Err(error);
+        }
+        if let Some(conflict) = conflict {
+            return Err(conflict);
+        }
+        break;
     }
 
     let order = reachable_order(&root_key, &nodes);
+    reject_dependency_cycles(&order, &nodes)?;
     reject_installed_incompatibilities(
         provider,
         manifest,
@@ -628,22 +799,37 @@ pub fn merge(plans: Vec<DependencyPlan>) -> Result<DependencyPlan, NetError> {
                         item.title, existing.version.version_number, item.version.version_number
                     )));
                 }
+                if existing.installed_path.is_some()
+                    && item.installed_path.is_some()
+                    && (existing.installed_path != item.installed_path
+                        || existing.expected_record != item.expected_record)
+                {
+                    return Err(NetError::Parse(format!(
+                        "Conflicting installed ownership for '{}'",
+                        item.title
+                    )));
+                }
                 for dependency in item.required_dependencies {
                     if !existing.required_dependencies.contains(&dependency) {
                         existing.required_dependencies.push(dependency);
                     }
                 }
-                for alias in item.provider_aliases {
-                    if !existing.provider_aliases.contains(&alias) {
-                        existing.provider_aliases.push(alias);
+                if existing.replacement || item.replacement {
+                    existing.provider_aliases.clear();
+                } else {
+                    for alias in item.provider_aliases {
+                        if !existing.provider_aliases.contains(&alias) {
+                            existing.provider_aliases.push(alias);
+                        }
                     }
                 }
+                existing.replacement |= item.replacement;
                 if root && !*existing_root {
                     existing.title = item.title;
                     if item.installed_path.is_some() {
                         existing.installed_path = item.installed_path;
+                        existing.expected_record = item.expected_record;
                     }
-                    existing.replacement |= item.replacement;
                     existing.automatic_dependency = false;
                     existing.cleanup_eligible = false;
                     *existing_root = true;
@@ -655,8 +841,10 @@ pub fn merge(plans: Vec<DependencyPlan>) -> Result<DependencyPlan, NetError> {
     }
     merged.sort_by_key(|(_, root)| !*root);
     let root_count = merged.iter().take_while(|(_, root)| *root).count();
+    let items = merged.into_iter().map(|(item, _)| item).collect::<Vec<_>>();
+    reject_final_incompatibilities(&items, &ContentManifest::default(), Path::new(""))?;
     Ok(DependencyPlan {
-        items: merged.into_iter().map(|(item, _)| item).collect(),
+        items,
         root_count,
         optional_dependencies,
     })
@@ -775,7 +963,6 @@ async fn expand_node(
     provider: &dyn ContentProvider,
     key: &ProjectKey,
     version: &VersionInfo,
-    ancestors: Vec<ProjectKey>,
     nodes: &mut HashMap<ProjectKey, Node>,
     queue: &mut VecDeque<Requirement>,
 ) -> Result<(), NetError> {
@@ -784,7 +971,13 @@ async fn expand_node(
     let mut optional_dependencies = 0;
     for dependency in &version.dependencies {
         match dependency.dependency_type {
-            DependencyType::Required => required.push(dependency.clone()),
+            DependencyType::Required => {
+                let (project_id, _) = dependency_identity(provider, dependency).await?;
+                required.push((
+                    ProjectKey::new(provider.id(), project_id),
+                    dependency.clone(),
+                ));
+            }
             DependencyType::Optional => optional_dependencies += 1,
             DependencyType::Incompatible => {
                 let (project_id, version_id) = dependency_identity(provider, dependency).await?;
@@ -799,13 +992,18 @@ async fn expand_node(
     if let Some(node) = nodes.get_mut(key) {
         node.optional_dependencies = optional_dependencies;
         node.incompatible = incompatible;
+        node.dependencies = required.clone();
     }
-    queue.extend(required.into_iter().map(|dependency| Requirement {
-        parent: key.clone(),
-        parent_version_id: version.id.clone(),
-        dependency,
-        ancestors: ancestors.clone(),
-    }));
+    queue.extend(
+        required
+            .into_iter()
+            .map(|(target, dependency)| Requirement {
+                parent: key.clone(),
+                parent_version_id: version.id.clone(),
+                target,
+                dependency,
+            }),
+    );
     Ok(())
 }
 
@@ -817,7 +1015,10 @@ async fn dependency_identity(
         return Ok((project_id, dependency.version_id.clone()));
     }
     let version_id = dependency.version_id.as_deref().ok_or_else(|| {
-        NetError::Parse("Incompatible dependency has no provider project".to_owned())
+        NetError::Parse(format!(
+            "{:?} dependency has no provider project",
+            dependency.dependency_type
+        ))
     })?;
     let version = provider.version(version_id).await?;
     Ok((version.project_id, Some(version_id.to_owned())))
@@ -939,6 +1140,15 @@ fn installed_root(
     let path = root.installed_path.as_ref()?;
     let relative_path = path.strip_prefix(minecraft_dir).ok()?.to_owned();
     let record = manifest.record(&relative_path)?;
+    if record.kind != root.kind
+        || !record_in_target(record, root.kind, root.target_world.as_deref())
+        || (!record.matches_project(&root.provider, &root.project_id)
+            && !remote_matches.get(&relative_path).is_some_and(|project| {
+                project.provider == root.provider && project.project_id == root.project_id
+            }))
+    {
+        return None;
+    }
     Some(installed_match(
         record,
         remote_matches.get(&relative_path),
@@ -1022,6 +1232,7 @@ fn installed_match(
         identity,
         aliases,
         automatic_dependency: record.automatic_dependency,
+        record: record.clone(),
     }
 }
 
@@ -1035,10 +1246,136 @@ fn reachable_order(root: &ProjectKey, nodes: &HashMap<ProjectKey, Node>) -> Vec<
         }
         order.push(key.clone());
         if let Some(node) = nodes.get(&key) {
-            pending.extend(node.dependencies.iter().cloned());
+            pending.extend(node.dependencies.iter().map(|(key, _)| key.clone()));
         }
     }
     order
+}
+
+fn active_exact_requirements(
+    root: &ProjectKey,
+    nodes: &HashMap<ProjectKey, Node>,
+) -> HashMap<ProjectKey, Vec<Requirement>> {
+    let mut active = HashMap::new();
+    for parent in reachable_order(root, nodes) {
+        let Some(node) = nodes.get(&parent) else {
+            continue;
+        };
+        for (target, dependency) in &node.dependencies {
+            if dependency.version_id.is_some() {
+                active
+                    .entry(target.clone())
+                    .or_insert_with(Vec::new)
+                    .push(Requirement {
+                        parent: parent.clone(),
+                        parent_version_id: node.version.id.clone(),
+                        target: target.clone(),
+                        dependency: dependency.clone(),
+                    });
+            }
+        }
+    }
+    active
+}
+
+fn retry_requirements(
+    root: &ProjectKey,
+    nodes: &HashMap<ProjectKey, Node>,
+) -> (Vec<Requirement>, Option<NetError>) {
+    let mut retry = Vec::new();
+    let mut queued = HashSet::new();
+    let mut conflict = None;
+    let mut exact = active_exact_requirements(root, nodes)
+        .into_iter()
+        .collect::<Vec<_>>();
+    exact.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    for (target, requirements) in exact {
+        let mut versions = requirements
+            .iter()
+            .filter_map(|requirement| requirement.dependency.version_id.as_deref())
+            .collect::<Vec<_>>();
+        if &target == root {
+            versions.push(nodes[root].version.id.as_str());
+        }
+        versions.sort_unstable();
+        versions.dedup();
+        if versions.len() > 1 {
+            conflict.get_or_insert_with(|| {
+                NetError::Parse(format!(
+                    "Conflicting required versions for '{}': {}",
+                    target.project_id,
+                    versions.join(", ")
+                ))
+            });
+        } else if let Some(version) = versions.first()
+            && nodes
+                .get(&target)
+                .is_none_or(|node| node.version.id.as_str() != *version)
+        {
+            queued.insert(target);
+            retry.push(requirements[0].clone());
+        }
+    }
+    for parent in reachable_order(root, nodes) {
+        let Some(node) = nodes.get(&parent) else {
+            continue;
+        };
+        for (target, dependency) in &node.dependencies {
+            if !nodes.contains_key(target) && queued.insert(target.clone()) {
+                retry.push(Requirement {
+                    parent: parent.clone(),
+                    parent_version_id: node.version.id.clone(),
+                    target: target.clone(),
+                    dependency: dependency.clone(),
+                });
+            }
+        }
+    }
+    (retry, conflict)
+}
+
+fn reject_dependency_cycles(
+    order: &[ProjectKey],
+    nodes: &HashMap<ProjectKey, Node>,
+) -> Result<(), NetError> {
+    let mut incoming = order
+        .iter()
+        .cloned()
+        .map(|key| (key, 0usize))
+        .collect::<HashMap<_, _>>();
+    for key in order {
+        let node = nodes.get(key).ok_or_else(|| {
+            NetError::Parse(format!(
+                "Resolved dependency '{}' is missing",
+                key.project_id
+            ))
+        })?;
+        for (dependency, _) in &node.dependencies {
+            *incoming.entry(dependency.clone()).or_default() += 1;
+        }
+    }
+    let mut ready = order
+        .iter()
+        .filter(|key| incoming.get(*key) == Some(&0))
+        .cloned()
+        .collect::<VecDeque<_>>();
+    let mut visited = 0;
+    while let Some(key) = ready.pop_front() {
+        visited += 1;
+        for (dependency, _) in &nodes[&key].dependencies {
+            let count = incoming.entry(dependency.clone()).or_default();
+            *count -= 1;
+            if *count == 0 {
+                ready.push_back(dependency.clone());
+            }
+        }
+    }
+    if visited != order.len() {
+        return Err(NetError::Parse(
+            "Dependency cycle detected in selected versions".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn reject_installed_incompatibilities(
@@ -1067,11 +1404,21 @@ fn reject_installed_incompatibilities(
                     .then(|| nodes.get(selected_key))
                     .flatten()
             });
-            let conflicts = installed.as_ref().is_some_and(|installed| {
-                incompatible
-                    .version_id
-                    .as_ref()
-                    .is_none_or(|version_id| installed.identity.version_id == *version_id)
+            let conflicts = installed.iter().any(|installed| {
+                let replaced = order
+                    .iter()
+                    .filter_map(|key| nodes.get(key))
+                    .any(|selected| {
+                        selected.installed.as_ref().is_some_and(|previous| {
+                            previous.relative_path == installed.relative_path
+                                && previous.identity.version_id != selected.version.id
+                        })
+                    });
+                !replaced
+                    && incompatible
+                        .version_id
+                        .as_ref()
+                        .is_none_or(|version_id| installed.identity.version_id == *version_id)
             }) || selected.is_some_and(|selected| {
                 incompatible
                     .version_id
@@ -1095,7 +1442,7 @@ fn find_installed_incompatible(
     provider: &str,
     project_id: &str,
     target_world: Option<&Path>,
-) -> Option<InstalledMatch> {
+) -> Vec<InstalledMatch> {
     manifest
         .files
         .iter()
@@ -1104,7 +1451,7 @@ fn find_installed_incompatible(
             record.kind != ContentKind::DataPack
                 || record_in_target(record, ContentKind::DataPack, target_world)
         })
-        .find_map(|record| {
+        .filter_map(|record| {
             let remote = remote_matches.get(&record.relative_path);
             (record.matches_project(provider, project_id)
                 || remote.is_some_and(|project| {
@@ -1112,6 +1459,7 @@ fn find_installed_incompatible(
                 }))
             .then(|| installed_match(record, remote, provider, project_id))
         })
+        .collect()
 }
 
 fn planned_install(
@@ -1137,6 +1485,10 @@ fn planned_install(
         title: node.title.clone(),
         version: node.version.clone(),
         installed_path,
+        expected_record: node
+            .installed
+            .as_ref()
+            .map(|installed| installed.record.clone()),
         kind: node.kind,
         destination: match node.kind {
             ContentKind::DataPack => target_world
@@ -1154,7 +1506,7 @@ fn planned_install(
         required_dependencies: node
             .dependencies
             .iter()
-            .filter_map(|dependency| {
+            .filter_map(|(dependency, _)| {
                 nodes
                     .get(dependency)
                     .map(|dependency_node| ProviderProject {
@@ -1163,7 +1515,12 @@ fn planned_install(
                         version_id: dependency_node.version.id.clone(),
                     })
             })
-            .collect(),
+            .fold(Vec::new(), |mut dependencies, dependency| {
+                if !dependencies.contains(&dependency) {
+                    dependencies.push(dependency);
+                }
+                dependencies
+            }),
         automatic_dependency: node.automatic_dependency,
         cleanup_eligible: node.cleanup_eligible,
         replacement,
@@ -1172,4 +1529,4 @@ fn planned_install(
 
 #[cfg(test)]
 #[path = "../tests/content/dependencies.rs"]
-mod tests;
+pub(crate) mod tests;

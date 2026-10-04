@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// settings panel: manages config profiles and shows compact instance info.
-// detailed instance and launcher configuration opens in the TUI popups.
-
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -47,14 +48,21 @@ pub struct SettingsState {
     pub add_mode: AddMode,
     pub pane: SettingsPane,
     meta_dir: PathBuf,
+    instances_dir: PathBuf,
     active_profile: Option<String>,
     instance_name: Option<String>,
-    java_key: Option<String>,
     java_label: String,
+    java_cache: HashMap<String, CachedJavaLabel>,
+}
+
+#[derive(Default)]
+struct CachedJavaLabel {
+    key: Option<(chrono::DateTime<chrono::Utc>, String)>,
+    result: Arc<Mutex<Option<String>>>,
 }
 
 impl SettingsState {
-    pub fn new(meta_dir: PathBuf) -> Self {
+    pub fn new(meta_dir: PathBuf, instances_dir: PathBuf) -> Self {
         let profiles = crate::instance::config_sync::list_profiles(&meta_dir).unwrap_or_else(|e| {
             tracing::warn!("Failed to load config sync profiles: {}", e);
             Vec::new()
@@ -65,10 +73,11 @@ impl SettingsState {
             add_mode: AddMode::None,
             pane: SettingsPane::Profile,
             meta_dir,
+            instances_dir,
             active_profile: None,
             instance_name: None,
-            java_key: None,
             java_label: "unknown".to_string(),
+            java_cache: HashMap::new(),
         };
         state.select_active();
         state
@@ -107,6 +116,14 @@ impl SettingsState {
         self.list_state.selected = Some(self.list_state.selected.unwrap_or(0).min(last));
     }
 
+    pub fn invalidate_java_cache(&mut self, instance_name: Option<&str>) {
+        if let Some(name) = instance_name {
+            self.java_cache.remove(name);
+        } else {
+            self.java_cache.clear();
+        }
+    }
+
     fn update_for_instance(&mut self, instance: Option<&InstanceConfig>) {
         let instance_name = instance.map(|inst| inst.name.clone());
         let active_profile = instance.and_then(|inst| inst.config_sync_profile.clone());
@@ -119,15 +136,48 @@ impl SettingsState {
             self.select_active();
         }
 
-        let java_key = instance.map(java_path_key);
-        if self.java_key != java_key {
-            let java_source = instance.map(effective_java_path);
-            self.java_label = java_source
-                .as_deref()
-                .map(java_version_label)
-                .unwrap_or_else(|| "unknown".to_string());
-            self.java_key = java_key;
-        }
+        self.java_label = if let Some(instance) = instance {
+            let settings = SETTINGS.read();
+            let cwd = self
+                .instances_dir
+                .join(&instance.name)
+                .join(crate::storage::MINECRAFT_DIR_NAME);
+            let environment = crate::instance::java::merge_environment(
+                &settings.defaults.environment,
+                &instance.environment,
+            );
+            let java = crate::instance::java::resolve_java_path_in(
+                instance
+                    .java_path
+                    .as_deref()
+                    .filter(|path| !path.is_empty())
+                    .or(settings.paths.effective_java_path()),
+                &cwd,
+                &environment,
+            );
+            let key = (instance.created, java_path_key(&java, &cwd, &environment));
+            let cached = self.java_cache.entry(instance.name.clone()).or_default();
+            if cached.key.as_ref() != Some(&key) {
+                cached.key = Some(key);
+                cached.result = Default::default();
+                let pending = cached.result.clone();
+                std::thread::spawn(move || {
+                    let label = java_version_label(&java, &cwd, &environment);
+                    *pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(label);
+                    crate::feedback::request_redraw();
+                });
+            }
+            cached
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned())
+        } else {
+            "unknown".to_owned()
+        };
     }
 }
 
@@ -140,38 +190,35 @@ fn add_active_profile(profiles: &mut Vec<String>, active_profile: Option<&str>) 
     }
 }
 
-fn java_path_key(instance: &InstanceConfig) -> String {
-    instance
-        .java_path
-        .as_deref()
-        .filter(|path| !path.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            SETTINGS
-                .read()
-                .paths
-                .effective_java_path()
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| "<auto>".to_owned())
+fn java_path_key(
+    java: &str,
+    cwd: &Path,
+    environment: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let path = cwd.join(java);
+    let metadata = std::fs::metadata(&path).ok().map(|metadata| {
+        (
+            metadata.len(),
+            metadata.modified().ok(),
+            metadata.created().ok(),
+            metadata.permissions(),
+        )
+    });
+    format!(
+        "{java}:{}:{:?}:{metadata:?}",
+        crate::instance::java::probe_context_key(cwd, environment),
+        std::fs::canonicalize(path).ok(),
+    )
 }
 
-fn effective_java_path(instance: &InstanceConfig) -> String {
-    instance
-        .java_path
-        .clone()
-        .or_else(|| {
-            SETTINGS
-                .read()
-                .paths
-                .effective_java_path()
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(crate::instance::java::detect_java_path)
-}
-
-fn java_version_label(java_path: &str) -> String {
-    let Some(version) = crate::instance::java::java_version(Path::new(java_path)) else {
+fn java_version_label(
+    java_path: &str,
+    cwd: &Path,
+    environment: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let Some(version) =
+        crate::instance::java::java_version_in(Path::new(java_path), cwd, environment)
+    else {
         return "unknown".to_string();
     };
     let major = crate::instance::java::java_major(Some(&version));
@@ -255,7 +302,10 @@ pub fn render(
         render_separator(frame, chunks[1], focused, state.pane);
         render_instance_info(frame, chunks[2], focused, state, instance);
     } else {
-        render_profile_list(frame, inner, focused, state);
+        match state.pane {
+            SettingsPane::Profile => render_profile_list(frame, inner, focused, state),
+            SettingsPane::Info => render_instance_info(frame, inner, focused, state, instance),
+        }
     }
 
     if let AddMode::ProfileName(name) = &state.add_mode {
@@ -445,15 +495,9 @@ fn render_add_profile_popup(frame: &mut Frame, name: &str) {
 }
 
 fn popup_area(frame: &Frame, width: u16, height: u16) -> Rect {
-    let area = frame.area();
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect {
-        x,
-        y,
-        width: width.min(area.width),
-        height: height.min(area.height),
-    }
+    frame
+        .area()
+        .centered(Constraint::Length(width), Constraint::Length(height))
 }
 
 pub enum SettingsAction {

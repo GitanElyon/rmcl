@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-use crossterm::event::{KeyCode, MouseEventKind};
+use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use std::path::{Path, PathBuf};
 
 use super::harness::UiHarness;
 use crate::instance::content::entry::ContentEntry;
 use crate::instance::{
-    ContentFileRecord, ContentKind, ContentManifest, FileFingerprint, ProviderProject, Resolution,
+    ContentFileRecord, ContentKind, ContentManifest, ProviderProject, Resolution,
 };
 use crate::net::modrinth::DiscoveryProject;
 use crate::tui::{
@@ -17,6 +17,22 @@ use crate::tui::{
         popups::confirm,
     },
 };
+
+#[test]
+fn remote_project_links_use_http_urls_and_encode_shell_metacharacters() {
+    let url =
+        crate::tui::input::project_link_url(r#"https://example.com/"&%USERNAME%?q=a b"#).unwrap();
+    assert_eq!(url.as_str(), "https://example.com/%22&%USERNAME%?q=a%20b");
+    for link in [
+        "file:///C:/Windows/notepad.exe",
+        "javascript:alert(1)",
+        "shell:AppsFolder",
+        r"C:\folder\file",
+        "not a url",
+    ] {
+        assert!(crate::tui::input::project_link_url(link).is_err(), "{link}");
+    }
+}
 
 #[test]
 fn global_navigation_returns_from_log_overlay() {
@@ -72,13 +88,13 @@ fn installed_version_action_requires_selected_provider_match() {
     ui.add_instance("Unmatched");
     ui.app.focused = FocusedArea::Content;
     ui.app.content_tab = ContentTab::Mods;
-    let path = ui
-        .instance_path("Unmatched")
-        .join(crate::storage::MINECRAFT_DIR_NAME)
-        .join("mods/unknown.jar");
+    let minecraft = crate::storage::InstancePaths::new(ui.instance_path("Unmatched")).minecraft();
+    let path = minecraft.join("mods/unknown.jar");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"unknown").unwrap();
     ui.app.mods_state.entries = vec![content_entry("Unknown mod", path)];
     ui.app.mods_state.list_state.selected = Some(0);
-    let record = managed_mod_record("mods/unknown.jar", "known", false, Vec::new());
+    let record = managed_mod_record(&minecraft, "mods/unknown.jar", "known", false, Vec::new());
     let project = record.resolved_project().unwrap().clone();
     ui.app.content_manifest = Some((
         "Unmatched".to_owned(),
@@ -102,13 +118,13 @@ fn installed_popup_navigation_preserves_local_filters() {
     ui.add_instance("Popup");
     ui.app.focused = FocusedArea::Content;
     ui.app.content_tab = ContentTab::Mods;
-    let path = ui
-        .instance_path("Popup")
-        .join(crate::storage::MINECRAFT_DIR_NAME)
-        .join("mods/known.jar");
+    let minecraft = crate::storage::InstancePaths::new(ui.instance_path("Popup")).minecraft();
+    let path = minecraft.join("mods/known.jar");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"known").unwrap();
     ui.app.mods_state.entries = vec![content_entry("Known mod", path)];
     ui.app.mods_state.list_state.selected = Some(0);
-    let record = managed_mod_record("mods/known.jar", "known", false, Vec::new());
+    let record = managed_mod_record(&minecraft, "mods/known.jar", "known", false, Vec::new());
     let project = record.resolved_project().unwrap().clone();
     ui.app.content_manifest = Some((
         "Popup".to_owned(),
@@ -282,15 +298,16 @@ fn world_datapack_version_action_requires_selected_provider_match() {
     ui.add_instance("Datapacks");
     ui.app.focused = FocusedArea::Content;
     ui.app.content_tab = ContentTab::Worlds;
-    let world = ui
-        .instance_path("Datapacks")
-        .join(crate::storage::MINECRAFT_DIR_NAME)
-        .join("saves/World");
+    let minecraft = crate::storage::InstancePaths::new(ui.instance_path("Datapacks")).minecraft();
+    let world = minecraft.join("saves/World");
     let path = world.join("datapacks/unknown.zip");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"pack").unwrap();
     ui.app.world_datapacks_state.entries = vec![content_entry("Unknown datapack", path)];
     ui.app.world_datapacks_state.list_state.selected = Some(0);
     ui.app.open_world_datapacks = Some(("World".to_owned(), world));
     let mut record = managed_mod_record(
+        &minecraft,
         "saves/World/datapacks/unknown.zip",
         "known",
         false,
@@ -482,6 +499,7 @@ fn confirmed_screenshot_delete_removes_state_and_file() {
 }
 
 fn managed_mod_record(
+    minecraft: &Path,
     path: &str,
     project_id: &str,
     automatic_dependency: bool,
@@ -491,11 +509,8 @@ fn managed_mod_record(
         relative_path: PathBuf::from(path),
         kind: ContentKind::Mod,
         enabled: true,
-        fingerprint: FileFingerprint {
-            size: 1,
-            modified_ns: 1,
-            hashes: Default::default(),
-        },
+        fingerprint: crate::instance::content::manifest::fingerprint(&minecraft.join(path))
+            .unwrap(),
         resolution: Resolution::Resolved {
             project: ProviderProject {
                 provider: "modrinth".to_owned(),
@@ -552,8 +567,8 @@ fn deleting_a_mod_offers_its_unused_dependency_chain() {
     ContentManifest {
         version: 1,
         files: vec![
-            managed_mod_record("mods/root.jar", "root", false, vec![dependency]),
-            managed_mod_record("mods/library.jar", "library", true, Vec::new()),
+            managed_mod_record(&minecraft, "mods/root.jar", "root", false, vec![dependency]),
+            managed_mod_record(&minecraft, "mods/library.jar", "library", true, Vec::new()),
         ],
     }
     .save(&crate::storage::InstancePaths::new(ui.instance_path("Dependencies")).content_manifest())
@@ -596,10 +611,12 @@ fn deleting_a_required_library_warns_but_can_continue() {
     let library_path = minecraft.join("mods/library.jar");
     std::fs::create_dir_all(library_path.parent().unwrap()).unwrap();
     std::fs::write(&library_path, b"l").unwrap();
+    std::fs::write(minecraft.join("mods/root.jar"), b"r").unwrap();
     ContentManifest {
         version: 1,
         files: vec![
             managed_mod_record(
+                &minecraft,
                 "mods/root.jar",
                 "root",
                 false,
@@ -609,7 +626,7 @@ fn deleting_a_required_library_warns_but_can_continue() {
                     version_id: "library-version".to_owned(),
                 }],
             ),
-            managed_mod_record("mods/library.jar", "library", true, Vec::new()),
+            managed_mod_record(&minecraft, "mods/library.jar", "library", true, Vec::new()),
         ],
     }
     .save(&crate::storage::InstancePaths::new(ui.instance_path("Required")).content_manifest())
@@ -628,6 +645,58 @@ fn deleting_a_required_library_warns_but_can_continue() {
     ));
     ui.key(KeyCode::Enter);
     assert!(!Path::new(&library_path).exists());
+}
+
+#[test]
+fn content_delete_rejects_ownership_changed_after_confirmation_opened() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("ChangedOwner");
+    let paths = crate::storage::InstancePaths::new(ui.instance_path("ChangedOwner"));
+    let minecraft = paths.minecraft();
+    let path = minecraft.join("mods/root.jar");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"original").unwrap();
+    let manifest = ContentManifest {
+        version: 1,
+        files: vec![managed_mod_record(
+            &minecraft,
+            "mods/root.jar",
+            "root",
+            false,
+            Vec::new(),
+        )],
+    };
+    manifest.save(&paths.content_manifest()).unwrap();
+    ui.app.content_manifest = Some(("ChangedOwner".to_owned(), manifest));
+    ui.app.mods_state.entries = vec![content_entry("Root", path.clone())];
+    ui.app.mods_state.list_state.selected = Some(0);
+    ui.app.focused = FocusedArea::Content;
+    ui.app.content_tab = ContentTab::Mods;
+    ui.key(KeyCode::Char('d'));
+
+    let new_owner = ProviderProject {
+        provider: "curseforge".to_owned(),
+        project_id: "new-owner".to_owned(),
+        version_id: "new".to_owned(),
+    };
+    ContentManifest::update(&paths.content_manifest(), |manifest| {
+        manifest.files[0].resolution = Resolution::Resolved {
+            project: new_owner.clone(),
+        };
+        Ok(())
+    })
+    .unwrap();
+    ui.key(KeyCode::Enter);
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"original");
+    assert_eq!(ui.app.mods_state.entries[0].path, path);
+    assert_eq!(
+        ContentManifest::load(&paths.content_manifest())
+            .unwrap()
+            .files[0]
+            .resolved_project(),
+        Some(&new_owner)
+    );
 }
 
 #[test]
@@ -664,6 +733,336 @@ fn confirmed_account_delete_updates_the_account_panel() {
             .preferred_account,
         None
     );
+}
+
+#[test]
+fn typing_d_in_offline_account_name_does_not_open_delete_confirmation() {
+    let mut ui = UiHarness::new();
+    ui.add_account("MicrosoftPlayer");
+    ui.app.focused = FocusedArea::Account;
+
+    ui.key(KeyCode::Char('a'));
+    ui.key(KeyCode::Char('o'));
+    ui.key(KeyCode::Char('d'));
+
+    assert_eq!(ui.app.focused, FocusedArea::Account);
+    assert!(matches!(
+        &ui.app.account_state.add_mode,
+        crate::tui::widgets::account::AddMode::OfflineNameInput(name) if name == "d"
+    ));
+}
+
+#[test]
+fn switching_instances_discards_another_instances_update_review() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("A");
+    ui.add_instance("B");
+    let mut update = crate::tui::widgets::content::update::State::checking(
+        "A".to_owned(),
+        ContentKind::Mod,
+        None,
+        Vec::new(),
+    );
+    update.phase = crate::tui::widgets::content::update::Phase::Review;
+    ui.app.content_update_popup = Some(update);
+    ui.app.instances_state.list_state.selected = Some(1);
+
+    ui.key(KeyCode::Enter);
+
+    assert!(ui.app.content_update_popup.is_none());
+}
+
+#[test]
+fn checking_popup_locks_input_until_cancelled() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("A");
+    ui.app.content_update_popup = Some(crate::tui::widgets::content::update::State::checking(
+        "A".to_owned(),
+        ContentKind::Mod,
+        None,
+        Vec::new(),
+    ));
+    ui.app.focused = FocusedArea::Content;
+
+    ui.key(KeyCode::Tab);
+    assert!(ui.app.content_update_popup.is_some());
+    assert_eq!(ui.app.content_tab, ContentTab::Mods);
+    ui.draw();
+    assert!(ui.screen().contains("Preparing updates"));
+
+    ui.key(KeyCode::Esc);
+    assert!(ui.app.content_update_popup.is_none());
+}
+
+#[test]
+fn log_overlay_ignores_page_keys_and_stays_put_while_reading_history() {
+    use crate::tui::logging::{clear_app_logs, push_app_log};
+    let mut ui = UiHarness::new();
+    clear_app_logs();
+    for index in 0..40 {
+        push_app_log(format!("12:00:{index:02}:INFO:rmcl: line {index}"));
+    }
+    ui.app.focused = FocusedArea::OverviewExpanded;
+    ui.draw();
+    // 30-row terminal: overlay 28 rows, minus border = 26 visible lines.
+    assert_eq!(ui.app.log_overlay_max_scroll, 14);
+    assert_eq!(ui.app.log_overlay_scroll, 14);
+
+    ui.key(KeyCode::PageUp);
+    assert_eq!(ui.app.log_overlay_scroll, 14);
+    ui.key(KeyCode::PageDown);
+    assert_eq!(ui.app.log_overlay_scroll, 14);
+    assert!(ui.screen().contains("[g/G] top/bottom"));
+    assert!(ui.screen().contains("[Esc] close"));
+    assert!(!ui.screen().contains("PgUp"));
+    assert!(!ui.screen().contains("[y]"));
+    for _ in 0..5 {
+        ui.key(KeyCode::Char('k'));
+    }
+    assert_eq!(ui.app.log_overlay_scroll, 9);
+    for index in 40..45 {
+        push_app_log(format!("12:01:{index:02}:INFO:rmcl: line {index}"));
+    }
+    ui.draw();
+    assert_eq!(ui.app.log_overlay_max_scroll, 19);
+    assert_eq!(ui.app.log_overlay_scroll, 9);
+
+    ui.key(KeyCode::End);
+    ui.draw();
+    assert_eq!(ui.app.log_overlay_scroll, 19);
+    push_app_log("12:02:00:INFO:rmcl: latest".to_owned());
+    ui.draw();
+    assert_eq!(ui.app.log_overlay_scroll, 20);
+    clear_app_logs();
+}
+
+#[test]
+fn log_overlay_level_filter_opens_cycles_and_closes() {
+    use crate::tui::logging::{clear_app_logs, push_app_log};
+    use crate::tui::widgets::content::discovery::CategoryFilter;
+    let mut ui = UiHarness::new();
+    clear_app_logs();
+    push_app_log("12:00:00:ERROR:rmcl: failed".to_owned());
+    push_app_log("12:00:00:INFO:rmcl: done".to_owned());
+    ui.app.focused = FocusedArea::OverviewExpanded;
+
+    ui.key(KeyCode::Char('f'));
+    assert!(ui.app.log_filter_open);
+    ui.draw();
+    assert!(ui.screen().contains("Log levels"));
+    assert!(ui.screen().contains("· Error"));
+    ui.key(KeyCode::Enter);
+    assert_eq!(ui.app.log_level_filters[0], Some(CategoryFilter::Include));
+    ui.draw();
+    assert!(ui.screen().contains("+ Error"));
+    assert!(ui.screen().contains("1 filter(s)"));
+    ui.key(KeyCode::Esc);
+    ui.draw();
+    assert!(ui.screen().contains("failed"));
+    assert!(!ui.screen().contains("done"));
+    ui.key(KeyCode::Char('f'));
+    ui.key(KeyCode::Enter);
+    ui.draw();
+    assert!(ui.screen().contains("− Error"));
+    ui.key(KeyCode::Esc);
+    assert!(!ui.app.log_filter_open);
+    assert_eq!(ui.app.log_level_filters[0], Some(CategoryFilter::Exclude));
+    ui.draw();
+    assert!(!ui.screen().contains("failed"));
+    assert!(ui.screen().contains("done"));
+    clear_app_logs();
+}
+
+#[test]
+fn mouse_drag_selects_viewer_characters_and_click_clears_yank_hint() {
+    use crate::instance::logs::files::LogFileEntry;
+    use crossterm::event::KeyModifiers;
+    let mut ui = UiHarness::new();
+    ui.add_instance("A");
+    ui.app.focused = FocusedArea::Content;
+    ui.app.content_tab = ContentTab::Logs;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("a.log");
+    std::fs::write(&path, "alpha\nbeta\ngamma").unwrap();
+    ui.app.logs_state.entries = vec![LogFileEntry {
+        name: "a.log".to_owned(),
+        path,
+    }];
+    ui.app.logs_state.list_state.selected = Some(0);
+    ui.app.logs_state.loaded_for = Some("A".to_owned());
+    ui.app.logs_state.viewer_lines =
+        vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()];
+    ui.draw();
+    assert!(!ui.screen().contains("[y]"));
+    let area = ui.app.logs_state.viewer_area;
+    assert!(area.height >= 3);
+    let click = |kind, row| MouseEvent {
+        kind,
+        column: area.x + 2,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Down(MouseButton::Left), area.y));
+    assert!(ui.app.logs_state.selection.range.is_none());
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Drag(MouseButton::Left), area.y + 1));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Up(MouseButton::Left), area.y + 1));
+    assert_eq!(ui.app.logs_state.selection.range, Some(((0, 2), (1, 2))));
+    assert_eq!(
+        ui.app
+            .logs_state
+            .selection
+            .text(&["alpha", "beta", "gamma"])
+            .as_deref(),
+        Some("pha\nbe")
+    );
+    assert!(ui.app.logs_state.viewer_focused);
+    ui.draw();
+    assert!(ui.screen().contains("[y] yank"));
+    assert!(ui.screen().contains("[g/G] top/bottom"));
+    assert!(!ui.screen().contains("PgUp"));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Down(MouseButton::Left), area.y));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Up(MouseButton::Left), area.y));
+    ui.draw();
+    assert!(ui.app.logs_state.selection.range.is_none());
+    assert!(!ui.screen().contains("[y]"));
+}
+
+#[test]
+fn mouse_drag_selects_overlay_characters_for_yank_and_escape_closes() {
+    use crate::tui::logging::{clear_app_logs, push_app_log};
+    use crossterm::event::KeyModifiers;
+    let mut ui = UiHarness::new();
+    clear_app_logs();
+    for index in 0..10 {
+        push_app_log(format!("12:00:{index:02}:INFO:rmcl: line {index}"));
+    }
+    ui.app.focused = FocusedArea::OverviewExpanded;
+    ui.draw();
+    let area = ui.app.log_overlay_inner;
+    assert!(area.height >= 3);
+    let click = |kind, row| MouseEvent {
+        kind,
+        column: area.x + 2,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Down(MouseButton::Left), area.y));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Drag(MouseButton::Left), area.y + 2));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Up(MouseButton::Left), area.y + 2));
+    assert_eq!(ui.app.log_selection.range, Some(((0, 2), (2, 2))));
+    ui.draw();
+    assert!(ui.screen().contains("[y] yank"));
+    ui.key(KeyCode::Char('y'));
+    assert!(
+        crate::feedback::errors::peek_all_errors()
+            .iter()
+            .any(|event| event.message.contains("Yanked 3 line(s)"))
+    );
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Down(MouseButton::Left), area.y));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Up(MouseButton::Left), area.y));
+    ui.draw();
+    assert!(!ui.screen().contains("[y]"));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Down(MouseButton::Left), area.y));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Drag(MouseButton::Left), area.y + 1));
+    ui.key(KeyCode::Esc);
+    assert_ne!(ui.app.focused, FocusedArea::OverviewExpanded);
+    assert!(ui.app.log_selection.range.is_none());
+    clear_app_logs();
+}
+
+#[test]
+fn log_level_popup_does_not_delete_logs_or_leave_on_tab() {
+    use crate::instance::logs::files::LogFileEntry;
+    use ratatui::layout::{Constraint, Rect};
+    let mut ui = UiHarness::new();
+    ui.add_instance("A");
+    ui.app.focused = FocusedArea::Content;
+    ui.app.content_tab = ContentTab::Logs;
+    ui.app.logs_state.loaded_for = Some("A".to_owned());
+    ui.app.logs_state.entries.push(LogFileEntry {
+        name: "a.log".to_owned(),
+        path: ui.instance_path("A").join("a.log"),
+    });
+    ui.app.logs_state.list_state.selected = Some(0);
+    ui.app.logs_state.viewer_lines = vec!["12:00:00:INFO:rmcl: hello".to_owned()];
+    ui.key(KeyCode::Char('f'));
+    ui.key(KeyCode::Char('d'));
+    assert_eq!(ui.app.focused, FocusedArea::Content);
+    assert!(ui.app.logs_state.filter_open);
+    ui.key(KeyCode::Tab);
+    assert_eq!(ui.app.content_mode, ContentMode::Installed);
+    ui.draw();
+    assert!(ui.screen().contains("· Error"));
+    assert!(ui.screen().contains("[Esc] close"));
+    let popup = Rect::new(0, 0, 100, 30).centered(Constraint::Length(26), Constraint::Length(7));
+    assert_eq!(
+        ui.screen()
+            .lines()
+            .nth(popup.y as usize)
+            .unwrap()
+            .chars()
+            .skip(popup.x as usize + 2)
+            .take(12)
+            .collect::<String>(),
+        " Log levels "
+    );
+    ui.key(KeyCode::Esc);
+    assert!(!ui.app.logs_state.filter_open);
+}
+
+#[test]
+fn selected_unlinked_content_shows_only_the_badge() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("A");
+    let minecraft = ui
+        .instance_path("A")
+        .join(crate::storage::MINECRAFT_DIR_NAME);
+    let path = minecraft.join("mods/local.jar");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "local mod").unwrap();
+    let mut record = managed_mod_record(&minecraft, "mods/local.jar", "local", false, Vec::new());
+    record.resolution = Resolution::Unmatched {
+        checked_at: 1,
+        providers: vec!["modrinth".to_owned()],
+    };
+    let mut manifest = ContentManifest::default();
+    manifest.upsert(record);
+    ui.app
+        .mods_state
+        .entries
+        .push(content_entry("scoreboardinternal", path));
+    ui.app.mods_state.loaded_for = Some("A".to_owned());
+    ui.app.mods_state.list_state.selected = Some(0);
+    ui.app
+        .mods_state
+        .apply_manifest(&manifest, &minecraft, ContentKind::Mod);
+    ui.app.focused = FocusedArea::Content;
+    ui.draw();
+    assert!(ui.screen().contains("Unlinked"));
+    assert!(!ui.screen().contains("No online source linked"));
+    assert!(!ui.screen().contains("version switching unavailable"));
+    ui.key(KeyCode::Char('v'));
+    assert!(ui.app.mods_discovery_state.version_popup.is_none());
+
+    manifest.files[0].resolution = Resolution::Pending;
+    ui.app
+        .mods_state
+        .apply_manifest(&manifest, &minecraft, ContentKind::Mod);
+    ui.draw();
+    assert!(!ui.screen().contains("Unlinked"));
+    assert!(!ui.screen().contains("No online source linked"));
 }
 
 #[test]
@@ -1127,6 +1526,7 @@ fn instance_launch_options_autosave_through_the_editor() {
 fn settings_panel_keeps_direct_profile_management() {
     let mut ui = UiHarness::new();
     ui.add_instance("profile-test");
+    std::fs::create_dir_all(ui.instance_path("profile-test").join("minecraft")).unwrap();
     ui.app.focused = FocusedArea::Settings;
 
     ui.key(KeyCode::Char('a'));
@@ -1212,6 +1612,11 @@ fn provider_conflict_selection_is_persisted() {
     let mut ui = UiHarness::new();
     ui.add_instance("Conflict");
     let relative_path = std::path::PathBuf::from("mods/example.jar");
+    let file = crate::storage::InstancePaths::new(ui.instance_path("Conflict"))
+        .minecraft()
+        .join(&relative_path);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"example").unwrap();
     let candidates = vec![
         ProviderProject {
             provider: "modrinth".to_owned(),
@@ -1230,11 +1635,7 @@ fn provider_conflict_selection_is_persisted() {
             relative_path: relative_path.clone(),
             kind: crate::instance::ContentKind::Mod,
             enabled: true,
-            fingerprint: crate::instance::FileFingerprint {
-                size: 1,
-                modified_ns: 0,
-                hashes: Default::default(),
-            },
+            fingerprint: crate::instance::content::manifest::fingerprint(&file).unwrap(),
             resolution: crate::instance::Resolution::Ambiguous {
                 candidates: candidates.clone(),
             },
@@ -1256,6 +1657,16 @@ fn provider_conflict_selection_is_persisted() {
     });
 
     ui.key(KeyCode::Down);
+    std::fs::write(&manifest_path, b"invalid").unwrap();
+    ui.key(KeyCode::Enter);
+    assert_eq!(ui.app.provider_conflict.as_ref().unwrap().selected, 1);
+    ui.app
+        .content_manifest
+        .as_ref()
+        .unwrap()
+        .1
+        .save(&manifest_path)
+        .unwrap();
     ui.key(KeyCode::Enter);
 
     assert!(ui.app.provider_conflict.is_none());

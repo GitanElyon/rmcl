@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// all the config structs that map to sections in config.toml.
-// everything has sane defaults so a blank file (or no file) still works.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -215,7 +212,7 @@ pub struct Paths {
 }
 
 fn default_instances_dir() -> String {
-    dirs_next::data_dir()
+    dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("rmcl")
         .join("instances")
@@ -228,7 +225,7 @@ fn is_default_instances_dir(path: &str) -> bool {
 }
 
 fn default_meta_dir() -> String {
-    dirs_next::data_dir()
+    dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("rmcl")
         .join("meta")
@@ -250,14 +247,13 @@ impl Default for Paths {
     }
 }
 
-// expand ~ in paths since toml doesn't do that for us
 pub fn resolve_path(raw: &str) -> PathBuf {
-    if let Some(stripped) = raw.strip_prefix("~/") {
-        if let Some(home) = dirs_next::home_dir() {
+    if let Some(stripped) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        if let Some(home) = dirs::home_dir() {
             return home.join(stripped);
         }
     } else if raw == "~"
-        && let Some(home) = dirs_next::home_dir()
+        && let Some(home) = dirs::home_dir()
     {
         return home;
     }
@@ -319,9 +315,75 @@ impl Default for Defaults {
     }
 }
 
+pub(crate) fn parse_tag_values(input: &str) -> Result<Vec<String>, String> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+
+    let mut values = Vec::new();
+    let mut current = String::new();
+    let mut quote = Quote::None;
+    let mut started = false;
+    let mut characters = input.chars().peekable();
+    while let Some(character) = characters.next() {
+        match (quote, character) {
+            (Quote::None, character) if character.is_whitespace() => {
+                if started {
+                    values.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            (Quote::None, '\'') => {
+                quote = Quote::Single;
+                started = true;
+            }
+            (Quote::None, '"') => {
+                quote = Quote::Double;
+                started = true;
+            }
+            (Quote::Single, '\'') => quote = Quote::None,
+            (Quote::Double, '"') => quote = Quote::None,
+            (Quote::Double, '\\') if matches!(characters.peek(), Some('"' | '\\')) => {
+                current.push(characters.next().unwrap_or_default());
+                started = true;
+            }
+            (_, character) => {
+                current.push(character);
+                started = true;
+            }
+        }
+    }
+    if quote != Quote::None {
+        return Err("Quoted value is missing its closing quote.".to_owned());
+    }
+    if started {
+        values.push(current);
+    }
+    Ok(values)
+}
+
+pub(crate) fn format_tag_values(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| {
+            if !value.is_empty()
+                && !value
+                    .chars()
+                    .any(|character| character.is_whitespace() || matches!(character, '\'' | '"'))
+            {
+                value.clone()
+            } else {
+                format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-// timing knobs for the error toast animation: show for 5s, start sliding at 3.5s,
-// fly off screen over 300ms. tweak these if the toasts feel too fast or slow.
 pub struct Ui {
     #[serde(default)]
     pub image_protocol: ImageProtocol,

@@ -13,7 +13,6 @@ fn confirm_keeps_query_but_deactivates() {
     s.confirm();
     assert!(!s.active);
     assert_eq!(s.query, "ab");
-    // filter should still match
     assert!(s.matches("abc"));
     assert!(!s.matches("xyz"));
     s.activate();
@@ -29,7 +28,6 @@ fn deactivate_clears_query() {
     s.deactivate();
     assert!(!s.active);
     assert!(s.query.is_empty());
-    // with empty query, everything matches
     assert!(s.matches("anything"));
 }
 
@@ -53,6 +51,32 @@ fn highlight_spans_marks_each_case_insensitive_match() {
     assert!(spans[0].style.add_modifier.contains(Modifier::UNDERLINED));
     assert!(spans[2].style.add_modifier.contains(Modifier::BOLD));
     assert!(spans[2].style.add_modifier.contains(Modifier::UNDERLINED));
+}
+
+#[test]
+fn highlighting_maps_expanding_lowercase_back_to_the_original_character() {
+    for (query, expected) in [("a", "a"), ("i", "İ"), ("\u{307}", "İ")] {
+        let search = SearchState {
+            query: query.to_owned(),
+            ..Default::default()
+        };
+        let spans = search.highlight_spans("İab", Style::default());
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "İab"
+        );
+        assert_eq!(
+            spans
+                .iter()
+                .filter(|span| span.style.add_modifier.contains(Modifier::UNDERLINED))
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            expected
+        );
+    }
 }
 
 #[test]

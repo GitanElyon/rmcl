@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// the outer frame for the content area: tab bar, keybind footer,
-// and dispatching render calls to the active tab's widget.
-// also renders the instance name/version header with run state indicators.
-
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -357,8 +353,6 @@ pub fn render(
         _ => false,
     };
 
-    // keybinds change depending on which tab is active and whether
-    // the content panel or instances panel has focus
     let kb: Option<&[(&str, &str)]> = if is_focused {
         Some(match (mode, tab) {
             (ContentMode::Discover, _) if discovery_unavailable => {
@@ -459,6 +453,7 @@ pub fn render(
                 if logs_state.viewer_focused {
                     &[
                         ("j/k", " scroll"),
+                        ("f", " filter"),
                         ("g/G", " top/bottom"),
                         ("d", " delete"),
                         ("Esc", " back"),
@@ -470,6 +465,8 @@ pub fn render(
                         ("j/k", " navigate"),
                         ("⏎", " view"),
                         ("d", " delete"),
+                        ("Shift+⏎", " open dir"),
+                        ("f", " filter"),
                         ("h/l", " tabs"),
                         ("/", " search"),
                         ("Tab", " discovery"),
@@ -496,6 +493,13 @@ pub fn render(
     };
 
     let mut keybinds = kb.map_or_else(Vec::new, <[_]>::to_vec);
+    if is_focused
+        && mode == ContentMode::Installed
+        && tab == ContentTab::Logs
+        && logs_state.selection.range.is_some()
+    {
+        keybinds.insert(0, ("y", " yank"));
+    }
     if is_focused
         && (mode == ContentMode::Installed || (!discovery_page_open && !discovery_unavailable))
         && (matches!(
@@ -603,7 +607,6 @@ pub fn render(
         return;
     }
 
-    // lazy-load: only scan when switching to an instance that hasn't been loaded yet
     match tab {
         ContentTab::Mods
         | ContentTab::ResourcePacks
@@ -649,8 +652,8 @@ pub fn render(
         }
         ContentTab::Worlds => {
             if let Some(instance) = instance {
-                if let Some((world_name, world_path)) = open_world_datapacks {
-                    let cache_key = format!("{}:{world_name}", instance.name);
+                if let Some((_, world_path)) = open_world_datapacks {
+                    let cache_key = format!("{}:{world_path:?}", instance.name);
                     let content_dir = world_path.join("datapacks");
                     if world_datapacks_state.loaded_for.as_deref() != Some(cache_key.as_str()) {
                         world_datapacks_state.start_load(
@@ -1631,7 +1634,9 @@ pub(crate) fn render_version_popup(
                 .style(Style::default().fg(THEME.as_ref().text_dim()))
                 .render(area, buffer);
             } else {
-                crate::tui::widgets::popups::select_list::render(
+                // render_styled preserves the badge spans: highlight only adds
+                // bold instead of painting fg/bg over the whole row.
+                crate::tui::widgets::popups::select_list::render_styled(
                     items.clone(),
                     selected,
                     area,
@@ -1762,8 +1767,6 @@ fn discovery_version_label(version: &crate::net::modrinth::VersionInfo) -> Strin
     version.version_number.clone()
 }
 
-// the header bar above the content tabs, showing instance name, loader info,
-// and a spinner/error indicator when the instance is running or crashed
 pub fn title(
     frame: &mut Frame,
     area: Rect,

@@ -1,18 +1,18 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// shared widget utilities and the trait all key-handling widgets implement
-
 use crate::config::theme::THEME;
 use crossterm::event::KeyEvent;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
+    widgets::{Scrollbar, ScrollbarOrientation},
 };
 
 pub mod account;
 pub mod content;
 pub mod instances;
+pub(crate) mod log_selection;
 pub mod logs_viewer;
 pub mod markdown;
 pub mod popups;
@@ -21,8 +21,6 @@ pub mod search;
 pub mod settings;
 pub mod status;
 
-// highlight the first character of a title with the accent color,
-// gives the UI that "keyboard shortcut hint" look
 pub fn styled_title(title: &str, highlight: bool) -> Line<'_> {
     let theme = THEME.as_ref();
     if !highlight || title.is_empty() {
@@ -47,6 +45,16 @@ pub(crate) fn status_badge_style(color: Color) -> Style {
 
 pub(crate) fn status_badge(label: impl Into<String>, color: Color) -> Span<'static> {
     Span::styled(format!(" {} ", label.into()), status_badge_style(color))
+}
+
+pub(crate) fn scrollbar(color: Color) -> Scrollbar<'static> {
+    Scrollbar::default()
+        .orientation(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("\u{25b2}"))
+        .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
+        .thumb_symbol("\u{2551}")
+        .track_symbol(Some(""))
+        .end_symbol(Some("\u{25bc}"))
 }
 
 pub trait WidgetKey {

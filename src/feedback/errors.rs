@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// thread-safe FIFO queue for error/warning toasts displayed in the UI.
-// also (ab)used for INFO toasts like "desktop shortcut created" because
-// why build a separate notification system when this one works fine.
-//
 // callers pass id: 0 and push_error assigns a real unique id. the id is
 // used by the render layer to track per-toast animation state.
 

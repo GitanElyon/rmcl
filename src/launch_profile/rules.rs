@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// mojang rule evaluation. profiles, libraries, and argument entries can
-// carry conditional rules that filter them by OS, architecture, or feature
-// flags. this module is the single source of truth for that semantics -
-// see `evaluate` below for the exact rules.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -21,7 +16,7 @@ pub struct OsCondition {
     pub arch: Option<String>,
     // mojang occasionally constrains natives selection on os.version with a
     // regex. rare in practice - when present, it's a substring/anchor match
-    // against the host OS version reported by `system::mojang_os_version`.
+    // against os.version reported by the selected Java runtime.
     pub version: Option<String>,
 }
 
@@ -93,22 +88,18 @@ fn rule_matches(rule: &Rule, ctx: &RuleContext) -> bool {
 }
 
 // mojang's os.version constraints are typically anchored regex patterns
-// (e.g. `^10\\.`). we do a substring containment check as a defensive
-// approximation that doesn't pull in the `regex` crate. when the host
-// os_version is empty (Windows fallback path returns ""), version-gated
-// rules don't match - which is the conservative default.
+// version-gated rules do not match an unknown host version.
 fn os_version_matches(pattern: &str, host_version: &str) -> bool {
     if host_version.is_empty() {
         return false;
     }
-    // strip common regex anchors and metacharacters for substring lookup.
-    // good enough for the rare profile that uses os.version.
-    let needle = pattern
-        .trim_start_matches('^')
-        .trim_end_matches('$')
-        .trim_end_matches('.')
-        .trim_end_matches('\\');
-    host_version.contains(needle)
+    match regex::Regex::new(pattern) {
+        Ok(regex) => regex.is_match(host_version),
+        Err(error) => {
+            tracing::warn!("Invalid OS version pattern '{pattern}': {error}");
+            false
+        }
+    }
 }
 
 fn features_match(required: &FeatureSet, current: &FeatureSet) -> bool {

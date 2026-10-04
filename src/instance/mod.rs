@@ -1,12 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// instance management: creation, launching, importing modpacks, and all the
-// bookkeeping that comes with pretending to be a real launcher
-
 pub mod config_sync;
 pub mod content;
 pub mod desktop;
+pub(crate) mod glfw;
 pub mod import;
 pub mod java;
 pub mod launch;
@@ -14,6 +12,7 @@ pub mod loader;
 pub mod logs;
 pub mod manager;
 pub mod models;
+mod process;
 pub mod runtime;
 pub mod screenshots;
 

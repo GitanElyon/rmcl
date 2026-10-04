@@ -30,6 +30,46 @@ fn offline_account_requires_a_microsoft_account_and_can_be_dismissed() {
 }
 
 #[test]
+fn a_cancelled_login_cannot_publish_the_next_attempts_device_code() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = auth::MicrosoftAuth::default();
+    let stale_display = first.device_code.clone();
+    let mut state = AccountState {
+        store: AccountStore::empty_for_test(temp.path().join("accounts.json")),
+        list_state: Default::default(),
+        add_mode: AddMode::DeviceCodeWaiting {
+            info: DeviceCodeInfo {
+                user_code: String::new(),
+                verification_uri: String::new(),
+            },
+            pending: first,
+        },
+    };
+    handle_key(&key(KeyCode::Esc), &mut state);
+    let second = auth::MicrosoftAuth::default();
+    *second.device_code.lock().unwrap() = Some(DeviceCodeInfo {
+        user_code: "current".to_owned(),
+        verification_uri: "current-uri".to_owned(),
+    });
+    state.add_mode = AddMode::DeviceCodeWaiting {
+        info: DeviceCodeInfo {
+            user_code: String::new(),
+            verification_uri: String::new(),
+        },
+        pending: second,
+    };
+    *stale_display.lock().unwrap() = Some(DeviceCodeInfo {
+        user_code: "stale".to_owned(),
+        verification_uri: "stale-uri".to_owned(),
+    });
+    drain_device_code(&mut state);
+    let AddMode::DeviceCodeWaiting { info, .. } = &state.add_mode else {
+        panic!("login must still be pending")
+    };
+    assert_eq!(info.user_code, "current");
+}
+
+#[test]
 fn account_type_popup_uses_the_theme_surface() {
     let temp = tempfile::tempdir().unwrap();
     let mut state = AccountState {

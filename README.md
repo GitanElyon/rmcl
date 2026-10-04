@@ -43,7 +43,7 @@ it does everything you'd expect from a launcher.
 
 ### modpacks and accounts
 
-Browse Modrinth and CurseForge modpacks or import Modrinth, CurseForge, MultiMC, Prism, and GTNH packs directly. Direct imports accept a file, Modrinth URL, or project slug. Source builds enable CurseForge when `CURSEFORGE_API_KEY` is set at compile time. Able to use multiple Microsoft accounts and offline accounts aswell.
+Browse Modrinth and CurseForge modpacks or import Modrinth, CurseForge, and MultiMC/Prism archives (including GTNH packs in that format). Direct imports accept a local archive, Modrinth URL, or Modrinth project slug. CurseForge requires a build-time [API key](#curseforge-api). Multiple Microsoft accounts and offline accounts are supported.
 
 ---
 
@@ -52,6 +52,14 @@ Browse Modrinth and CurseForge modpacks or import Modrinth, CurseForge, MultiMC,
 rmcl uses its own Microsoft client ID for Minecraft account authentication.
 
 Authentication is performed through Microsoft’s official services.
+
+## CurseForge API
+
+Git, source, and Cargo builds use rmcl's dedicated API key unless `CURSEFORGE_API_KEY` is set at compile time. An empty or whitespace-only override disables CurseForge.
+Use of the API is subject to the [CurseForge 3rd Party API Terms and Conditions](https://support.curseforge.com/en/support/solutions/articles/9000207405-curse-forge-3rd-party-api-terms-and-conditions).
+Keys supplied for rmcl are for rmcl builds only. Forks, rebranded applications,
+and unrelated projects must use their own key. Keys included in source or compiled
+binaries are extractable; do not publish a private key.
 
 ## installation
 
@@ -67,6 +75,13 @@ prebuilt archives are attached to each GitHub release.
 # Homebrew
 brew install objz/tap/rmcl
 ```
+
+Linux archives and Homebrew installations require the system `libxcb` runtime
+package (`libxcb1` on Debian/Ubuntu, `libxcb` on Arch).
+
+An ARM64 launcher build still needs Minecraft natives for that platform. For
+example, Minecraft 1.20.1 supplies macOS ARM64 natives but no Linux ARM64 natives;
+using a custom GLFW library alone does not provide the other required libraries.
 
 ### Windows
 
@@ -106,6 +121,7 @@ cargo install rmcl
 ### from source
 
 requires a Rust toolchain and a JDK (`javac` and `jar` on `PATH`).
+Linux builds also require the libxcb development package (`libxcb1-dev` on Debian/Ubuntu, `libxcb` on Arch).
 
 ```sh
 git clone https://github.com/objz/rmcl.git
@@ -124,17 +140,22 @@ settings, accounts, instances, and cached game metadata.
 | what | Linux | macOS | Windows |
 |---|---|---|---|
 | config (`config.toml`, `theme.toml`, `accounts.json`) | `~/.config/rmcl/` | `~/Library/Application Support/rmcl/` | `%APPDATA%\rmcl\` |
-| instances | `~/.local/share/rmcl/instances/` | `~/Library/Application Support/rmcl/instances/` | `%LOCALAPPDATA%\rmcl\instances\` |
-| metadata (versions, libraries, assets, loader profiles) | `~/.local/share/rmcl/meta/` | `~/Library/Application Support/rmcl/meta/` | `%LOCALAPPDATA%\rmcl\meta\` |
+| instances | `~/.local/share/rmcl/instances/` | `~/Library/Application Support/rmcl/instances/` | `%APPDATA%\rmcl\instances\` |
+| metadata (versions, libraries, assets, loader profiles) | `~/.local/share/rmcl/meta/` | `~/Library/Application Support/rmcl/meta/` | `%APPDATA%\rmcl\meta\` |
 
-each instance has an `instance.json` for its config and a `.minecraft/` directory with the actual game files.
+These are default locations. On Linux, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and
+`XDG_CACHE_HOME` override the corresponding base directories. Instance and metadata
+paths can also be changed in `config.toml`.
 
-Launcher settings can be edited from the TUI or in `config.toml`. Changes to
-`instances_dir`, `meta_dir`, and `image_protocol` apply after restarting rmcl;
-other launcher settings apply immediately. Omitting `java_path` enables automatic
-Java selection. Global JVM arguments and environment variables are applied before
-per-instance values. Instances can explicitly inherit the launcher window mode
-and resolution defaults.
+each instance has an `instance.json` for its config and a `minecraft/` directory with the actual game files.
+
+Launcher settings saved through the TUI apply immediately, except changes to
+`instances_dir`, `meta_dir`, and `image_protocol`, which require a restart.
+Settings files opened through rmcl's editor shortcut are reloaded after saves;
+otherwise, restart rmcl after editing `config.toml` externally. When neither global nor instance
+`java_path` is set, rmcl selects Java automatically. Global JVM arguments and
+environment variables are applied before per-instance values. Instances can
+explicitly inherit the launcher window mode and resolution defaults.
 
 ```toml
 [general]
@@ -169,7 +190,7 @@ launcher logs are per-session and contain rmcl's own output. instance launch log
 | what | Linux | macOS | Windows |
 |---|---|---|---|
 | launcher logs | `~/.cache/rmcl/` | `~/Library/Caches/rmcl/` | `%LOCALAPPDATA%\rmcl\` |
-| instance launch logs | `<instances>/<name>/.minecraft/logs/launches/` | same | same |
+| instance launch logs | `<instances>/<name>/minecraft/logs/launches/` | same | same |
 
 ---
 
@@ -236,7 +257,7 @@ then set `theme = "my-theme"` in `theme.toml`.
 
 colors accept `"#f97316"`, ANSI names (`"Red"`, `"LightBlue"`), `{ Rgb = [r, g, b] }` or `{ Indexed = n }`.
 
-note that `[custom]` in `theme.toml` is only for overriding single values of a builtin, it doesn't define a new theme. same for `border_style`, that one lives in `theme.toml`, not in a theme file.
+note that `[custom]` in `theme.toml` overrides colors of the selected theme, whether built-in or loaded from a file; it doesn't define a standalone theme. `border_style` belongs at the top level of `theme.toml`, not in a custom theme file.
 
 ---
 

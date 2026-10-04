@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// rendering for the new instance wizard. each step gets its own render fn
-// and the popup resizes itself based on which step is active.
-
 use super::super::LoadState;
 use super::state::{
     WIZARD_STATE, WizardState, WizardStep, clamp_loader_version_index, clamp_version_index,
@@ -33,7 +30,6 @@ pub fn render(frame: &mut Frame, area: Rect, _focused: FocusedArea) {
                 clamp_version_index(&mut state);
             }
 
-            // vanilla has no loader version, so skip straight to confirm
             if state.step == WizardStep::LoaderVersion {
                 if state.selected_loader() == ModLoader::Vanilla {
                     state.step = WizardStep::Confirm;
@@ -141,7 +137,6 @@ fn step_keybinds(state: &WizardState) -> ratatui::text::Line<'static> {
 fn render_name_step(state: &WizardState, area: Rect, buf: &mut ratatui::buffer::Buffer) {
     let theme = THEME.as_ref();
     let value = state.name_state.value();
-    // \u{2588} is the full block char used as a fake blinking cursor
     let line = if value.is_empty() {
         Line::from(vec![
             Span::styled("Instance name...", Style::default().fg(theme.text_dim())),
@@ -183,7 +178,6 @@ fn render_version_step(state: &WizardState, area: Rect, buf: &mut ratatui::buffe
         }
         LoadState::Loaded(_) => {
             let items: Vec<ListItem> = visible_versions(state)
-                .into_iter()
                 .enumerate()
                 .map(|(index, version)| {
                     let suffix = if version.stable {

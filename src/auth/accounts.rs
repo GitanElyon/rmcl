@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// account management: persistence, switching active accounts, and offline uuid generation
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -36,26 +34,36 @@ pub enum AuthResult {
 pub struct AccountStore {
     pub accounts: Vec<Account>,
     path: PathBuf,
+    load_error: Option<String>,
 }
 
 impl AccountStore {
     pub fn load() -> Self {
-        let path = account_store_path();
-        let accounts = match std::fs::read_to_string(&path) {
+        Self::load_from(account_store_path())
+    }
+
+    fn load_from(path: PathBuf) -> Self {
+        let (accounts, load_error) = match std::fs::read_to_string(&path) {
             Ok(content) => match serde_json::from_str(&content) {
-                Ok(accounts) => accounts,
+                Ok(accounts) => (accounts, None),
                 Err(e) => {
                     tracing::warn!("Failed to parse accounts file {}: {}", path.display(), e);
-                    Vec::new()
+                    (
+                        Vec::new(),
+                        Some(format!("Invalid accounts file {}: {e}", path.display())),
+                    )
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::debug!("No accounts file at {}", path.display());
-                Vec::new()
+                (Vec::new(), None)
             }
             Err(e) => {
                 tracing::warn!("Failed to read accounts file {}: {}", path.display(), e);
-                Vec::new()
+                (
+                    Vec::new(),
+                    Some(format!("Cannot read accounts file {}: {e}", path.display())),
+                )
             }
         };
         tracing::debug!(
@@ -63,36 +71,30 @@ impl AccountStore {
             accounts.len(),
             path.display()
         );
-        Self { accounts, path }
+        Self {
+            accounts,
+            path,
+            load_error,
+        }
     }
 
-    pub fn save(&self) {
-        if let Some(parent) = self.path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            tracing::error!("Failed to create accounts directory: {}", e);
-            return;
+    pub fn check_loaded(&self) -> std::io::Result<()> {
+        if let Some(error) = &self.load_error {
+            return Err(std::io::Error::other(error.clone()));
         }
-        match serde_json::to_string_pretty(&self.accounts) {
-            Ok(json) => {
-                // this file holds microsoft refresh tokens: a torn write on
-                // crash would permanently lock the user out, so write atomically.
-                if let Err(e) = crate::storage::write_atomic(&self.path, json.as_bytes()) {
-                    tracing::error!(
-                        "Failed to write accounts file {}: {}",
-                        self.path.display(),
-                        e
-                    );
-                } else {
-                    tracing::debug!(
-                        "Saved {} account(s) to {}",
-                        self.accounts.len(),
-                        self.path.display()
-                    );
-                }
-            }
-            Err(e) => tracing::error!("Failed to serialize accounts: {}", e),
-        }
+        Ok(())
+    }
+
+    fn save(&self) -> std::io::Result<()> {
+        self.check_loaded()?;
+        let json = serde_json::to_vec_pretty(&self.accounts).map_err(std::io::Error::other)?;
+        crate::storage::write_atomic_private(&self.path, &json)?;
+        tracing::debug!(
+            "Saved {} account(s) to {}",
+            self.accounts.len(),
+            self.path.display()
+        );
+        Ok(())
     }
 
     pub fn active_account(&self) -> Option<&Account> {
@@ -105,63 +107,105 @@ impl AccountStore {
             .any(|account| account.account_type == AccountType::Microsoft)
     }
 
-    pub fn set_active(&mut self, index: usize) {
+    pub fn set_active(&mut self, index: usize) -> std::io::Result<()> {
         let Some(account) = self.accounts.get(index) else {
-            // out-of-range: leave the current selection untouched. marking
-            // every account inactive here would break the single-active
-            // invariant and orphan the store with no usable account.
+            // Invalid selection must leave the active account intact.
             tracing::warn!("Tried to select missing account index {}", index);
-            return;
+            return Ok(());
         };
-        let username = account.username.clone();
-        for (i, acc) in self.accounts.iter_mut().enumerate() {
-            acc.active = i == index;
-        }
-        tracing::info!("Selected account '{}'", username);
-        self.save();
+        let uuid = account.uuid.clone();
+        self.update(|accounts| {
+            if !accounts.iter().any(|account| account.uuid == uuid) {
+                return Err(std::io::Error::other("Selected account no longer exists"));
+            }
+            for account in accounts {
+                account.active = account.uuid == uuid;
+            }
+            Ok(())
+        })
     }
 
-    // if an account with the same uuid already exists, replace it.
-    // first account added auto-becomes active so there's always a selection.
-    pub fn add(&mut self, account: Account) {
-        let uuid = &account.uuid;
-        let replaced = self.accounts.iter().any(|a| a.uuid == *uuid);
-        // re-adding the currently active account must not drop the selection:
-        // the replacement takes over the old account's active flag.
-        let replaced_active = self.accounts.iter().any(|a| a.uuid == *uuid && a.active);
-        let account_type = account.account_type.clone();
-        let username = account.username.clone();
-        self.accounts.retain(|a| a.uuid != *uuid);
-        let mut account = account;
-        if self.accounts.is_empty() || replaced_active {
-            account.active = true;
-        }
-        self.accounts.push(account);
-        tracing::info!(
-            "{} {:?} account '{}'",
-            if replaced { "Updated" } else { "Added" },
-            account_type,
-            username
-        );
-        self.save();
+    pub fn add(&mut self, account: Account) -> std::io::Result<()> {
+        self.update(|accounts| {
+            let replaced_active = accounts
+                .iter()
+                .any(|old| old.uuid == account.uuid && old.active);
+            accounts.retain(|old| old.uuid != account.uuid);
+            let mut account = account;
+            account.active = accounts.is_empty() || replaced_active;
+            accounts.push(account);
+            Ok(())
+        })
     }
 
-    pub fn remove(&mut self, index: usize) {
+    pub fn remove(&mut self, index: usize) -> std::io::Result<()> {
         if index >= self.accounts.len() {
             tracing::warn!("Tried to remove missing account index {}", index);
-            return;
+            return Ok(());
         }
-        let account = self.accounts.remove(index);
-        tracing::info!(
-            "Removed {:?} account '{}'",
-            account.account_type,
-            account.username
-        );
-        if account.active && !self.accounts.is_empty() {
-            self.accounts[0].active = true;
-            tracing::debug!("Activated fallback account '{}'", self.accounts[0].username);
+        let uuid = self.accounts[index].uuid.clone();
+        self.update(|accounts| {
+            let index = accounts
+                .iter()
+                .position(|account| account.uuid == uuid)
+                .ok_or_else(|| std::io::Error::other("Selected account no longer exists"))?;
+            let account = accounts.remove(index);
+            if account.active
+                && let Some(first) = accounts.first_mut()
+            {
+                first.active = true;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn update_credentials(
+        &mut self,
+        uuid: &str,
+        refresh: Option<String>,
+        token: &str,
+        expires: Option<i64>,
+    ) -> std::io::Result<()> {
+        if refresh.is_none() && expires.is_none() {
+            return Ok(());
         }
-        self.save();
+        self.update(|accounts| {
+            let account = accounts
+                .iter_mut()
+                .find(|account| account.uuid == uuid)
+                .ok_or_else(|| std::io::Error::other("Authenticated account no longer exists"))?;
+            if let Some(refresh) = refresh {
+                account.refresh_token = Some(refresh);
+            }
+            if let Some(expires) = expires {
+                account.cached_mc_token = Some(token.to_owned());
+                account.cached_mc_token_expires_at = Some(expires);
+            }
+            Ok(())
+        })
+    }
+
+    fn update(
+        &mut self,
+        update: impl FnOnce(&mut Vec<Account>) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        use fs2::FileExt;
+        self.check_loaded()?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.path.with_extension("lock"))?;
+        lock.lock_exclusive()?;
+        let mut current = Self::load_from(self.path.clone());
+        current.check_loaded()?;
+        update(&mut current.accounts)?;
+        current.save()?;
+        self.accounts = current.accounts;
+        Ok(())
     }
 }
 
@@ -169,9 +213,7 @@ pub fn account_store_path() -> PathBuf {
     crate::config::get_config_path().join("accounts.json")
 }
 
-// deterministic fake uuid from a username, formatted as uuid v3 with the proper
-// version and variant bits set. not cryptographically meaningful, just needs to
-// be consistent so the same offline name always maps to the same uuid.
+// Keep the existing mapping so saved offline player data retains its identifier.
 pub fn offline_uuid(username: &str) -> String {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut hasher = DefaultHasher::new();

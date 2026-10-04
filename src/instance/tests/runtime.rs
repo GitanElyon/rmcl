@@ -4,6 +4,20 @@
 use super::*;
 
 #[test]
+fn dropping_an_instance_lock_releases_it_even_with_a_duplicated_descriptor() {
+    let temp = tempfile::tempdir().unwrap();
+    let lock = lock_instance(temp.path(), "duplicated").unwrap();
+    let duplicate = lock.0.try_clone().unwrap();
+    drop(lock);
+    let next = lock_instance(temp.path(), "duplicated");
+    drop(duplicate);
+    assert!(
+        next.is_ok(),
+        "A duplicate descriptor retained the released instance lock"
+    );
+}
+
+#[test]
 fn set_and_get_state() {
     set_state("run_test_1", RunState::Starting);
     assert_eq!(get("run_test_1"), Some(RunState::Starting));
@@ -57,13 +71,6 @@ fn push_and_drain_last_played() {
     assert!(drained.iter().any(|(k, _)| k == "run_test_lp"));
 }
 
-// Removed drain_empty_returns_empty: it relied on no other test pushing
-// to LAST_PLAYED between the two drain calls, which races with the
-// parallel push_and_drain_last_played test. The drain semantics are
-// already covered by push_and_drain_last_played, which asserts a
-// specific entry is present, and the empty-result path is exercised
-// implicitly any time drain runs after that test's cleanup.
-
 #[test]
 fn send_kill_returns_false_for_missing() {
     assert!(!send_kill("run_never_registered_xyz"));
@@ -74,7 +81,6 @@ fn register_and_send_kill() {
     let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
     register_kill("run_test_kill", tx);
     assert!(send_kill("run_test_kill"));
-    // the kill signal itself must arrive, not just report success
     assert!(rx.try_recv().is_ok());
 }
 

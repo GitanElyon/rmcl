@@ -1,26 +1,21 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// integration tests for the loader-specific net::* fetchers (forge,
-// fabric, quilt, neoforge). each module's fetch_* function now has a
-// _from variant that lets the test point the HTTP call at a wiremock
-// server; the production constants stay unchanged.
-
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use rmcl::net::HttpClient;
 use rmcl::net::fabric::{
-    fetch_fabric_game_versions_from, fetch_fabric_profile_from, fetch_fabric_versions_from,
+    FabricLibrary, FabricProfile, download_fabric_libraries, fetch_fabric_game_versions_from,
+    fetch_fabric_profile_from, fetch_fabric_versions_from,
 };
 use rmcl::net::forge::{fetch_forge_game_versions_from, fetch_forge_versions_from};
 use rmcl::net::neoforge::{fetch_neoforge_game_versions_from, fetch_neoforge_versions_from};
 use rmcl::net::quilt::{
-    fetch_quilt_game_versions_from, fetch_quilt_profile_from, fetch_quilt_versions_from,
+    QuiltLibrary, QuiltProfile, download_quilt_libraries, fetch_quilt_game_versions_from,
+    fetch_quilt_profile_from, fetch_quilt_versions_from,
 };
-
-// ---------- forge ----------
 
 #[tokio::test]
 async fn forge_fetch_versions_filters_by_prefix() {
@@ -67,11 +62,8 @@ async fn forge_fetch_game_versions_extracts_unique() {
         .expect("forge game versions");
 
     let ids: Vec<&str> = versions.iter().map(|v| v.id.as_str()).collect();
-    // dedup + reverse-sort
     assert_eq!(ids, vec!["1.20.1", "1.19.4"]);
 }
-
-// ---------- fabric ----------
 
 #[tokio::test]
 async fn fabric_fetch_game_versions_parses_response() {
@@ -146,8 +138,6 @@ async fn fabric_fetch_profile_parses_libraries() {
     assert_eq!(profile.libraries[0].url, "https://maven.fabricmc.net/");
 }
 
-// ---------- quilt ----------
-
 #[tokio::test]
 async fn quilt_fetch_game_versions_parses_response() {
     let server = MockServer::start().await;
@@ -208,7 +198,103 @@ async fn quilt_fetch_profile_parses_libraries() {
     );
 }
 
-// ---------- neoforge ----------
+#[tokio::test]
+async fn fabric_and_quilt_download_libraries_into_the_shared_cache() {
+    let server = MockServer::start().await;
+    let temp = tempfile::tempdir().unwrap();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    use std::io::Write;
+    zip.start_file(
+        "META-INF/MANIFEST.MF",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.write_all(b"Manifest-Version: 1.0\n").unwrap();
+    let jar = zip.finish().unwrap().into_inner();
+    for name in ["fabric", "quilt"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/example/{name}/1.0/{name}-1.0.jar")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(jar.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let fabric = FabricProfile {
+        id: "fabric".into(),
+        main_class: String::new(),
+        libraries: vec![FabricLibrary {
+            name: "example:fabric:1.0".into(),
+            url: server.uri(),
+        }],
+    };
+    let quilt = QuiltProfile {
+        id: "quilt".into(),
+        main_class: String::new(),
+        libraries: vec![QuiltLibrary {
+            name: "example:quilt:1.0".into(),
+            url: server.uri(),
+        }],
+    };
+
+    let client = HttpClient::new();
+    download_fabric_libraries(&client, &fabric, temp.path())
+        .await
+        .unwrap();
+    download_quilt_libraries(&client, &quilt, temp.path())
+        .await
+        .unwrap();
+    download_fabric_libraries(&client, &fabric, temp.path())
+        .await
+        .unwrap();
+    for name in ["fabric", "quilt"] {
+        assert_eq!(
+            std::fs::read(
+                rmcl::storage::MetadataPaths::new(temp.path())
+                    .libraries()
+                    .join(format!("example/{name}/1.0/{name}-1.0.jar"))
+            )
+            .unwrap(),
+            jar
+        );
+    }
+}
+
+#[tokio::test]
+async fn fabric_replaces_a_truncated_cached_library() {
+    let server = MockServer::start().await;
+    let temp = tempfile::tempdir().unwrap();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    use std::io::Write;
+    zip.start_file("valid.txt", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"ok").unwrap();
+    let jar = zip.finish().unwrap().into_inner();
+    Mock::given(method("GET"))
+        .and(path("/example/fabric/1.0/fabric-1.0.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(jar.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let profile = FabricProfile {
+        id: "fabric".into(),
+        main_class: String::new(),
+        libraries: vec![FabricLibrary {
+            name: "example:fabric:1.0".into(),
+            url: server.uri(),
+        }],
+    };
+    let destination = rmcl::storage::MetadataPaths::new(temp.path())
+        .libraries()
+        .join("example/fabric/1.0/fabric-1.0.jar");
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    std::fs::write(&destination, b"truncated").unwrap();
+
+    download_fabric_libraries(&HttpClient::new(), &profile, temp.path())
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(destination).unwrap(), jar);
+}
 
 #[tokio::test]
 async fn neoforge_fetch_versions_filters_by_prefix() {
@@ -292,7 +378,6 @@ async fn neoforge_fetch_game_versions_reverse_engineers_mc_versions() {
     assert!(ids.contains(&"26.1.1"));
     assert!(ids.contains(&"1.21"));
     assert!(ids.contains(&"1.20.4"));
-    // both versions should be marked stable (no snapshot flag in maven)
     assert!(versions.iter().all(|v| v.stable));
 }
 
@@ -300,7 +385,6 @@ async fn neoforge_fetch_game_versions_reverse_engineers_mc_versions() {
 async fn neoforge_fetch_versions_rejects_invalid_game_version() {
     let server = MockServer::start().await;
     let url = format!("{}/maven-api", server.uri());
-    // no mock - the function should error out before hitting the network
     let err = fetch_neoforge_versions_from(&HttpClient::new(), &url, "bogus")
         .await
         .expect_err("invalid game version");

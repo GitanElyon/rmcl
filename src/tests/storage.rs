@@ -68,3 +68,30 @@ fn atomic_write_replaces_existing_file() {
     write_atomic(&path, b"new").unwrap();
     assert_eq!(std::fs::read(path).unwrap(), b"new");
 }
+
+#[test]
+fn failed_atomic_replacement_keeps_the_destination_and_removes_staging() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.json");
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("keep"), b"old").unwrap();
+
+    assert!(write_atomic(&path, b"new").is_err());
+    assert_eq!(std::fs::read(path.join("keep")).unwrap(), b"old");
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn private_atomic_writes_keep_credentials_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("accounts.json");
+    std::fs::write(&path, b"old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    write_atomic_private(&path, b"new").unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}

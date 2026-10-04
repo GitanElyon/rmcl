@@ -66,3 +66,28 @@ fn empty_overrides_root_does_not_count_the_manifest() {
 
     assert_eq!(build_summary(&path).unwrap().override_count, 0);
 }
+
+#[tokio::test]
+async fn override_only_pack_tracks_files_under_its_configured_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("pack.zip");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    use std::io::Write;
+    zip.start_file("manifest.json", options).unwrap();
+    zip.write_all(
+        br#"{"name":"Pack","version":"1","minecraft":{"version":"1.20.1"},"overrides":"client"}"#,
+    )
+    .unwrap();
+    zip.start_file("client/config/pack.toml", options).unwrap();
+    zip.write_all(b"pack").unwrap();
+    zip.finish().unwrap();
+
+    assert_eq!(
+        owned_files(&path).await.unwrap(),
+        vec![std::path::PathBuf::from("config/pack.toml")]
+    );
+    download_files(&parse(&path).unwrap(), &temp.path().join("minecraft"))
+        .await
+        .unwrap();
+}

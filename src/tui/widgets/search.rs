@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// reusable incremental search state used across multiple widgets.
-// handles case-insensitive filtering and inline match highlighting.
-
 use crossterm::event::KeyModifiers;
 use ratatui::{
     style::{Modifier, Style},
@@ -53,8 +50,6 @@ impl SearchState {
         text.to_lowercase().contains(&self.query.to_lowercase())
     }
 
-    // splits text into spans, bolding+underlining the parts that match
-    // the query so every searchable widget can use the same styling
     pub fn highlight_spans(&self, text: &str, base_style: Style) -> Vec<Span<'static>> {
         if self.query.is_empty() {
             return vec![Span::styled(text.to_owned(), base_style)];
@@ -62,12 +57,21 @@ impl SearchState {
 
         let query_lower = self.query.to_lowercase();
         let text_lower = text.to_lowercase();
+        let mut original_ranges = Vec::with_capacity(text_lower.len());
+        for (start, character) in text.char_indices() {
+            let lowercase_bytes = character.to_lowercase().map(char::len_utf8).sum::<usize>();
+            original_ranges.extend(std::iter::repeat_n(
+                (start, start + character.len_utf8()),
+                lowercase_bytes,
+            ));
+        }
         let mut spans = Vec::new();
         let mut last = 0;
 
-        for (start, _) in text_lower.match_indices(&query_lower) {
-            let end = start + query_lower.len();
-            if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        for (lower_start, _) in text_lower.match_indices(&query_lower) {
+            let start = original_ranges[lower_start].0;
+            let end = original_ranges[lower_start + query_lower.len() - 1].1;
+            if start < last {
                 continue;
             }
             if start > last {
@@ -94,7 +98,6 @@ impl SearchState {
         Line::from(self.highlight_spans(text, base_style))
     }
 
-    // renders the "/ query█" indicator in the block title bar
     pub fn title_line(&self) -> Option<Line<'static>> {
         if !self.active && self.query.is_empty() {
             return None;

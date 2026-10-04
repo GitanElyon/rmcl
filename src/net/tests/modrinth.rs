@@ -292,7 +292,7 @@ fn modpack_versions_are_not_limited_to_hardcoded_loaders() {
 }
 
 #[tokio::test]
-async fn content_download_skips_an_existing_filename() {
+async fn content_download_rejects_an_unverifiable_existing_filename() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("example.jar");
     std::fs::write(&path, b"existing").unwrap();
@@ -304,11 +304,11 @@ async fn content_download_skips_an_existing_filename() {
         hashes: HashMap::new(),
     }]);
 
-    let outcome = download_version_file(&crate::net::HttpClient::new(), &version, directory.path())
+    let error = download_version_file(&crate::net::HttpClient::new(), &version, directory.path())
         .await
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(outcome, DownloadOutcome::SkippedExisting(path));
+    assert!(error.to_string().contains("does not match"));
     assert_eq!(
         std::fs::read(directory.path().join("example.jar")).unwrap(),
         b"existing"
@@ -318,7 +318,7 @@ async fn content_download_skips_an_existing_filename() {
 #[tokio::test]
 async fn content_download_rejects_provider_path_components() {
     let directory = tempfile::tempdir().unwrap();
-    let version = version_with_files(vec![VersionFile {
+    let mut version = version_with_files(vec![VersionFile {
         url: "https://example.test/escape.jar".to_owned(),
         filename: "../escape.jar".to_owned(),
         size: 1,
@@ -326,11 +326,21 @@ async fn content_download_rejects_provider_path_components() {
         hashes: HashMap::new(),
     }]);
 
-    let error = download_version_file(&crate::net::HttpClient::new(), &version, directory.path())
-        .await
-        .unwrap_err();
-
-    assert!(error.to_string().contains("Invalid provider filename"));
+    for filename in [
+        "../escape.jar",
+        r"..\escape.jar",
+        "existing.jar:stream",
+        "C:escape.jar",
+        "NUL.jar",
+        "content.jar.",
+    ] {
+        version.files[0].filename = filename.to_owned();
+        let error =
+            download_version_file(&crate::net::HttpClient::new(), &version, directory.path())
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("Invalid provider filename"));
+    }
     assert!(
         !directory
             .path()
@@ -343,19 +353,63 @@ async fn content_download_rejects_provider_path_components() {
 
 #[tokio::test]
 async fn staged_update_replaces_the_old_file_and_cleans_its_backup() {
+    use sha1::Digest;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    let server = MockServer::start().await;
+    Mock::given(path("/pack"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"new version".to_vec()))
+        .expect(2)
+        .mount(&server)
+        .await;
     let directory = tempfile::tempdir().unwrap();
     let installed = directory.path().join("example.jar");
-    let temporary = directory.path().join(".example.jar.rmcl-download");
-    let backup = directory.path().join(".example.jar.rmcl-backup");
     std::fs::write(&installed, b"old version").unwrap();
-    std::fs::write(&temporary, b"new version").unwrap();
-
-    replace_installed_file(&temporary, &installed, &installed, &backup)
+    let version = version_with_files(vec![VersionFile {
+        url: format!("{}/pack", server.uri()),
+        filename: "example.jar".to_owned(),
+        size: 11,
+        primary: true,
+        hashes: HashMap::from([(
+            "sha1".to_owned(),
+            format!("{:x}", sha1::Sha1::digest(b"new version")),
+        )]),
+    }]);
+    let client = crate::net::HttpClient::new();
+    download_version_file_for_update(&client, &version, directory.path(), &installed)
         .await
         .unwrap();
 
-    assert_eq!(std::fs::read(installed).unwrap(), b"new version");
+    assert_eq!(std::fs::read(&installed).unwrap(), b"new version");
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    let cached = directory.path().join(&version.id).join("example.jar");
+    std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+    std::fs::write(&cached, b"corrupt cached pack").unwrap();
+    assert_eq!(
+        download_mrpack(&client, &version, directory.path())
+            .await
+            .unwrap(),
+        cached
+    );
+    assert_eq!(std::fs::read(&cached).unwrap(), b"new version");
+    Mock::given(path("/different-pack"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"other version".to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut other = version.clone();
+    other.id = "another-version".to_owned();
+    other.files[0].url = format!("{}/different-pack", server.uri());
+    other.files[0].size = 13;
+    other.files[0].hashes = HashMap::from([(
+        "sha1".to_owned(),
+        format!("{:x}", sha1::Sha1::digest(b"other version")),
+    )]);
+    let other_path = download_mrpack(&client, &other, directory.path())
+        .await
+        .unwrap();
+    assert_ne!(other_path, cached);
+    assert_eq!(std::fs::read(&cached).unwrap(), b"new version");
+    assert_eq!(std::fs::read(other_path).unwrap(), b"other version");
 }
 
 #[test]
@@ -416,10 +470,6 @@ fn discovery_sort_maps_to_modrinth_indexes() {
     assert_eq!(discovery_index(DiscoverySort::Newest, ""), "newest");
 }
 
-// covers each branch of url_encode: unreserved bytes pass through; the
-// reserved set + spaces + non-ascii bytes get percent-encoded. emoji
-// exercises multi-byte UTF-8 since the encoder operates on bytes, not
-// chars, so each byte of the codepoint encodes separately.
 #[rstest::rstest]
 #[case::ascii_unreserved("abcXYZ0-9_.~", "abcXYZ0-9_.~")]
 #[case::space("hello world", "hello%20world")]

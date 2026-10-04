@@ -84,22 +84,21 @@ pub enum MigrationError {
 
 pub fn is_needed(instances_dir: &Path, meta_dir: &Path) -> bool {
     let metadata = MetadataPaths::new(meta_dir);
-    if metadata.cache_rebuild_pending().exists() {
-        return true;
-    }
-    if marker_version(&metadata.layout_marker()) == Some(LAYOUT_VERSION) {
-        return false;
-    }
-    has_legacy_instances(instances_dir)
-        || [
-            "versions",
-            "libraries",
-            "assets",
-            "loader-profiles",
-            "config-sync",
-        ]
-        .iter()
-        .any(|path| meta_dir.join(path).exists())
+    metadata.cache_rebuild_pending().exists()
+        || has_legacy_instances(instances_dir)
+        || has_legacy_shared_data(meta_dir)
+}
+
+fn has_legacy_shared_data(meta_dir: &Path) -> bool {
+    [
+        "versions",
+        "libraries",
+        "assets",
+        "loader-profiles",
+        "config-sync",
+    ]
+    .iter()
+    .any(|path| meta_dir.join(path).exists())
 }
 
 pub fn initialize_new_layout(meta_dir: &Path) -> Result<(), MigrationError> {
@@ -137,6 +136,9 @@ pub fn run(
     let metadata = MetadataPaths::new(meta_dir);
     if marker_version(&metadata.layout_marker()) == Some(LAYOUT_VERSION)
         && metadata.cache_rebuild_pending().exists()
+        && !metadata.migration_journal().exists()
+        && !has_legacy_instances(instances_dir)
+        && !has_legacy_shared_data(meta_dir)
     {
         crate::config::upgrade_config_file(config_file)?;
         return Ok(latest_layout_backup(&metadata).unwrap_or_else(|| metadata.backups()));
@@ -149,7 +151,7 @@ pub fn run(
     fs::create_dir_all(metadata.state())?;
     fs::write(metadata.cache_rebuild_pending(), LAYOUT_VERSION.to_string())?;
 
-    let mut journal = load_or_create_journal(instances_dir, &metadata)?;
+    let mut journal = load_or_create_journal(&metadata)?;
     let instances = instance_directories(instances_dir)?;
     let total = instances.len() as u64 + 8;
     let mut current = journal.completed.len() as u64;
@@ -353,9 +355,9 @@ fn backup_user_data(
         },
     )?;
     if config_file.exists() {
-        let destination = partial.join("config").join("config.toml");
-        fs::create_dir_all(destination.parent().unwrap())?;
-        let bytes = fs::copy(config_file, destination)?;
+        let config_backup = partial.join("config");
+        fs::create_dir_all(&config_backup)?;
+        let bytes = fs::copy(config_file, config_backup.join("config.toml"))?;
         copied = copied.saturating_add(bytes);
         report(copied, total, config_file);
     }
@@ -553,7 +555,7 @@ fn copy_dir_recursive_with_progress(
         let file_type = entry.file_type()?;
         let target = destination.join(entry.file_name());
         if file_type.is_symlink() {
-            copy_symlink(&entry.path(), &target)?;
+            crate::storage::copy_symlink(&entry.path(), &target)?;
         } else if file_type.is_dir() {
             copy_dir_recursive_with_progress(&entry.path(), &target, report)?;
         } else {
@@ -565,25 +567,7 @@ fn copy_dir_recursive_with_progress(
     Ok(())
 }
 
-#[cfg(unix)]
-fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(fs::read_link(source)?, destination)
-}
-
-#[cfg(windows)]
-fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
-    let target = fs::read_link(source)?;
-    if source.is_dir() {
-        std::os::windows::fs::symlink_dir(target, destination)
-    } else {
-        std::os::windows::fs::symlink_file(target, destination)
-    }
-}
-
-fn load_or_create_journal(
-    _instances_dir: &Path,
-    metadata: &MetadataPaths,
-) -> Result<MigrationJournal, MigrationError> {
+fn load_or_create_journal(metadata: &MetadataPaths) -> Result<MigrationJournal, MigrationError> {
     let legacy_journal = metadata.state().join("migration-v2.json");
     if metadata.migration_journal().exists() {
         return Ok(serde_json::from_slice(&fs::read(
@@ -596,7 +580,7 @@ fn load_or_create_journal(
         fs::remove_file(legacy_journal)?;
         return Ok(journal);
     }
-    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%f").to_string();
     let journal = MigrationJournal {
         version: LAYOUT_VERSION,
         backup_dir: metadata.backups().join(format!("backup-{timestamp}")),

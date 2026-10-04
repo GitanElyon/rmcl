@@ -55,22 +55,10 @@ pub struct ContentEntry {
     pub icon_lines: Option<Vec<Vec<IconCell>>>,
 }
 
-// enable/disable by renaming the file with/without ".disabled" suffix.
 pub fn toggle_entry(entry: &ContentEntry) -> Result<(), std::io::Error> {
     toggle_entry_path(entry).map(drop)
 }
 
 pub(crate) fn toggle_entry_path(entry: &ContentEntry) -> Result<Option<PathBuf>, std::io::Error> {
-    let Some(file_name) = entry.path.file_name().and_then(|name| name.to_str()) else {
-        return Ok(None);
-    };
-    let new_name = if entry.enabled {
-        format!("{file_name}.disabled")
-    } else {
-        file_name.trim_end_matches(".disabled").to_owned()
-    };
-    let mut new_path = entry.path.clone();
-    new_path.set_file_name(new_name);
-    std::fs::rename(&entry.path, &new_path)?;
-    Ok(Some(new_path))
+    super::local::toggle(entry)
 }

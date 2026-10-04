@@ -1,13 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Constantin Bauer
 // SPDX-License-Identifier: GPL-3.0-only
 
-// mod scanning and loader-specific metadata extraction.
-// jar files are just zips, so it cracks them open looking for loader-specific
-// metadata (fabric.mod.json, quilt.mod.json, mods.toml, mcmod.info) to get
-// names, descriptions, and icons. if none of those work, falls back to common
-// root-level icon paths (logo.png, icon.png, pack.png) or just the filename.
-
-use std::io::Read;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -47,7 +40,6 @@ fn icon_path_from_value(value: &serde_json::Value) -> String {
     }
 }
 
-// quilt puts its metadata under a "metadata" sub-object
 #[derive(Deserialize, Default)]
 struct QuiltModJson {
     #[serde(default)]
@@ -142,10 +134,6 @@ pub fn scan_mods(instances_dir: &Path, instance_name: &str) -> Vec<ContentEntry>
     entries
 }
 
-// tries each loader's metadata file to extract name, description, and icon.
-// checks fabric.mod.json, quilt.mod.json, META-INF/mods.toml (forge),
-// META-INF/neoforge.mods.toml, and mcmod.info (legacy forge). if none of
-// those yield an icon, falls back to common root-level paths.
 fn read_mod_metadata(jar_path: &Path) -> (String, String, String, Option<Vec<u8>>) {
     let file = match std::fs::File::open(jar_path) {
         Ok(file) => file,
@@ -197,7 +185,6 @@ fn read_mod_metadata(jar_path: &Path) -> (String, String, String, Option<Vec<u8>
         }
     }
 
-    // no recognized metadata at all, try common icon paths
     let icon_bytes = try_fallback_icons(&mut archive);
     tracing::trace!(
         "No recognized mod metadata in {}; fallback_icon={}",
@@ -224,9 +211,10 @@ fn try_fallback_icons(archive: &mut zip::ZipArchive<std::fs::File>) -> Option<Ve
 fn read_fabric_meta(
     archive: &mut zip::ZipArchive<std::fs::File>,
 ) -> Option<(String, String, String, String)> {
-    let mut entry = archive.by_name("fabric.mod.json").ok()?;
-    let mut raw = String::new();
-    entry.read_to_string(&mut raw).ok()?;
+    let raw = String::from_utf8(super::read_local_metadata(
+        archive.by_name("fabric.mod.json").ok()?,
+    )?)
+    .ok()?;
     let sanitized = sanitize_json_strings(&raw);
     let data: FabricModJson = serde_json::from_str(&sanitized).ok()?;
     let icon = data.icon_path();
@@ -236,9 +224,10 @@ fn read_fabric_meta(
 fn read_quilt_meta(
     archive: &mut zip::ZipArchive<std::fs::File>,
 ) -> Option<(String, String, String, String)> {
-    let mut entry = archive.by_name("quilt.mod.json").ok()?;
-    let mut raw = String::new();
-    entry.read_to_string(&mut raw).ok()?;
+    let raw = String::from_utf8(super::read_local_metadata(
+        archive.by_name("quilt.mod.json").ok()?,
+    )?)
+    .ok()?;
     let sanitized = sanitize_json_strings(&raw);
     let data: QuiltModJson = serde_json::from_str(&sanitized).ok()?;
     let version = data.quilt_loader.version;
@@ -291,14 +280,13 @@ fn read_forge_toml_meta(
     Some((name, description, version, logo))
 }
 
-// legacy forge mcmod.info is either a bare json array of mod entries
-// or an object with a "modList" key wrapping the array
 fn read_mcmod_info(
     archive: &mut zip::ZipArchive<std::fs::File>,
 ) -> Option<(String, String, String, String)> {
-    let mut entry = archive.by_name("mcmod.info").ok()?;
-    let mut raw = String::new();
-    entry.read_to_string(&mut raw).ok()?;
+    let raw = String::from_utf8(super::read_local_metadata(
+        archive.by_name("mcmod.info").ok()?,
+    )?)
+    .ok()?;
     let sanitized = sanitize_json_strings(&raw);
     let parsed: serde_json::Value = serde_json::from_str(&sanitized).ok()?;
     let first = match &parsed {
@@ -330,10 +318,7 @@ fn read_mcmod_info(
 }
 
 fn read_zip_string(archive: &mut zip::ZipArchive<std::fs::File>, path: &str) -> Option<String> {
-    let mut entry = archive.by_name(path).ok()?;
-    let mut s = String::new();
-    entry.read_to_string(&mut s).ok()?;
-    Some(s)
+    String::from_utf8(super::read_local_metadata(archive.by_name(path).ok()?)?).ok()
 }
 
 // some mod authors put raw newlines/tabs inside json string values which is
@@ -374,10 +359,7 @@ fn sanitize_json_strings(input: &str) -> String {
 }
 
 fn read_zip_bytes(archive: &mut zip::ZipArchive<std::fs::File>, path: &str) -> Option<Vec<u8>> {
-    let mut entry = archive.by_name(path).ok()?;
-    let mut bytes = Vec::new();
-    entry.read_to_end(&mut bytes).ok()?;
-    Some(bytes)
+    super::read_local_metadata(archive.by_name(path).ok()?)
 }
 
 #[cfg(test)]

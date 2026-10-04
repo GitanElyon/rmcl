@@ -12,6 +12,7 @@ use ratatui::{
 pub mod account;
 pub mod content;
 pub mod instances;
+pub(crate) mod log_selection;
 pub mod logs_viewer;
 pub mod markdown;
 pub mod popups;

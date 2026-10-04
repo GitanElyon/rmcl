@@ -265,6 +265,7 @@ pub struct ContentListState {
     pending_provider_icons: Arc<Mutex<Vec<PendingProviderIcon>>>,
     project_metadata: HashMap<(String, String), crate::net::modrinth::ProjectInfo>,
     version_metadata: HashMap<(String, String), crate::net::modrinth::VersionInfo>,
+    unlinked_paths: HashSet<std::path::PathBuf>,
     requested_provider_icons: HashSet<(String, String, String)>,
     pub local_panel_open: bool,
     pub local_sort_index: usize,
@@ -316,6 +317,7 @@ impl Default for ContentListState {
             pending_provider_icons: Arc::new(Mutex::new(Vec::new())),
             project_metadata: HashMap::new(),
             version_metadata: HashMap::new(),
+            unlinked_paths: HashSet::new(),
             requested_provider_icons: HashSet::new(),
             local_panel_open: false,
             local_sort_index: 0,
@@ -405,6 +407,21 @@ impl ContentListState {
         kind: crate::instance::ContentKind,
     ) {
         let mut changed = false;
+        // Unmatched can also mean identification was skipped, so require
+        // at least one completed provider lookup before showing the notice.
+        let unlinked_paths = manifest
+            .files
+            .iter()
+            .filter(|record| {
+                record.kind == kind
+                    && matches!(&record.resolution, crate::instance::Resolution::Unmatched { providers, .. } if !providers.is_empty())
+            })
+            .map(|record| minecraft_dir.join(&record.relative_path))
+            .collect::<HashSet<_>>();
+        if self.unlinked_paths != unlinked_paths {
+            self.unlinked_paths = unlinked_paths;
+            changed = true;
+        }
         let mut invalidated_icons = Vec::new();
         for entry in &mut self.entries {
             let Ok(relative_path) = entry.path.strip_prefix(minecraft_dir) else {
@@ -742,6 +759,7 @@ impl ContentListState {
         self.pending_removals.clear();
         self.requested_provider_icons.clear();
         self.entries.clear();
+        self.unlinked_paths.clear();
         self.invalidate_filtered();
         self.sort_metadata.get_mut().clear();
         self.display_metadata.clear();
@@ -1178,6 +1196,9 @@ impl ContentListState {
                 };
                 self.sort_metadata.get_mut().remove(&old_path);
                 self.sort_metadata.get_mut().remove(path);
+                if self.unlinked_paths.remove(&old_path) {
+                    self.unlinked_paths.insert(path.clone());
+                }
                 update.toggles.push(ContentToggle {
                     old_path,
                     new_path: path.clone(),
@@ -1201,11 +1222,13 @@ impl ContentListState {
 
         for mut entry in diff.added {
             self.sort_metadata.get_mut().remove(&entry.path);
+            self.unlinked_paths.remove(&entry.path);
             let replacement = self.entries.iter().position(|existing| {
                 self.pending_removals.contains_key(&existing.file_stem)
                     && existing.name.eq_ignore_ascii_case(&entry.name)
             });
             if let Some(index) = replacement {
+                self.unlinked_paths.remove(&self.entries[index].path);
                 let old_stem = self.entries[index].file_stem.clone();
                 self.sort_metadata
                     .get_mut()
@@ -1278,6 +1301,7 @@ impl ContentListState {
             let before = self.entries.len();
             if let Some(entry) = self.entries.iter().find(|entry| entry.file_stem == stem) {
                 self.sort_metadata.get_mut().remove(&entry.path);
+                self.unlinked_paths.remove(&entry.path);
             }
             self.entries.retain(|entry| entry.file_stem != stem);
             removed |= self.entries.len() != before;
@@ -1626,6 +1650,12 @@ impl ContentListState {
             .is_some_and(|entry| entry.provider_project.is_some())
     }
 
+    pub(crate) fn selected_is_unlinked(&self) -> bool {
+        self.selected_entry().is_some_and(|entry| {
+            entry.provider_project.is_none() && self.unlinked_paths.contains(&entry.path)
+        })
+    }
+
     pub(crate) fn clamp_selected_index(&mut self) {
         let count = self.filtered_indices().len();
         self.list_state.selected =
@@ -1828,6 +1858,7 @@ impl ContentListState {
     }
 
     pub fn remove_path(&mut self, path: &Path) {
+        self.unlinked_paths.remove(path);
         self.invalidate_filtered();
         self.sort_metadata.get_mut().remove(path);
         let file_stem = self
@@ -2093,6 +2124,7 @@ pub fn render(
     let display_metadata = &state.display_metadata;
     let version_metadata = &state.version_metadata;
     let local_game_version = state.local_game_version.clone();
+    let unlinked_paths = &state.unlinked_paths;
     let filtered_rows = &filtered;
     let search = &state.search;
     let warning_descriptions = state.warning_descriptions;
@@ -2109,7 +2141,11 @@ pub fn render(
         let title_suffix = world_details
             .and_then(|details| details.game_mode)
             .map(WorldGameMode::label)
-            .or(entry.title_suffix.as_deref());
+            .or(entry.title_suffix.as_deref())
+            .or_else(|| {
+                (entry.provider_project.is_none() && unlinked_paths.contains(&entry.path))
+                    .then_some("Unlinked")
+            });
         let world_footer = world_details.map(|details| format_relative_time(details.last_played));
         let footer_label = world_footer.as_deref().or(entry.footer_label.as_deref());
         // Keep rendering the terminal fallback until the asynchronous image
@@ -2169,7 +2205,11 @@ pub fn render(
                     theme.success()
                 }
             });
-        let title_suffix_style = crate::tui::widgets::status_badge_style(title_suffix_color);
+        let title_suffix_style = if title_suffix == Some("Unlinked") {
+            Style::default().fg(theme.text_dim()).bg(theme.surface())
+        } else {
+            crate::tui::widgets::status_badge_style(title_suffix_color)
+        };
         let incompatible_version = !local_game_version.is_empty()
             && entry.provider_project.as_ref().is_some_and(|installed| {
                 !installed.version_id.is_empty()

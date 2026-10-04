@@ -222,7 +222,10 @@ impl App {
             .into_iter()
             .filter(|line| self.log_overlay_search.matches(line))
             .filter(|line| {
-                !super::widgets::logs_viewer::level_hidden(&self.log_hidden_levels, line)
+                widgets::logs_viewer::level_matches(
+                    &self.log_level_filters,
+                    widgets::logs_viewer::level_of_line(line),
+                )
             })
             .collect()
     }
@@ -245,23 +248,34 @@ impl App {
         let filtered = self.overlay_filtered_lines();
 
         let visible_height = overlay.height.saturating_sub(2) as usize;
-        self.log_overlay_page = visible_height;
         // Only follow new lines when pinned to the very bottom; being even
         // one line up means the user is reading history.
         let was_at_bottom = self.log_overlay_scroll >= self.log_overlay_max_scroll;
         self.log_overlay_max_scroll = filtered.len().saturating_sub(visible_height);
-        if was_at_bottom || self.log_overlay_scroll > self.log_overlay_max_scroll {
+        if (was_at_bottom && self.log_selection.range.is_none())
+            || self.log_overlay_scroll > self.log_overlay_max_scroll
+        {
             self.log_overlay_scroll = self.log_overlay_max_scroll;
         }
         self.log_overlay_scrollbar =
             ratatui::widgets::ScrollbarState::new(self.log_overlay_max_scroll)
                 .position(self.log_overlay_scroll);
 
-        let title = if self.log_hidden_levels.is_empty() {
+        let active_filters = self.log_level_filters.iter().flatten().count();
+        let title = if active_filters == 0 {
             " Logs ".to_owned()
         } else {
-            format!(" Logs · {} hidden ", self.log_hidden_levels.len())
+            format!(" Logs · {active_filters} filter(s) ")
         };
+        let mut keybinds = vec![
+            ("Esc", " close"),
+            ("f", " filter"),
+            ("g/G", " top/bottom"),
+            ("/", " search"),
+        ];
+        if self.log_selection.range.is_some() {
+            keybinds.insert(1, ("y", " yank"));
+        }
         let mut block = Block::bordered()
             .title_top(
                 Line::from(title).style(
@@ -271,14 +285,7 @@ impl App {
                 ),
             )
             .title_bottom(
-                crate::tui::widgets::popups::keybind_line(&[
-                    ("O", " close"),
-                    ("f", " filter"),
-                    ("y", " copy"),
-                    ("PgUp/PgDn", " page"),
-                    ("/", " search"),
-                ])
-                .alignment(Alignment::Right),
+                crate::tui::widgets::popups::keybind_line(&keybinds).alignment(Alignment::Right),
             )
             .border_type(BORDER_STYLE.to_border_type())
             .border_style(Style::default().fg(theme.accent()))
@@ -293,20 +300,18 @@ impl App {
         self.log_overlay_inner = inner;
 
         let search = &self.log_overlay_search;
-        let selected = self
-            .log_selection
-            .map(|(from, to)| (from.min(to), from.max(to)));
         let styled: Vec<Line> = filtered
             .iter()
             .enumerate()
             .skip(self.log_overlay_scroll)
             .take(visible_height)
             .map(|(index, line)| {
-                let mut style = super::widgets::logs_viewer::line_level_style(line);
-                if selected.is_some_and(|(from, to)| index >= from && index <= to) {
-                    style = style.add_modifier(Modifier::REVERSED);
-                }
-                search.highlight_line(line, style)
+                self.log_selection.highlight_line(
+                    index,
+                    line,
+                    search,
+                    widgets::logs_viewer::line_level_style(line),
+                )
             })
             .collect();
 
@@ -328,7 +333,7 @@ impl App {
                 frame,
                 overlay,
                 self.log_filter_selected,
-                &self.log_hidden_levels,
+                &self.log_level_filters,
             );
         }
     }

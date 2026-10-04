@@ -795,7 +795,7 @@ fn checking_popup_locks_input_until_cancelled() {
 }
 
 #[test]
-fn log_overlay_pages_and_stays_put_while_reading_history() {
+fn log_overlay_ignores_page_keys_and_stays_put_while_reading_history() {
     use crate::tui::logging::{clear_app_logs, push_app_log};
     let mut ui = UiHarness::new();
     clear_app_logs();
@@ -809,9 +809,13 @@ fn log_overlay_pages_and_stays_put_while_reading_history() {
     assert_eq!(ui.app.log_overlay_scroll, 14);
 
     ui.key(KeyCode::PageUp);
-    assert_eq!(ui.app.log_overlay_scroll, 0);
+    assert_eq!(ui.app.log_overlay_scroll, 14);
     ui.key(KeyCode::PageDown);
     assert_eq!(ui.app.log_overlay_scroll, 14);
+    assert!(ui.screen().contains("[g/G] top/bottom"));
+    assert!(ui.screen().contains("[Esc] close"));
+    assert!(!ui.screen().contains("PgUp"));
+    assert!(!ui.screen().contains("[y]"));
     for _ in 0..5 {
         ui.key(KeyCode::Char('k'));
     }
@@ -833,26 +837,44 @@ fn log_overlay_pages_and_stays_put_while_reading_history() {
 }
 
 #[test]
-fn log_overlay_level_filter_opens_toggles_and_closes() {
-    use crate::instance::launch::parser::LogLevel;
+fn log_overlay_level_filter_opens_cycles_and_closes() {
+    use crate::tui::logging::{clear_app_logs, push_app_log};
+    use crate::tui::widgets::content::discovery::CategoryFilter;
     let mut ui = UiHarness::new();
+    clear_app_logs();
+    push_app_log("12:00:00:ERROR:rmcl: failed".to_owned());
+    push_app_log("12:00:00:INFO:rmcl: done".to_owned());
     ui.app.focused = FocusedArea::OverviewExpanded;
 
     ui.key(KeyCode::Char('f'));
     assert!(ui.app.log_filter_open);
     ui.draw();
     assert!(ui.screen().contains("Log levels"));
+    assert!(ui.screen().contains("· Error"));
     ui.key(KeyCode::Enter);
-    assert_eq!(ui.app.log_hidden_levels, vec![LogLevel::Error]);
+    assert_eq!(ui.app.log_level_filters[0], Some(CategoryFilter::Include));
     ui.draw();
-    assert!(ui.screen().contains("1 hidden"));
+    assert!(ui.screen().contains("+ Error"));
+    assert!(ui.screen().contains("1 filter(s)"));
+    ui.key(KeyCode::Esc);
+    ui.draw();
+    assert!(ui.screen().contains("failed"));
+    assert!(!ui.screen().contains("done"));
+    ui.key(KeyCode::Char('f'));
+    ui.key(KeyCode::Enter);
+    ui.draw();
+    assert!(ui.screen().contains("− Error"));
     ui.key(KeyCode::Esc);
     assert!(!ui.app.log_filter_open);
-    assert_eq!(ui.app.log_hidden_levels, vec![LogLevel::Error]);
+    assert_eq!(ui.app.log_level_filters[0], Some(CategoryFilter::Exclude));
+    ui.draw();
+    assert!(!ui.screen().contains("failed"));
+    assert!(ui.screen().contains("done"));
+    clear_app_logs();
 }
 
 #[test]
-fn mouse_drag_selects_viewer_lines_for_yank() {
+fn mouse_drag_selects_viewer_characters_and_click_clears_yank_hint() {
     use crate::instance::logs::files::LogFileEntry;
     use crossterm::event::KeyModifiers;
     let mut ui = UiHarness::new();
@@ -871,6 +893,7 @@ fn mouse_drag_selects_viewer_lines_for_yank() {
     ui.app.logs_state.viewer_lines =
         vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()];
     ui.draw();
+    assert!(!ui.screen().contains("[y]"));
     let area = ui.app.logs_state.viewer_area;
     assert!(area.height >= 3);
     let click = |kind, row| MouseEvent {
@@ -881,16 +904,36 @@ fn mouse_drag_selects_viewer_lines_for_yank() {
     };
     ui.app
         .handle_mouse_event(click(MouseEventKind::Down(MouseButton::Left), area.y));
+    assert!(ui.app.logs_state.selection.range.is_none());
     ui.app
         .handle_mouse_event(click(MouseEventKind::Drag(MouseButton::Left), area.y + 1));
     ui.app
         .handle_mouse_event(click(MouseEventKind::Up(MouseButton::Left), area.y + 1));
-    assert_eq!(ui.app.logs_state.selection, Some((0, 1)));
-    assert!(!ui.app.logs_state.selecting);
+    assert_eq!(ui.app.logs_state.selection.range, Some(((0, 2), (1, 2))));
+    assert_eq!(
+        ui.app
+            .logs_state
+            .selection
+            .text(&["alpha", "beta", "gamma"])
+            .as_deref(),
+        Some("pha\nbe")
+    );
+    assert!(ui.app.logs_state.viewer_focused);
+    ui.draw();
+    assert!(ui.screen().contains("[y] yank"));
+    assert!(ui.screen().contains("[g/G] top/bottom"));
+    assert!(!ui.screen().contains("PgUp"));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Down(MouseButton::Left), area.y));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Up(MouseButton::Left), area.y));
+    ui.draw();
+    assert!(ui.app.logs_state.selection.range.is_none());
+    assert!(!ui.screen().contains("[y]"));
 }
 
 #[test]
-fn mouse_drag_selects_overlay_lines_for_yank() {
+fn mouse_drag_selects_overlay_characters_for_yank_and_escape_closes() {
     use crate::tui::logging::{clear_app_logs, push_app_log};
     use crossterm::event::KeyModifiers;
     let mut ui = UiHarness::new();
@@ -914,14 +957,100 @@ fn mouse_drag_selects_overlay_lines_for_yank() {
         .handle_mouse_event(click(MouseEventKind::Drag(MouseButton::Left), area.y + 2));
     ui.app
         .handle_mouse_event(click(MouseEventKind::Up(MouseButton::Left), area.y + 2));
-    assert_eq!(ui.app.log_selection, Some((0, 2)));
+    assert_eq!(ui.app.log_selection.range, Some(((0, 2), (2, 2))));
+    ui.draw();
+    assert!(ui.screen().contains("[y] yank"));
     ui.key(KeyCode::Char('y'));
     assert!(
         crate::feedback::errors::peek_all_errors()
             .iter()
-            .any(|event| event.message.contains("Copied 3 line(s)"))
+            .any(|event| event.message.contains("Yanked 3 line(s)"))
     );
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Down(MouseButton::Left), area.y));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Up(MouseButton::Left), area.y));
+    ui.draw();
+    assert!(!ui.screen().contains("[y]"));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Down(MouseButton::Left), area.y));
+    ui.app
+        .handle_mouse_event(click(MouseEventKind::Drag(MouseButton::Left), area.y + 1));
+    ui.key(KeyCode::Esc);
+    assert_ne!(ui.app.focused, FocusedArea::OverviewExpanded);
+    assert!(ui.app.log_selection.range.is_none());
     clear_app_logs();
+}
+
+#[test]
+fn log_level_popup_does_not_delete_logs_or_leave_on_tab() {
+    use crate::instance::logs::files::LogFileEntry;
+    let mut ui = UiHarness::new();
+    ui.add_instance("A");
+    ui.app.focused = FocusedArea::Content;
+    ui.app.content_tab = ContentTab::Logs;
+    ui.app.logs_state.loaded_for = Some("A".to_owned());
+    ui.app.logs_state.entries.push(LogFileEntry {
+        name: "a.log".to_owned(),
+        path: ui.instance_path("A").join("a.log"),
+    });
+    ui.app.logs_state.list_state.selected = Some(0);
+    ui.key(KeyCode::Char('f'));
+    ui.key(KeyCode::Char('d'));
+    assert_eq!(ui.app.focused, FocusedArea::Content);
+    assert!(ui.app.logs_state.filter_open);
+    ui.key(KeyCode::Tab);
+    assert_eq!(ui.app.content_mode, ContentMode::Installed);
+    ui.draw();
+    assert!(ui.screen().contains("· Error"));
+    assert!(ui.screen().contains("[Esc] close"));
+    ui.key(KeyCode::Esc);
+    assert!(!ui.app.logs_state.filter_open);
+}
+
+#[test]
+fn selected_unlinked_content_explains_why_versions_are_unavailable() {
+    let mut ui = UiHarness::new();
+    ui.add_instance("A");
+    let minecraft = ui
+        .instance_path("A")
+        .join(crate::storage::MINECRAFT_DIR_NAME);
+    let path = minecraft.join("mods/local.jar");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "local mod").unwrap();
+    let mut record = managed_mod_record(&minecraft, "mods/local.jar", "local", false, Vec::new());
+    record.resolution = Resolution::Unmatched {
+        checked_at: 1,
+        providers: vec!["modrinth".to_owned()],
+    };
+    let mut manifest = ContentManifest::default();
+    manifest.upsert(record);
+    ui.app
+        .mods_state
+        .entries
+        .push(content_entry("scoreboardinternal", path));
+    ui.app.mods_state.loaded_for = Some("A".to_owned());
+    ui.app.mods_state.list_state.selected = Some(0);
+    ui.app
+        .mods_state
+        .apply_manifest(&manifest, &minecraft, ContentKind::Mod);
+    ui.app.focused = FocusedArea::Content;
+    ui.draw();
+    assert!(ui.screen().contains("Unlinked"));
+    assert!(
+        ui.screen()
+            .contains("No online source linked; version switching unavailable.")
+    );
+    ui.key(KeyCode::Char('v'));
+    assert!(ui.app.mods_discovery_state.version_popup.is_none());
+
+    manifest.files[0].resolution = Resolution::Pending;
+    ui.app
+        .mods_state
+        .apply_manifest(&manifest, &minecraft, ContentKind::Mod);
+    ui.draw();
+    assert!(!ui.screen().contains("Unlinked"));
+    assert!(!ui.screen().contains("No online source linked"));
 }
 
 #[test]

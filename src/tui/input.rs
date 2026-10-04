@@ -62,131 +62,40 @@ impl App {
     }
 
     fn handle_log_selection_mouse(&mut self, event: MouseEvent) -> bool {
-        use ratatui::layout::Position;
-        let at = Position::new(event.column, event.row);
+        if !matches!(
+            event.kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+        ) {
+            return false;
+        }
+        if self
+            .content_update_popup
+            .as_ref()
+            .is_some_and(widgets::content::update::State::visible)
+            || self.provider_conflict.is_some()
+            || self.modpack_versions_state.is_some()
+            || self.modpack_update_popup.is_some()
+        {
+            return false;
+        }
         if self.focused == FocusedArea::OverviewExpanded && !self.log_filter_open {
-            let area = self.log_overlay_inner;
-            match event.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if area.is_empty() || !area.contains(at) {
-                        return false;
-                    }
-                    let count = self.overlay_filtered_lines().len();
-                    if count == 0 {
-                        return false;
-                    }
-                    let index = (self.log_overlay_scroll
-                        + usize::from(event.row.saturating_sub(area.y)))
-                    .min(count - 1);
-                    self.log_selecting = true;
-                    self.log_selection = Some((index, index));
-                    true
-                }
-                MouseEventKind::Drag(MouseButton::Left) => {
-                    if !self.log_selecting {
-                        return false;
-                    }
-                    let count = self.overlay_filtered_lines().len();
-                    if count == 0 {
-                        return false;
-                    }
-                    let relative = usize::from(event.row.saturating_sub(area.y))
-                        .min(usize::from(area.height.saturating_sub(1)));
-                    let index = (self.log_overlay_scroll + relative).min(count - 1);
-                    if let Some(selection) = self.log_selection.as_mut() {
-                        selection.1 = index;
-                    }
-                    true
-                }
-                MouseEventKind::Up(MouseButton::Left) => {
-                    if !self.log_selecting {
-                        return false;
-                    }
-                    self.log_selecting = false;
-                    true
-                }
-                _ => false,
-            }
+            let lines = self.overlay_filtered_lines();
+            self.log_selection.handle_mouse(
+                event,
+                self.log_overlay_inner,
+                self.log_overlay_scroll,
+                &lines,
+            )
         } else if self.focused == FocusedArea::Content
             && self.content_tab == widgets::content::ContentTab::Logs
+            && self.content_mode == widgets::content::ContentMode::Installed
             && !self.logs_state.filter_open
         {
-            let area = self.logs_state.viewer_area;
-            match event.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if area.is_empty() || !area.contains(at) {
-                        return false;
-                    }
-                    let count = widgets::logs_viewer::filtered_viewer_line_count(&self.logs_state);
-                    if count == 0 {
-                        return false;
-                    }
-                    let index = (self.logs_state.viewer_scroll
-                        + usize::from(event.row.saturating_sub(area.y)))
-                    .min(count - 1);
-                    self.logs_state.selecting = true;
-                    self.logs_state.selection = Some((index, index));
-                    true
-                }
-                MouseEventKind::Drag(MouseButton::Left) => {
-                    if !self.logs_state.selecting {
-                        return false;
-                    }
-                    let count = widgets::logs_viewer::filtered_viewer_line_count(&self.logs_state);
-                    if count == 0 {
-                        return false;
-                    }
-                    let relative = usize::from(event.row.saturating_sub(area.y))
-                        .min(usize::from(area.height.saturating_sub(1)));
-                    let index = (self.logs_state.viewer_scroll + relative).min(count - 1);
-                    if let Some(selection) = self.logs_state.selection.as_mut() {
-                        selection.1 = index;
-                    }
-                    true
-                }
-                MouseEventKind::Up(MouseButton::Left) => {
-                    if !self.logs_state.selecting {
-                        return false;
-                    }
-                    self.logs_state.selecting = false;
-                    true
-                }
-                _ => false,
-            }
+            widgets::logs_viewer::handle_selection_mouse(event, &mut self.logs_state)
         } else {
             false
-        }
-    }
-
-    fn yank_overlay_selection(&mut self) {
-        let Some((from, to)) = self
-            .log_selection
-            .map(|(first, second)| (first.min(second), first.max(second)))
-        else {
-            error_buffer::push_message(
-                tracing::Level::INFO,
-                "Drag across log lines to select them, then press y to copy",
-            );
-            return;
-        };
-        let lines = self.overlay_filtered_lines();
-        if lines.is_empty() {
-            return;
-        }
-        let end = to.min(lines.len() - 1);
-        if from > end {
-            return;
-        }
-        match widgets::logs_viewer::copy_to_clipboard(&lines[from..=end].join("\n")) {
-            Some((count, false)) => error_buffer::push_message(
-                tracing::Level::INFO,
-                format!("Copied {count} line(s) to the clipboard"),
-            ),
-            Some((count, true)) => error_buffer::push_message(
-                tracing::Level::WARN,
-                format!("Copied the first {count} lines; the selection was truncated"),
-            ),
-            None => {}
         }
     }
 
@@ -299,38 +208,22 @@ impl App {
         // log overlay eats all input when open, including its own search sub-mode
         if self.focused == FocusedArea::OverviewExpanded {
             if self.log_filter_open {
-                match key_event.code {
-                    KeyCode::Esc | KeyCode::Char('f') => {
-                        self.log_filter_open = false;
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        self.log_filter_selected = (self.log_filter_selected + 1).min(
-                            crate::tui::widgets::logs_viewer::LOG_LEVEL_FILTER_ORDER.len() - 1,
-                        );
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        self.log_filter_selected = self.log_filter_selected.saturating_sub(1);
-                    }
-                    KeyCode::Enter | KeyCode::Char(' ') => {
-                        crate::tui::widgets::logs_viewer::toggle_hidden_level(
-                            &mut self.log_hidden_levels,
-                            self.log_filter_selected,
-                        );
-                        self.log_selection = None;
-                        self.log_overlay_scroll = 0;
-                    }
-                    KeyCode::Char('r') => {
-                        self.log_hidden_levels.clear();
-                    }
-                    _ => {}
+                if widgets::logs_viewer::handle_level_filter_key(
+                    &key_event,
+                    &mut self.log_filter_open,
+                    &mut self.log_filter_selected,
+                    &mut self.log_level_filters,
+                ) {
+                    self.log_selection.clear();
+                    self.log_overlay_scroll = 0;
                 }
                 return Ok(());
             }
             if self.log_overlay_search.active {
+                self.log_selection.clear();
                 match key_event.code {
                     KeyCode::Enter => {
                         self.log_overlay_search.confirm();
-                        self.log_selection = None;
                         self.log_overlay_scroll = 0;
                     }
                     KeyCode::Esc => {
@@ -348,10 +241,7 @@ impl App {
             }
             match key_event.code {
                 KeyCode::Char('O') | KeyCode::Esc => {
-                    if self.log_selection.take().is_some() {
-                        self.log_selecting = false;
-                        return Ok(());
-                    }
+                    self.log_selection.clear();
                     self.focused = self.pre_overlay_focused;
                     self.log_overlay_search.deactivate();
                     return Ok(());
@@ -374,18 +264,8 @@ impl App {
                     self.log_overlay_scroll = 0;
                     return Ok(());
                 }
-                KeyCode::PageDown => {
-                    let page = self.log_overlay_page.max(1);
-                    self.log_overlay_scroll =
-                        (self.log_overlay_scroll + page).min(self.log_overlay_max_scroll);
-                    return Ok(());
-                }
-                KeyCode::PageUp => {
-                    let page = self.log_overlay_page.max(1);
-                    self.log_overlay_scroll = self.log_overlay_scroll.saturating_sub(page);
-                    return Ok(());
-                }
                 KeyCode::Char('/') => {
+                    self.log_selection.clear();
                     self.log_overlay_search.activate();
                     return Ok(());
                 }
@@ -395,8 +275,11 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Char('y') => {
-                    self.log_selecting = false;
-                    self.yank_overlay_selection();
+                    self.log_selection.finish();
+                    widgets::logs_viewer::yank_selection(
+                        &self.log_selection,
+                        &self.overlay_filtered_lines(),
+                    );
                     return Ok(());
                 }
                 _ => {
@@ -776,6 +659,7 @@ impl App {
         } else if self.focused == FocusedArea::Content {
             if self.content_tab == widgets::content::ContentTab::Logs {
                 if key_event.code == KeyCode::Char('d')
+                    && !self.logs_state.filter_open
                     && !self.logs_state.search.active
                     && !self.logs_state.viewer_search.active
                 {

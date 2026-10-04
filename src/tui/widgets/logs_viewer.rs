@@ -14,9 +14,13 @@ use ratatui::{
 };
 use tui_widget_list::{ListBuilder, ListState as TuiListState, ListView};
 
+use super::content::discovery::CategoryFilter;
+use super::log_selection::LogSelection;
 use crate::config::theme::{BORDER_STYLE, THEME};
 use crate::instance::launch::parser::LogLevel;
 use crate::instance::logs::files::{LogFileEntry, read_log_file, scan_log_files};
+
+pub(crate) type LevelFilters = [Option<CategoryFilter>; 5];
 
 type PendingLogs = Arc<Mutex<Option<(String, Vec<LogFileEntry>)>>>;
 
@@ -29,12 +33,10 @@ pub struct LogsState {
     pub viewer_lines: Vec<String>,
     pub viewer_scroll: usize,
     pub viewer_max_scroll: usize,
-    pub viewer_page: usize,
     pub filter_open: bool,
     pub filter_selected: usize,
-    pub hidden_levels: Vec<LogLevel>,
-    pub selection: Option<(usize, usize)>,
-    pub selecting: bool,
+    pub(crate) level_filters: LevelFilters,
+    pub(crate) selection: LogSelection,
     pub viewer_area: Rect,
     pub scrollbar_state: ScrollbarState,
     pub viewer_scrollbar_state: ScrollbarState,
@@ -58,12 +60,10 @@ impl Default for LogsState {
             viewer_lines: Vec::new(),
             viewer_scroll: 0,
             viewer_max_scroll: 0,
-            viewer_page: 0,
             filter_open: false,
             filter_selected: 0,
-            hidden_levels: Vec::new(),
-            selection: None,
-            selecting: false,
+            level_filters: [None; 5],
+            selection: LogSelection::default(),
             viewer_area: Rect::default(),
             scrollbar_state: ScrollbarState::default(),
             viewer_scrollbar_state: ScrollbarState::default(),
@@ -87,6 +87,7 @@ impl LogsState {
         self.entries.clear();
         self.list_state = TuiListState::default();
         self.viewer_lines.clear();
+        self.selection.clear();
         self.viewer_scroll = 0;
         self.viewer_focused = false;
         self.selected_path = None;
@@ -240,6 +241,9 @@ impl LogsState {
 
     fn load_selected_content(&mut self) {
         if self.is_live_selected() {
+            if self.selected_path.is_some() {
+                self.selection.clear();
+            }
             self.selected_path = None;
             self.viewer_lines.clear();
             self.viewer_scroll = 0;
@@ -255,6 +259,7 @@ impl LogsState {
             return;
         }
         self.selected_path = path.clone();
+        self.selection.clear();
         self.viewer_scroll = 0;
 
         if let Some(path) = path {
@@ -309,6 +314,7 @@ impl LogsState {
             self.selected_path = None;
             self.viewer_lines.clear();
             self.viewer_scroll = 0;
+            self.selection.clear();
         } else if let Some(sel) = self.list_state.selected {
             self.list_state.selected = Some(sel.min(display_count.saturating_sub(1)));
             self.load_selected_content();
@@ -321,36 +327,24 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut LogsState) -> bool {
     let shift = key_event.modifiers.contains(KeyModifiers::SHIFT);
 
     if state.filter_open {
-        match key_event.code {
-            KeyCode::Esc | KeyCode::Char('f') => {
-                state.filter_open = false;
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                state.filter_selected =
-                    (state.filter_selected + 1).min(LOG_LEVEL_FILTER_ORDER.len() - 1);
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                state.filter_selected = state.filter_selected.saturating_sub(1);
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                toggle_hidden_level(&mut state.hidden_levels, state.filter_selected);
-                state.selection = None;
-                state.viewer_scroll = 0;
-            }
-            KeyCode::Char('r') => {
-                state.hidden_levels.clear();
-            }
-            _ => {}
+        if handle_level_filter_key(
+            key_event,
+            &mut state.filter_open,
+            &mut state.filter_selected,
+            &mut state.level_filters,
+        ) {
+            state.selection.clear();
+            state.viewer_scroll = 0;
         }
         return true;
     }
 
     if state.viewer_focused {
         if state.viewer_search.active {
+            state.selection.clear();
             match key_event.code {
                 KeyCode::Enter => {
                     state.viewer_search.confirm();
-                    state.selection = None;
                     state.viewer_scroll = 0;
                 }
                 KeyCode::Esc => {
@@ -371,6 +365,7 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut LogsState) -> bool {
         }
 
         if key_event.code == KeyCode::Char('/') {
+            state.selection.clear();
             state.viewer_search.activate();
             state.viewer_scroll = 0;
             return true;
@@ -409,28 +404,13 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut LogsState) -> bool {
                     ScrollbarState::new(state.viewer_max_scroll).position(state.viewer_scroll);
                 true
             }
-            KeyCode::PageDown => {
-                state.viewer_scroll =
-                    (state.viewer_scroll + state.viewer_page.max(1)).min(state.viewer_max_scroll);
-                state.viewer_scrollbar_state =
-                    ScrollbarState::new(state.viewer_max_scroll).position(state.viewer_scroll);
-                true
-            }
-            KeyCode::PageUp => {
-                state.viewer_scroll = state.viewer_scroll.saturating_sub(state.viewer_page.max(1));
-                state.viewer_scrollbar_state =
-                    ScrollbarState::new(state.viewer_max_scroll).position(state.viewer_scroll);
-                true
-            }
             KeyCode::Esc => {
-                if state.selection.take().is_some() {
-                    return true;
-                }
+                state.selection.clear();
                 state.viewer_focused = false;
                 true
             }
             KeyCode::Char('y') => {
-                state.selecting = false;
+                state.selection.finish();
                 yank_viewer_selection(state);
                 true
             }
@@ -442,10 +422,10 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut LogsState) -> bool {
         }
     } else {
         if state.search.active {
+            state.selection.clear();
             match key_event.code {
                 KeyCode::Enter => {
                     state.search.confirm();
-                    state.selection = None;
                     state.list_state.selected = Some(0);
                     state.load_selected_content();
                     state.update_scrollbar();
@@ -474,6 +454,7 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut LogsState) -> bool {
         }
 
         if key_event.code == KeyCode::Char('/') {
+            state.selection.clear();
             state.search.activate();
             state.list_state.selected = Some(0);
             state.update_scrollbar();
@@ -528,12 +509,12 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut LogsState) -> bool {
                 state.viewer_focused = true;
                 true
             }
-            KeyCode::Esc if state.selection.is_some() => {
-                state.selection = None;
+            KeyCode::Esc if state.selection.range.is_some() => {
+                state.selection.clear();
                 true
             }
             KeyCode::Char('y') => {
-                state.selecting = false;
+                state.selection.finish();
                 yank_viewer_selection(state);
                 true
             }
@@ -545,20 +526,28 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut LogsState) -> bool {
 pub fn render(frame: &mut Frame, area: Rect, state: &mut LogsState, is_focused: bool) {
     let theme = THEME.as_ref();
     if state.loading {
+        state.viewer_area = Rect::default();
         frame.render_widget(
             Paragraph::new("Loading logs...").style(Style::default().fg(theme.text_dim())),
             area,
         );
+        if state.filter_open {
+            render_level_filter(frame, area, state.filter_selected, &state.level_filters);
+        }
         return;
     }
 
     let display_count = state.display_count();
 
     if display_count == 0 {
+        state.viewer_area = Rect::default();
         frame.render_widget(
             Paragraph::new("No logs yet.").style(Style::default().fg(theme.text_dim())),
             area,
         );
+        if state.filter_open {
+            render_level_filter(frame, area, state.filter_selected, &state.level_filters);
+        }
         return;
     }
 
@@ -669,13 +658,12 @@ fn render_viewer(frame: &mut Frame, area: Rect, state: &mut LogsState) {
     let lines = filtered_viewer_lines(state);
 
     let visible_height = area.height as usize;
-    state.viewer_page = visible_height;
     // auto-scroll: if the user was already at the bottom, keep following
     // new lines as they come in (like `tail -f` behavior)
     let was_at_bottom = state.viewer_scroll >= state.viewer_max_scroll;
     state.update_viewer_scrollbar(visible_height, lines.len());
 
-    if is_live && was_at_bottom && !state.viewer_search.active {
+    if is_live && was_at_bottom && !state.viewer_search.active && state.selection.range.is_none() {
         state.viewer_scroll = state.viewer_max_scroll;
         state.viewer_scrollbar_state =
             ScrollbarState::new(state.viewer_max_scroll).position(state.viewer_scroll);
@@ -683,34 +671,32 @@ fn render_viewer(frame: &mut Frame, area: Rect, state: &mut LogsState) {
 
     if lines.is_empty() {
         if state.filter_open {
-            render_level_filter(frame, area, state.filter_selected, &state.hidden_levels);
+            render_level_filter(frame, area, state.filter_selected, &state.level_filters);
         }
         return;
     }
 
     let search = &state.viewer_search;
-    let selected = state.selection.map(ordered_selection);
     let styled_lines: Vec<Line> = lines
         .iter()
         .enumerate()
         .skip(state.viewer_scroll)
         .take(visible_height)
         .map(|(index, line)| {
-            let mut style = line
+            let style = line
                 .level
                 .map(log_level_style)
                 .unwrap_or_else(|| line_level_style(&line.text));
-            if selected.is_some_and(|(from, to)| index >= from && index <= to) {
-                style = style.add_modifier(Modifier::REVERSED);
-            }
-            search.highlight_line(&line.text, style)
+            state
+                .selection
+                .highlight_line(index, &line.text, search, style)
         })
         .collect();
 
     frame.render_widget(Paragraph::new(styled_lines), area);
 
     if state.filter_open {
-        render_level_filter(frame, area, state.filter_selected, &state.hidden_levels);
+        render_level_filter(frame, area, state.filter_selected, &state.level_filters);
     }
 
     let scrollbar_area = Rect {
@@ -761,24 +747,41 @@ pub(crate) fn level_of_line(line: &str) -> Option<LogLevel> {
     }
 }
 
-/// Whether a line is hidden by the level filter. Lines without a
-/// recognizable level are always shown.
-pub(crate) fn level_hidden(hidden: &[LogLevel], text: &str) -> bool {
-    level_of_line(text).is_some_and(|level| hidden.contains(&level))
+pub(crate) fn level_matches(filters: &LevelFilters, level: Option<LogLevel>) -> bool {
+    let mode = LOG_LEVEL_FILTER_ORDER
+        .iter()
+        .position(|value| Some(*value) == level)
+        .and_then(|index| filters[index]);
+    mode != Some(CategoryFilter::Exclude)
+        && (!filters.contains(&Some(CategoryFilter::Include))
+            || mode == Some(CategoryFilter::Include))
 }
 
-pub(crate) fn toggle_hidden_level(hidden: &mut Vec<LogLevel>, selected: usize) {
-    if let Some(level) = LOG_LEVEL_FILTER_ORDER.get(selected) {
-        if hidden.contains(level) {
-            hidden.retain(|kept| kept != level);
-        } else {
-            hidden.push(*level);
+pub(crate) fn handle_level_filter_key(
+    key: &KeyEvent,
+    open: &mut bool,
+    selected: &mut usize,
+    filters: &mut LevelFilters,
+) -> bool {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('f') => *open = false,
+        KeyCode::Char('j') | KeyCode::Down => *selected = (*selected + 1).min(filters.len() - 1),
+        KeyCode::Char('k') | KeyCode::Up => *selected = selected.saturating_sub(1),
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            filters[*selected] = match filters[*selected] {
+                None => Some(CategoryFilter::Include),
+                Some(CategoryFilter::Include) => Some(CategoryFilter::Exclude),
+                Some(CategoryFilter::Exclude) => None,
+            };
+            return true;
         }
+        KeyCode::Char('r') => {
+            *filters = [None; 5];
+            return true;
+        }
+        _ => {}
     }
-}
-
-fn ordered_selection(selection: (usize, usize)) -> (usize, usize) {
-    (selection.0.min(selection.1), selection.0.max(selection.1))
+    false
 }
 
 fn filtered_viewer_lines(state: &LogsState) -> Vec<ViewerLine> {
@@ -802,46 +805,47 @@ fn filtered_viewer_lines(state: &LogsState) -> Vec<ViewerLine> {
     all_lines
         .into_iter()
         .filter(|line| state.viewer_search.matches(&line.text))
-        .filter(|line| match line.level {
-            Some(level) => !state.hidden_levels.contains(&level),
-            None => !level_hidden(&state.hidden_levels, &line.text),
+        .filter(|line| {
+            level_matches(
+                &state.level_filters,
+                line.level.or_else(|| level_of_line(&line.text)),
+            )
         })
         .collect()
 }
 
-pub(crate) fn filtered_viewer_line_count(state: &LogsState) -> usize {
-    filtered_viewer_lines(state).len()
+pub(crate) fn handle_selection_mouse(
+    event: crossterm::event::MouseEvent,
+    state: &mut LogsState,
+) -> bool {
+    let lines = filtered_viewer_lines(state);
+    let handled =
+        state
+            .selection
+            .handle_mouse(event, state.viewer_area, state.viewer_scroll, &lines);
+    if handled {
+        state.viewer_focused = true;
+    }
+    handled
 }
 
 pub(crate) fn yank_viewer_selection(state: &mut LogsState) {
-    let Some(selection) = state.selection.map(ordered_selection) else {
-        crate::feedback::errors::push_message(
-            tracing::Level::INFO,
-            "Drag across log lines to select them, then press y to copy",
-        );
+    let lines = filtered_viewer_lines(state);
+    yank_selection(&state.selection, &lines);
+}
+
+pub(crate) fn yank_selection(selection: &LogSelection, lines: &[impl AsRef<str>]) {
+    let Some(text) = selection.text(lines) else {
         return;
     };
-    let lines = filtered_viewer_lines(state);
-    if lines.is_empty() {
-        return;
-    }
-    let end = selection.1.min(lines.len() - 1);
-    if selection.0 > end {
-        return;
-    }
-    let text = lines[selection.0..=end]
-        .iter()
-        .map(|line| line.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
     match copy_to_clipboard(&text) {
         Some((count, false)) => crate::feedback::errors::push_message(
             tracing::Level::INFO,
-            format!("Copied {count} line(s) to the clipboard"),
+            format!("Yanked {count} line(s) to the clipboard"),
         ),
         Some((count, true)) => crate::feedback::errors::push_message(
             tracing::Level::WARN,
-            format!("Copied the first {count} lines; the selection was truncated"),
+            format!("Yanked the first {count} lines; the selection was truncated"),
         ),
         None => {}
     }
@@ -852,19 +856,25 @@ pub(crate) fn yank_viewer_selection(state: &mut LogsState) {
 pub(crate) fn copy_to_clipboard(text: &str) -> Option<(usize, bool)> {
     use base64::Engine;
     const MAX_LINES: usize = 2000;
-    let lines: Vec<&str> = text.lines().take(MAX_LINES + 1).collect();
+    let lines: Vec<&str> = text.split_inclusive('\n').take(MAX_LINES + 1).collect();
     if lines.is_empty() {
         return None;
     }
     let truncated = lines.len() > MAX_LINES;
     let count = lines.len().min(MAX_LINES);
-    let encoded = base64::engine::general_purpose::STANDARD.encode(lines[..count].join("\n"));
+    let encoded = base64::engine::general_purpose::STANDARD.encode(lines[..count].concat());
     let sequence = format!("\x1b]52;c;{encoded}\x07");
     use std::io::Write;
-    std::io::stdout()
+    if let Err(error) = std::io::stdout()
         .write_all(sequence.as_bytes())
         .and_then(|_| std::io::stdout().flush())
-        .ok()?;
+    {
+        crate::feedback::errors::push_message(
+            tracing::Level::ERROR,
+            format!("Could not yank to the terminal clipboard: {error}"),
+        );
+        return None;
+    }
     Some((count, truncated))
 }
 
@@ -872,32 +882,54 @@ pub(crate) fn render_level_filter(
     frame: &mut Frame,
     area: Rect,
     selected: usize,
-    hidden: &[LogLevel],
+    filters: &LevelFilters,
 ) {
     use ratatui::layout::Constraint;
     use ratatui::widgets::Widget;
     let theme = THEME.as_ref();
-    let popup = area.centered(Constraint::Length(26), Constraint::Length(9));
+    let keybinds = super::popups::keybind_line(&[
+        ("j/k", " navigate"),
+        ("Enter", " toggle"),
+        ("r", " reset"),
+        ("Esc", " close"),
+    ]);
+    let popup = area.centered(
+        Constraint::Length((keybinds.width() as u16 + 2).max(26)),
+        Constraint::Length(7),
+    );
     let rows = LOG_LEVEL_FILTER_ORDER
         .iter()
         .enumerate()
         .map(|(index, level)| {
-            let marker = if hidden.contains(level) { "[ ]" } else { "[x]" };
-            let prefix = if index == selected { "▶ " } else { "  " };
+            let mode = filters[index];
+            let (marker, color) = match mode {
+                Some(CategoryFilter::Include) => ("+ ", theme.success()),
+                Some(CategoryFilter::Exclude) => ("− ", theme.error()),
+                None => ("· ", theme.text_dim()),
+            };
             Line::from(vec![
                 Span::styled(
-                    prefix,
-                    Style::default().fg(if index == selected {
-                        theme.accent()
-                    } else {
-                        theme.text()
-                    }),
+                    if index == selected { "▌ " } else { "  " },
+                    Style::default().fg(theme.accent()),
                 ),
                 Span::styled(
-                    format!("{marker} {}", level_label(*level)),
-                    Style::default().fg(theme.text()),
+                    marker,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    level_label(*level),
+                    Style::default().fg(if mode.is_some() {
+                        theme.text()
+                    } else {
+                        theme.text_dim()
+                    }),
                 ),
             ])
+            .style(Style::default().bg(if index == selected {
+                theme.stripe()
+            } else {
+                theme.surface()
+            }))
         })
         .collect::<Vec<_>>();
     let frame_widget = super::popups::base::PopupFrame {
@@ -908,11 +940,7 @@ pub(crate) fn render_level_filter(
         ),
         border_color: theme.accent(),
         bg: Some(theme.surface()),
-        keybinds: Some(super::popups::keybind_line(&[
-            ("Enter", " toggle"),
-            ("r", " reset"),
-            ("Esc", " close"),
-        ])),
+        keybinds: Some(keybinds),
         search_line: None,
         content: Box::new(move |area, buffer| {
             Paragraph::new(rows.clone()).render(area, buffer);
@@ -926,28 +954,27 @@ struct ViewerLine {
     level: Option<LogLevel>,
 }
 
+impl AsRef<str> for ViewerLine {
+    fn as_ref(&self) -> &str {
+        &self.text
+    }
+}
+
 fn log_level_style(level: LogLevel) -> Style {
     let theme = THEME.as_ref();
     match level {
         LogLevel::Error => Style::default().fg(theme.error()),
         LogLevel::Warn => Style::default().fg(theme.warning()),
-        LogLevel::Debug | LogLevel::Trace => Style::default().fg(theme.text_dim()),
+        LogLevel::Debug => Style::default().fg(theme.info()),
+        LogLevel::Trace => Style::default().fg(theme.text_dim()),
         LogLevel::Info => Style::default().fg(theme.text()),
     }
 }
 
 pub(crate) fn line_level_style(line: &str) -> Style {
-    let theme = THEME.as_ref();
-    let upper = line.to_uppercase();
-    if upper.contains("ERROR") || upper.contains("FATAL") || upper.contains("[STDERR]") {
-        Style::default().fg(theme.error())
-    } else if upper.contains("WARN") {
-        Style::default().fg(theme.warning())
-    } else if upper.contains("DEBUG") || upper.contains("TRACE") {
-        Style::default().fg(theme.text_dim())
-    } else {
-        Style::default().fg(theme.text())
-    }
+    level_of_line(line)
+        .map(log_level_style)
+        .unwrap_or_else(|| Style::default().fg(THEME.as_ref().text()))
 }
 
 #[cfg(test)]

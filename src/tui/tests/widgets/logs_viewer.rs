@@ -58,20 +58,16 @@ fn shift_enter_without_a_selected_log_is_swallowed_without_opening() {
 }
 
 #[test]
-fn viewer_pages_by_visible_height() {
+fn viewer_ignores_page_keys_and_keeps_top_bottom_navigation() {
     let mut state = LogsState {
         viewer_focused: true,
         viewer_max_scroll: 30,
-        viewer_page: 10,
         ..Default::default()
     };
     let page = |code| KeyEvent::new(code, KeyModifiers::NONE);
-    assert!(handle_key(&page(KeyCode::PageDown), &mut state));
-    assert_eq!(state.viewer_scroll, 10);
-    assert!(handle_key(&page(KeyCode::PageDown), &mut state));
-    assert_eq!(state.viewer_scroll, 20);
-    assert!(handle_key(&page(KeyCode::PageUp), &mut state));
-    assert_eq!(state.viewer_scroll, 10);
+    assert!(!handle_key(&page(KeyCode::PageDown), &mut state));
+    assert!(!handle_key(&page(KeyCode::PageUp), &mut state));
+    assert_eq!(state.viewer_scroll, 0);
     assert!(handle_key(&page(KeyCode::Home), &mut state));
     assert_eq!(state.viewer_scroll, 0);
     assert!(handle_key(&page(KeyCode::End), &mut state));
@@ -79,10 +75,14 @@ fn viewer_pages_by_visible_height() {
 }
 
 #[test]
-fn yank_copies_the_selected_viewer_lines() {
+fn yank_copies_only_the_selected_viewer_characters() {
     let mut state = LogsState {
         viewer_lines: vec!["first".to_owned(), "second".to_owned(), "third".to_owned()],
-        selection: Some((2, 0)),
+        selection: {
+            let mut selection = LogSelection::default();
+            selection.range = Some(((2, 3), (0, 2)));
+            selection
+        },
         ..Default::default()
     };
     let yank = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
@@ -90,7 +90,7 @@ fn yank_copies_the_selected_viewer_lines() {
     assert!(
         crate::feedback::errors::peek_all_errors()
             .iter()
-            .any(|event| event.message.contains("Copied 3 line(s)"))
+            .any(|event| event.message.contains("Yanked 3 line(s)"))
     );
 }
 
@@ -113,7 +113,15 @@ fn log_levels_share_one_color_mapping_in_viewer_and_overlay() {
     }
     assert_eq!(
         line_level_style("12:17:28:DEBUG:rmcl::net: fetching").fg,
+        Some(theme.info())
+    );
+    assert_eq!(
+        line_level_style("12:17:28:TRACE:rmcl::net: fetching").fg,
         Some(theme.text_dim())
+    );
+    assert_ne!(
+        log_level_style(LogLevel::Debug).fg,
+        log_level_style(LogLevel::Trace).fg
     );
     assert_eq!(
         line_level_style("[20:10:46] [Render thread/INFO]: done").fg,
@@ -177,7 +185,7 @@ fn rescans_and_runtime_changes_keep_the_selected_log_and_viewer_in_sync() {
 }
 
 #[test]
-fn unclassified_lines_have_no_level_and_are_never_filtered() {
+fn unclassified_lines_have_no_level_and_follow_category_filter_rules() {
     use crate::instance::launch::parser::LogLevel;
     assert_eq!(level_of_line("just some output"), None);
     assert_eq!(
@@ -188,32 +196,40 @@ fn unclassified_lines_have_no_level_and_are_never_filtered() {
         level_of_line("tracing trace message"),
         Some(LogLevel::Trace)
     );
-    assert!(!level_hidden(&[LogLevel::Debug], "just some output"));
+    let mut filters = [None; 5];
+    filters[3] = Some(CategoryFilter::Exclude);
+    assert!(level_matches(&filters, None));
+    filters[0] = Some(CategoryFilter::Include);
+    assert!(!level_matches(&filters, None));
+    assert!(level_matches(&filters, Some(LogLevel::Error)));
+    assert!(!level_matches(&filters, Some(LogLevel::Debug)));
 }
 
 #[test]
-fn level_filter_panel_toggles_resets_and_closes() {
-    use crate::instance::launch::parser::LogLevel;
+fn level_filter_panel_cycles_neutral_include_exclude_resets_and_closes() {
     let mut state = LogsState::default();
     let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
     assert!(handle_key(&press(KeyCode::Char('f')), &mut state));
     assert!(state.filter_open);
     assert!(handle_key(&press(KeyCode::Enter), &mut state));
-    assert_eq!(state.hidden_levels, vec![LogLevel::Error]);
+    assert_eq!(state.level_filters[0], Some(CategoryFilter::Include));
+    assert!(handle_key(&press(KeyCode::Enter), &mut state));
+    assert_eq!(state.level_filters[0], Some(CategoryFilter::Exclude));
+    assert!(handle_key(&press(KeyCode::Enter), &mut state));
+    assert_eq!(state.level_filters[0], None);
     assert!(handle_key(&press(KeyCode::Char('j')), &mut state));
     assert!(handle_key(&press(KeyCode::Enter), &mut state));
-    assert_eq!(state.hidden_levels, vec![LogLevel::Error, LogLevel::Warn]);
+    assert_eq!(state.level_filters[1], Some(CategoryFilter::Include));
     assert!(handle_key(&press(KeyCode::Enter), &mut state));
-    assert_eq!(state.hidden_levels, vec![LogLevel::Error]);
+    assert_eq!(state.level_filters[1], Some(CategoryFilter::Exclude));
     assert!(handle_key(&press(KeyCode::Char('r')), &mut state));
-    assert!(state.hidden_levels.is_empty());
+    assert_eq!(state.level_filters, [None; 5]);
     assert!(handle_key(&press(KeyCode::Esc), &mut state));
     assert!(!state.filter_open);
 }
 
 #[test]
 fn level_filter_hides_matching_lines_but_keeps_unclassified_ones() {
-    use crate::instance::launch::parser::LogLevel;
     fn rendered(state: &mut LogsState) -> String {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 6)).unwrap();
@@ -237,9 +253,26 @@ fn level_filter_hides_matching_lines_but_keeps_unclassified_ones() {
         ..Default::default()
     };
     assert!(rendered(&mut state).contains("fetching versions"));
-    state.hidden_levels.push(LogLevel::Debug);
+    state.level_filters[3] = Some(CategoryFilter::Exclude);
     let shown = rendered(&mut state);
     assert!(!shown.contains("fetching versions"));
     assert!(shown.contains("done"));
     assert!(shown.contains("plain line"));
+    state.level_filters[2] = Some(CategoryFilter::Include);
+    let shown = rendered(&mut state);
+    assert!(shown.contains("done"));
+    assert!(!shown.contains("plain line"));
+}
+
+#[test]
+fn included_levels_form_a_union_and_excluded_levels_stay_hidden() {
+    let mut filters = [None; 5];
+    filters[0] = Some(CategoryFilter::Include);
+    filters[1] = Some(CategoryFilter::Include);
+    filters[3] = Some(CategoryFilter::Exclude);
+    assert!(level_matches(&filters, Some(LogLevel::Error)));
+    assert!(level_matches(&filters, Some(LogLevel::Warn)));
+    assert!(!level_matches(&filters, Some(LogLevel::Info)));
+    assert!(!level_matches(&filters, Some(LogLevel::Debug)));
+    assert!(!level_matches(&filters, None));
 }

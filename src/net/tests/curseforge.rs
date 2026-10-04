@@ -3,6 +3,19 @@
 
 use super::*;
 
+#[test]
+fn build_key_overrides_the_default_and_empty_values_disable_curseforge() {
+    for (build_key, default_key, expected) in [
+        (None, "", None),
+        (None, " default-key ", Some("default-key")),
+        (Some(" override-key "), "default-key", Some("override-key")),
+        (Some(""), "default-key", None),
+        (Some(" \n\t"), "default-key", None),
+    ] {
+        assert_eq!(select_api_key(build_key, default_key), expected);
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn authenticated_requests_retry_transient_failures_with_the_api_key() {
     use std::sync::Arc;

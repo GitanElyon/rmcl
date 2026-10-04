@@ -43,7 +43,7 @@ it does everything you'd expect from a launcher.
 
 ### modpacks and accounts
 
-Browse Modrinth and CurseForge modpacks or import Modrinth, CurseForge, MultiMC, Prism, and GTNH packs directly. Direct imports accept a file, Modrinth URL, or project slug. Source builds enable CurseForge when `CURSEFORGE_API_KEY` is set at compile time. Able to use multiple Microsoft accounts and offline accounts aswell.
+Browse Modrinth and CurseForge modpacks or import Modrinth, CurseForge, MultiMC, Prism, and GTNH packs directly. Direct imports accept a file, Modrinth URL, or project slug. CurseForge requires a build-time [API key](#curseforge-api). Able to use multiple Microsoft accounts and offline accounts aswell.
 
 ---
 
@@ -52,6 +52,18 @@ Browse Modrinth and CurseForge modpacks or import Modrinth, CurseForge, MultiMC,
 rmcl uses its own Microsoft client ID for Minecraft account authentication.
 
 Authentication is performed through Microsoft’s official services.
+
+## CurseForge API
+
+Git, source, and Cargo builds use `DEFAULT_API_KEY` in `src/net/curseforge.rs`
+unless `CURSEFORGE_API_KEY` is set at compile time. The source default is currently
+empty, so a nonempty key must be supplied to enable CurseForge. An explicitly
+empty or whitespace-only override disables CurseForge, even when a default is set.
+
+Use of the API is subject to the [CurseForge 3rd Party API Terms and Conditions](https://support.curseforge.com/en/support/solutions/articles/9000207405-curse-forge-3rd-party-api-terms-and-conditions).
+Keys supplied for rmcl are for rmcl builds only. Forks, rebranded applications,
+and unrelated projects must use their own key. Keys included in source or compiled
+binaries are extractable; do not publish a private key.
 
 ## installation
 

@@ -18,10 +18,19 @@ const SHADERS_CLASS_ID: u32 = 6552;
 const DATA_PACKS_CLASS_ID: u32 = 6945;
 pub const MODPACKS_CLASS_ID: u32 = 4471;
 
+// Keys supplied for rmcl must not be reused by forks or rebranded applications
+const DEFAULT_API_KEY: &str = "$2a$10$j2eThhfsaLOAJIMwP7RbwO4D/Tp2NUE16LNalqguv04T7I5jGu8H2";
+
 pub fn api_key() -> Option<&'static str> {
-    option_env!("CURSEFORGE_API_KEY")
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
+    select_api_key(option_env!("CURSEFORGE_API_KEY"), DEFAULT_API_KEY)
+}
+
+fn select_api_key(
+    build_key: Option<&'static str>,
+    default_key: &'static str,
+) -> Option<&'static str> {
+    let key = build_key.unwrap_or(default_key).trim();
+    (!key.is_empty()).then_some(key)
 }
 
 #[derive(Debug, Deserialize)]

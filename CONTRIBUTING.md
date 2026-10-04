@@ -1,55 +1,99 @@
-# contributing
+# Contributing to rmcl
 
-thanks for wanting to contribute. here's how we/I do things around here.
+Bug reports, fixes, documentation, and themes are welcome. For a larger feature or
+architectural change, open an issue first so we can agree on the approach before
+you spend time implementing it.
 
-## code style
+## Reporting bugs
 
-### comments
+Search the [existing issues](https://github.com/objz/rmcl/issues) before opening a
+new one. Include your rmcl version, operating system, steps to reproduce, and what
+you expected to happen. For game-launch problems, include the Minecraft version
+and mod loader; for TUI problems, include your terminal and a screenshot if useful.
 
-preferred are `//` comments with a lowercase, casual tone. try to explain **why** something is done rather than restating what the code does. file-level comments are nice for describing what a file is responsible for, and function-level comments help when the behavior isn't obvious. enum variants and struct fields usually don't need comments if the names are clear enough. basically just look at how existing comments are written and match that vibe.
+Relevant logs help, but remove tokens, account details, and other private
+information before posting them. See the [README](README.md#logs) for log locations.
 
-### visibility and naming
+## Development setup
 
-try to keep visibility as narrow as makes sense. `pub` when something is actually used outside the crate, `pub(crate)` across modules, `pub(super)` within a module. don't leave things `pub` just because they might be useful someday. function names should ideally be clear enough that you don't need a comment to explain what they do.
+You need a stable Rust toolchain and a JDK with `javac` and `jar` on `PATH`.
+CI uses JDK 21. On Linux, install the libxcb development package (`libxcb1-dev` on
+Debian/Ubuntu, `libxcb` on Arch).
 
-### modules and file organization
+Fork the repository and create a branch for your change. The
+[source build instructions](README.md#from-source) cover cloning and building.
+Run the development version with `cargo run --locked`, or use
+`cargo run --locked -- --help` to see the CLI commands.
 
-each file should have one clear responsibility. if a file starts doing two unrelated things, split it up. when a module gets big enough, convert `foo.rs` into `foo/mod.rs` with submodules. keep format-specific or protocol-specific code in its own file (e.g. `mrpack.rs` for modrinth, `mmc.rs` for multimc) and put shared types and dispatching in `mod.rs`. the general idea is that you shouldn't find multimc logic in the modrinth file or vice versa.
+The main parts of the codebase are:
 
-### tests
+- `src/cli/`: command-line commands and output.
+- `src/config/`: settings, paths, and themes.
+- `src/instance/`: instance management, content, modpack imports, loaders, and launches.
+- `src/net/`: HTTP requests, downloads, and service API clients.
+- `src/tui/`: the terminal interface.
+- `tests/`: integration tests; unit tests are under `src/`.
 
-every test should cover a distinct code path. don't test the same branch twice with just different inputs. test names should describe the scenario, not just the function name. no need to test trivially correct code.
+## Making changes
 
-### general advice
+Keep each pull request focused on one fix or feature. Follow the style of nearby
+code and reuse existing helpers where they fit. Keep public APIs and new
+dependencies limited to what the change needs.
 
-- avoid "obvious" comments like `// save the profile` right above `save_profile()`
-- avoid unnecessary abstractions or wrappers for things that only happen once
-- avoid speculative features or "just in case" parameters
-- prefer iterating directly over collecting into a vec when you only need one pass
-- match existing error handling patterns, usually `map_err` with `format!`
+Comments should explain a decision, constraint, or non-obvious behavior. There is
+no need to describe what a clearly named function already does. Keep modules
+organized by responsibility without splitting files just to meet a size target.
 
-## architecture
+For a bug fix, add a regression test that fails without the fix. For new behavior,
+cover the cases that could break. Use test names that describe the scenario and
+avoid repeating coverage unless the inputs exercise different behavior.
 
-the codebase is split roughly like this:
+## Testing
 
-- `src/cli/` handles command line interface
-- `src/config/` has settings, paths, theme config
-- `src/instance/` is the core. `content/` scans mods, resource packs, shaders, worlds. `import/` handles modpack importing with `mod.rs` dispatching to format-specific modules like `mrpack.rs` and `mmc.rs`. `loader/` installs mod loaders (fabric, forge, neoforge, quilt). `launch/` builds the java command and spawns minecraft, with `patches.rs` handling lwjgl3ify classpath patches. `manager.rs` does instance CRUD
-- `src/net/` is the networking layer. http client, file downloads, and API clients per service
-- `src/tui/` is the terminal UI built with ratatui
+Run the same checks as CI before submitting code changes:
 
-### adding a new import format
+```sh
+cargo fmt --all -- --check
+cargo build --locked
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked --all-targets
+```
 
-create a new file in `src/instance/import/`, add the variant to `PackFormat` in `mod.rs`, add detection logic in `detect_format()`, and add the dispatch arms in `build_summary()` and `execute_import()`.
+Live-service tests are ignored by default. If you run them, note that in the PR,
+along with any failures caused by network access or provider credentials.
 
-### adding a new mod loader
+Check visual and input changes in a real terminal as well as the automated TUI
+tests. CI covers Linux, macOS, and Windows; say which platforms you tested locally
+and mention anything you could not verify.
 
-create a new file in `src/instance/loader/` implementing `ModLoaderInstaller`, add the variant to `ModLoader` in `models.rs`, and register it in `get_installer()`.
+## Pull requests
 
-## commits
+Open your PR against `master`. Explain the problem, summarize the change, link any
+related issue, and list the checks you ran. Screenshots or a short recording are
+useful for visible TUI changes. Use descriptive commit messages and keep unrelated
+changes in separate commits or PRs.
 
-start with what you did: `added`, `fixed`, `refactored`, etc. lowercase. separate logical changes into separate commits. don't bundle unrelated things into one commit.
+Be available to answer review questions and make follow-up changes. Passing CI
+is required before merging, but maintainers may still request changes to the
+implementation or scope.
 
-## before submitting
+## AI and LLM assistance
 
-make sure `cargo build`, `cargo clippy`, and `cargo test` all pass. you'll need a JDK (`javac` and `jar` on PATH) for the build script that compiles the java shim.
+AI-assisted contributions are welcome. You are responsible for the code, tests,
+and documentation you submit, including anything generated by a tool. Review the
+changes yourself, verify the behavior, and be prepared to explain the implementation.
+
+If an LLM helped produce your contribution, disclose it in the PR description.
+Name the tool or model, describe which parts it helped with, and say how you
+reviewed and tested the result. A short note is enough, for example:
+
+> AI assistance: ChatGPT helped draft the tests. I reviewed the assertions and ran
+> the relevant tests locally.
+
+Use your own words in issue reports, PR summaries, and review replies. Maintainers
+may close contributions that have not been reviewed or that the author cannot explain.
+
+## License
+
+Contributions are covered by the project's [GPL-3.0-only license](LICENSE).
+Only submit code and assets you have the right to contribute under those terms.

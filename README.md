@@ -105,15 +105,12 @@ nix run github:objz/rmcl
 nix profile install github:objz/rmcl
 ```
 
-the flake builds rmcl from source. as with other source builds, CurseForge
-support is only enabled when `CURSEFORGE_API_KEY` is provided at build time:
+the flake builds rmcl from source. To use your own key instead, override it
+at build time:
 
 ```sh
 CURSEFORGE_API_KEY=your-key nix build --impure .#
 ```
-
-without a key, Modrinth works and CurseForge is disabled. prebuilt release
-binaries ship with the key baked in.
 
 Minecraft 1.12 and older currently fail to launch because rmcl doesn't pass
 `-Djava.library.path` for legacy version profiles.

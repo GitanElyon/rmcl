@@ -46,7 +46,7 @@ impl InventoryProgress for NoopProgress {
 }
 
 #[test]
-fn saving_an_identified_inventory_reports_progress_for_the_actual_files() {
+fn saving_an_identified_inventory_only_revalidates_changed_records() {
     #[derive(Default)]
     struct Counts(std::cell::RefCell<Vec<(u64, u64)>>);
     impl InventoryProgress for Counts {
@@ -84,9 +84,24 @@ fn saving_an_identified_inventory_reports_progress_for_the_actual_files() {
     .unwrap();
     assert_eq!(saved.files, previous.files);
     let reported = counts.0.borrow();
-    assert_eq!(reported.first(), Some(&(0, 2)));
-    assert!(reported.contains(&(1, 2)));
-    assert_eq!(reported.last(), Some(&(2, 2)));
+    assert_eq!(reported.as_slice(), &[(0, 0), (0, 0)]);
+    drop(reported);
+
+    std::fs::write(minecraft.join("mods/charlie.jar"), b"new").unwrap();
+    let mut inventory = reconcile_inventory(&manifest_path, &minecraft, 24, 512, &counts).unwrap();
+    assert_eq!(inventory.queries.len(), 1);
+    inventory.manifest.files.last_mut().unwrap().resolution = resolved_record().resolution;
+    counts.0.borrow_mut().clear();
+    let saved = save_reconciled_manifest(
+        &manifest_path,
+        &minecraft,
+        inventory.manifest,
+        &inventory.previous,
+        &counts,
+    )
+    .unwrap();
+    assert_eq!(saved.files.len(), 3);
+    assert_eq!(counts.0.borrow().as_slice(), &[(0, 1), (0, 1), (1, 1)]);
 }
 
 fn resolved_record() -> ContentFileRecord {

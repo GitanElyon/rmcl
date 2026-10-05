@@ -510,7 +510,7 @@ impl App {
         self.content_update_check_pending && !(active.is_scanning() && active.entries.is_empty())
     }
 
-    fn apply_cached_content_manifest(&mut self) {
+    pub(super) fn apply_cached_content_manifest(&mut self) {
         let Some((instance_name, manifest)) = &self.content_manifest else {
             return;
         };
@@ -542,6 +542,14 @@ impl App {
             &minecraft_dir,
             crate::instance::ContentKind::DataPack,
         );
+        for discovery in [
+            &mut self.mods_discovery_state,
+            &mut self.resource_packs_discovery_state,
+            &mut self.shaders_discovery_state,
+            &mut self.datapacks_discovery_state,
+        ] {
+            discovery.refresh_installed_manifest(manifest, &minecraft_dir);
+        }
         self.apply_content_update_snapshot();
     }
 

@@ -298,6 +298,10 @@ pub(super) async fn scan_with_registry(
     previous: Option<&UpdateSnapshot>,
     mut publish: impl FnMut(&UpdateSnapshot),
 ) -> UpdateSnapshot {
+    let previous = previous.filter(|snapshot| snapshot.applies_to(instance));
+    let now = chrono::Utc::now().timestamp();
+    let reusable =
+        previous.filter(|snapshot| now.saturating_sub(snapshot.checked_at) < RECHECK_AFTER_SECONDS);
     let mut projects = manifest
         .files
         .iter()
@@ -355,8 +359,19 @@ pub(super) async fn scan_with_registry(
             .collect(),
         failures: Vec::new(),
     };
+    projects.retain(|(installed, _)| {
+        reusable.is_none_or(|snapshot| {
+            !snapshot.inventory.contains(installed)
+                || snapshot
+                    .failures
+                    .iter()
+                    .any(|failure| &failure.installed == installed)
+        })
+    });
+    // Reusing old results must not extend their freshness on each inventory change.
+    let checked_at = reusable.map_or(now, |snapshot| snapshot.checked_at);
     if projects.is_empty() {
-        snapshot.checked_at = chrono::Utc::now().timestamp();
+        snapshot.checked_at = checked_at;
         return snapshot;
     }
     let total = projects.len() as u64;
@@ -437,7 +452,7 @@ pub(super) async fn scan_with_registry(
         publish(&snapshot);
     }
     sort_updates(&mut snapshot.updates);
-    snapshot.checked_at = chrono::Utc::now().timestamp();
+    snapshot.checked_at = checked_at;
     snapshot
 }
 

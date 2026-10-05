@@ -103,6 +103,25 @@ fn loading_rejects_duplicate_and_escaping_ownership_paths() {
 }
 
 #[test]
+fn unchanged_manifest_updates_do_not_rewrite_the_saved_index() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("manifest.json");
+    ContentManifest::default().save(&path).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH))
+        .unwrap();
+    let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    ContentManifest::update(&path, |_| Ok(())).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        before
+    );
+}
+
+#[test]
 fn curseforge_fingerprint_ignores_whitespace() {
     let temp = tempfile::tempdir().unwrap();
     let compact = temp.path().join("compact.jar");

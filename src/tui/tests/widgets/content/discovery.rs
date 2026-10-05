@@ -2275,7 +2275,30 @@ fn discovery_delete_only_clears_the_matching_installed_badge() {
 
     let pending = state.pending_installed_delete().unwrap();
     assert_eq!(pending.path, first_path);
-    assert!(state.clear_installed_path(&pending.path));
+    let mut manifest = crate::instance::ContentManifest::default();
+    manifest.upsert(crate::instance::ContentFileRecord {
+        relative_path: second_path.clone(),
+        kind: ContentKind::Mod,
+        enabled: true,
+        fingerprint: crate::instance::FileFingerprint {
+            size: 0,
+            modified_ns: 0,
+            hashes: Default::default(),
+        },
+        resolution: crate::instance::Resolution::Resolved {
+            project: crate::instance::ProviderProject {
+                provider: "modrinth".to_owned(),
+                project_id: "second".to_owned(),
+                version_id: "second-version".to_owned(),
+            },
+        },
+        provider_aliases: Vec::new(),
+        provider_checks: Vec::new(),
+        required_dependencies: Vec::new(),
+        automatic_dependency: false,
+        cleanup_eligible: false,
+    });
+    state.refresh_installed_manifest(&manifest, std::path::Path::new(""));
 
     assert_eq!(state.list.entries.len(), 2);
     assert!(state.list.entries[0].installed_path.is_none());
@@ -2862,6 +2885,15 @@ fn discovery_restores_cached_sort_and_continues_pagination() {
     )));
     assert!(first.stream.upsert(project_entry(project("second"), None)));
     drain_discovery_rows(&mut state);
+    let mut installed = state.list.entries[0].clone();
+    installed.installed_path = Some(PathBuf::from("mods/cached.jar"));
+    installed.title_suffix = Some("Installed".to_owned());
+    let source = installed.provider_project.as_mut().unwrap();
+    source.version_id = "installed-version".to_owned();
+    state
+        .sources
+        .insert(installed.file_stem.clone(), vec![source.clone()]);
+    state.list.entries[0] = installed.clone();
     DiscoveryState::push_result(
         &first.pending,
         first.generation,
@@ -2876,12 +2908,47 @@ fn discovery_restores_cached_sort_and_continues_pagination() {
     state.sort = crate::instance::content::provider::DiscoverySort::Popular;
     let other = state.begin_search(&instance);
     assert!(!other.cached);
+    state
+        .preparing_list
+        .as_mut()
+        .unwrap()
+        .entries
+        .push(installed);
+    state.refresh_installed_manifest(
+        &crate::instance::ContentManifest::default(),
+        std::path::Path::new(""),
+    );
+    let preparing = &state.preparing_list.as_ref().unwrap().entries[0];
+    assert!(preparing.installed_path.is_none());
+    assert!(
+        preparing
+            .provider_project
+            .as_ref()
+            .unwrap()
+            .version_id
+            .is_empty()
+    );
     state.list.list_state.selected = Some(1);
     state.sort = crate::instance::content::provider::DiscoverySort::Relevance;
     let restored = state.begin_search(&instance);
     assert!(restored.cached);
     assert!(!state.list.loading);
     assert_eq!(state.list.entries[0].name, "Cached");
+    assert!(state.list.entries[0].installed_path.is_none());
+    assert!(state.list.entries[0].title_suffix.is_none());
+    assert!(
+        state.list.entries[0]
+            .provider_project
+            .as_ref()
+            .unwrap()
+            .version_id
+            .is_empty()
+    );
+    assert!(
+        state.sources[&state.list.entries[0].file_stem]
+            .iter()
+            .all(|source| source.version_id.is_empty())
+    );
     assert_eq!(state.list.list_state.selected, Some(1));
     assert_eq!(state.next_offset, 2);
     assert_eq!(state.total_hits, 20);

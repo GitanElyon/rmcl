@@ -486,7 +486,8 @@ fn update_badges_stream_while_the_content_index_is_still_being_saved() {
             .matches_manifest(&changed)
     );
     assert!(!ui.app.content_update_check_pending);
-    let previous = ui.app.content_update_snapshot.as_ref().unwrap().1.clone();
+    let mut previous = ui.app.content_update_snapshot.as_ref().unwrap().1.clone();
+    previous.checked_at = 0;
     assert!(start_check(&changed, Some(previous)));
     wait_for_requests();
     assert!(updates::is_running(

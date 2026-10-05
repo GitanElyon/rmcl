@@ -602,6 +602,115 @@ fn deleting_a_mod_offers_its_unused_dependency_chain() {
 }
 
 #[test]
+fn deleting_installed_content_from_either_tab_resets_discovery_version_sources() {
+    for mode in [ContentMode::Discover, ContentMode::Installed] {
+        let mut ui = UiHarness::new();
+        ui.add_instance("Delete and install again");
+        ui.app.sync_instance_content();
+        let instance = ui.app.instances_state.selected_instance().unwrap().clone();
+        let paths = crate::storage::InstancePaths::new(ui.instance_path(&instance.name));
+        let minecraft = paths.minecraft();
+        let path = minecraft.join("mods/root.jar");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"root").unwrap();
+        let mut record = managed_mod_record(&minecraft, "mods/root.jar", "root", false, Vec::new());
+        record.provider_aliases.push(ProviderProject {
+            provider: "curseforge".to_owned(),
+            project_id: "other-root".to_owned(),
+            version_id: "other-version".to_owned(),
+        });
+        let sources = record
+            .resolved_project()
+            .into_iter()
+            .chain(&record.provider_aliases)
+            .cloned()
+            .map(|source| ("root".to_owned(), source))
+            .collect();
+        let mut manifest = ContentManifest::default();
+        manifest.upsert(record);
+        manifest.save(&paths.content_manifest()).unwrap();
+        ui.app.content_manifest = Some((instance.name.clone(), manifest.clone()));
+        ui.app
+            .mods_state
+            .set_entries(vec![content_entry("Root", path.clone())]);
+        let request = ui.app.mods_discovery_state.begin_search(&instance);
+        request
+            .stream
+            .upsert(crate::tui::widgets::content::discovery::project_entry(
+                DiscoveryProject {
+                    id: "root".to_owned(),
+                    slug: "root".to_owned(),
+                    title: "Root".to_owned(),
+                    description: String::new(),
+                    downloads: 0,
+                    icon_url: None,
+                    icon_bytes: None,
+                },
+                Some(path.clone()),
+            ));
+        crate::tui::widgets::content::DiscoveryState::push_provider_result(
+            &request.pending,
+            request.generation,
+            0,
+            Ok(
+                crate::tui::widgets::content::discovery::DiscoveryPageResult {
+                    received: 1,
+                    total_hits: 1,
+                    ..Default::default()
+                },
+            ),
+            sources,
+        );
+        ui.app.mods_discovery_state.drain_pending();
+        ui.app.mods_discovery_state.drain_list(&ui.app.picker);
+        ui.app
+            .mods_discovery_state
+            .refresh_installed_manifest(&manifest, &minecraft);
+        ui.app.mods_discovery_state.list.list_state.selected = Some(0);
+        ui.app.focused = FocusedArea::Content;
+        ui.app.content_tab = ContentTab::Mods;
+        ui.app.content_mode = mode;
+
+        ui.key(KeyCode::Char('d'));
+        ui.key(KeyCode::Enter);
+        assert!(!path.exists());
+        assert!(
+            ContentManifest::load(&paths.content_manifest())
+                .unwrap()
+                .files
+                .is_empty()
+        );
+        ui.app.content_mode = ContentMode::Discover;
+        ui.key(KeyCode::Char('v'));
+        let popup = ui.app.mods_discovery_state.version_popup.as_mut().unwrap();
+        assert!(popup.installed_path.is_none());
+        assert!(
+            popup.current_version_id.is_none(),
+            "{mode:?}: deleted version remains installed"
+        );
+        assert!(
+            popup
+                .sources
+                .iter()
+                .all(|source| source.version_id.is_empty())
+        );
+        assert_eq!(popup.title(), "Install Root");
+        popup.loading = false;
+        let switched = ui.app.mods_discovery_state.switch_version_source().unwrap();
+        assert!(switched.current_version_id.is_none());
+        assert_eq!(
+            ui.app
+                .mods_discovery_state
+                .version_popup
+                .as_ref()
+                .unwrap()
+                .title(),
+            "Install Root"
+        );
+    }
+}
+
+#[test]
 fn deleting_a_required_library_warns_but_can_continue() {
     let mut ui = UiHarness::new();
     ui.add_instance("Required");

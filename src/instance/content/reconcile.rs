@@ -200,9 +200,17 @@ pub(crate) async fn reconcile(
                 )
                 .await
             };
-            task.set_action("Validating content files");
-            task.set_sub_action("Rechecking local files");
-            task.set_progress(0, inventory.manifest.files.len() as u64);
+            let changed = inventory
+                .manifest
+                .files
+                .iter()
+                .filter(|record| inventory.previous.record(&record.relative_path) != Some(record))
+                .count();
+            if changed > 0 {
+                task.set_action("Validating content files");
+                task.set_sub_action("Rechecking changed files");
+                task.set_progress(0, changed as u64);
+            }
             publish(ReconcileResult {
                 instance_name: instance_name.clone(),
                 instance_created,
@@ -298,6 +306,11 @@ fn save_reconciled_manifest(
     previous: &ContentManifest,
     task: &impl InventoryProgress,
 ) -> Result<ContentManifest, crate::instance::content::manifest::ManifestError> {
+    let records = reconciled
+        .files
+        .into_iter()
+        .filter(|record| previous.record(&record.relative_path) != Some(record))
+        .collect::<Vec<_>>();
     ContentManifest::update(manifest_path, |current| {
         for record in current.files.clone() {
             relative_path(minecraft_dir, &minecraft_dir.join(&record.relative_path))?;
@@ -309,9 +322,9 @@ fn save_reconciled_manifest(
                 Err(error) => return Err(error.into()),
             }
         }
-        let total = reconciled.files.len() as u64;
+        let total = records.len() as u64;
         task.set_progress(0, total);
-        for (index, mut record) in reconciled.files.into_iter().enumerate() {
+        for (index, mut record) in records.into_iter().enumerate() {
             task.set_sub_action(record.relative_path.to_string_lossy().as_ref());
             task.set_progress(index as u64, total);
             let path = minecraft_dir.join(&record.relative_path);

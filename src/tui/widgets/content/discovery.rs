@@ -1830,6 +1830,39 @@ impl DiscoveryState {
         manifest: &crate::instance::ContentManifest,
         minecraft_dir: &std::path::Path,
     ) {
+        let mut changed = Self::refresh_installed_entries(
+            &mut self.list.entries,
+            &mut self.sources,
+            manifest,
+            minecraft_dir,
+        );
+        if let Some(list) = &mut self.preparing_list {
+            changed |= Self::refresh_installed_entries(
+                &mut list.entries,
+                &mut self.sources,
+                manifest,
+                minecraft_dir,
+            );
+        }
+        for (_, cached) in &mut self.cached_searches {
+            changed |= Self::refresh_installed_entries(
+                &mut cached.entries,
+                &mut cached.sources,
+                manifest,
+                minecraft_dir,
+            );
+        }
+        if changed {
+            crate::feedback::request_redraw();
+        }
+    }
+
+    fn refresh_installed_entries(
+        entries: &mut [ContentEntry],
+        sources: &mut std::collections::HashMap<String, Vec<crate::instance::ProviderProject>>,
+        manifest: &crate::instance::ContentManifest,
+        minecraft_dir: &std::path::Path,
+    ) -> bool {
         let installed_identity = |source: &crate::instance::ProviderProject| {
             manifest.files.iter().find_map(|record| {
                 record
@@ -1837,7 +1870,7 @@ impl DiscoveryState {
                     .cloned()
             })
         };
-        for sources in self.sources.values_mut() {
+        for sources in sources.values_mut() {
             for source in sources {
                 source.version_id = installed_identity(source)
                     .map(|installed| installed.version_id)
@@ -1845,18 +1878,13 @@ impl DiscoveryState {
             }
         }
         let mut changed = false;
-        for entry in self.list.entries.iter_mut().chain(
-            self.preparing_list
-                .iter_mut()
-                .flat_map(|list| &mut list.entries),
-        ) {
+        for entry in entries {
             if let Some(source) = entry.provider_project.as_mut() {
                 source.version_id = installed_identity(source)
                     .map(|installed| installed.version_id)
                     .unwrap_or_default();
             }
-            let installed_path = self
-                .sources
+            let installed_path = sources
                 .get(&entry.file_stem)
                 .into_iter()
                 .flatten()
@@ -1874,9 +1902,7 @@ impl DiscoveryState {
                 changed = true;
             }
         }
-        if changed {
-            crate::feedback::request_redraw();
-        }
+        changed
     }
 
     pub fn selected_is_installed(&self) -> bool {
@@ -1891,21 +1917,6 @@ impl DiscoveryState {
             name: entry.name.clone(),
             path: entry.installed_path.clone()?,
         })
-    }
-
-    pub fn clear_installed_path(&mut self, path: &std::path::Path) -> bool {
-        let Some(entry) = self
-            .list
-            .entries
-            .iter_mut()
-            .find(|entry| entry.installed_path.as_deref() == Some(path))
-        else {
-            return false;
-        };
-        entry.installed_path = None;
-        entry.title_suffix = None;
-        crate::feedback::request_redraw();
-        true
     }
 
     fn selected_installed_entry(&self) -> Option<&ContentEntry> {

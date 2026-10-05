@@ -510,12 +510,14 @@ fn update_checks_prioritize_list_rows_and_publish_before_the_rest_finish() {
                     },
                 )
                 .await;
+                let mut expired = complete.clone();
+                expired.checked_at = 0;
                 let offline = scan_with_registry(
                     &instance(),
                     &manifest,
                     &priority,
                     std::sync::Arc::new(ProviderRegistry::new(Vec::new())),
-                    Some(&complete),
+                    Some(&expired),
                     |_| {},
                 )
                 .await;
@@ -580,6 +582,168 @@ fn update_checks_prioritize_list_rows_and_publish_before_the_rest_finish() {
             assert!(complete.failures.is_empty());
             assert!(complete.checked_at > 0);
             assert!(complete.update_for(&known).is_none());
+        });
+}
+
+#[test]
+fn update_checks_reuse_fresh_results_only_for_unchanged_installed_versions() {
+    use crate::instance::content::updates::{UpdateCheckFailure, scan_with_registry};
+    let _guard = crate::tests::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let versions = ["alpha", "bravo", "charlie"]
+                .into_iter()
+                .flat_map(|project| {
+                    [
+                        ("old", "2026-01-01T00:00:00Z"),
+                        ("new", "2026-02-01T00:00:00Z"),
+                    ]
+                    .into_iter()
+                    .map(move |(suffix, date)| {
+                        version(
+                            &format!("{project}-{suffix}"),
+                            project,
+                            VersionType::Release,
+                            date,
+                            Vec::new(),
+                        )
+                    })
+                })
+                .collect();
+            let (started, mut requests) = tokio::sync::mpsc::unbounded_channel();
+            let registry = std::sync::Arc::new(controlled_update_registry(
+                versions,
+                started,
+                HashMap::new(),
+            ));
+            let instance = instance();
+            let mut manifest = ContentManifest::default();
+            for project in ["alpha", "bravo"] {
+                manifest.upsert(installed_record(project, &format!("{project}-old"), true));
+            }
+            let mut previous =
+                scan_with_registry(&instance, &manifest, &[], registry.clone(), None, |_| {}).await;
+            assert_eq!(std::iter::from_fn(|| requests.try_recv().ok()).count(), 2);
+            previous.checked_at -= 60;
+            let original_checked_at = previous.checked_at;
+
+            manifest.upsert(installed_record("charlie", "charlie-old", true));
+            let mut snapshot = scan_with_registry(
+                &instance,
+                &manifest,
+                &[],
+                registry.clone(),
+                Some(&previous),
+                |_| {},
+            )
+            .await;
+            assert_eq!(requests.try_recv().unwrap(), "charlie");
+            assert!(requests.try_recv().is_err());
+            assert_eq!(snapshot.updates.len(), 3);
+            assert_eq!(snapshot.checked_at, original_checked_at);
+
+            manifest.remove(Path::new("mods/alpha.jar"));
+            snapshot = scan_with_registry(
+                &instance,
+                &manifest,
+                &[],
+                registry.clone(),
+                Some(&snapshot),
+                |_| {},
+            )
+            .await;
+            assert!(
+                requests.try_recv().is_err(),
+                "Removal must not rescan the remaining projects"
+            );
+            assert_eq!(snapshot.updates.len(), 2);
+            assert!(snapshot.matches_manifest(&manifest));
+
+            manifest.upsert(installed_record("bravo", "bravo-new", true));
+            snapshot = scan_with_registry(
+                &instance,
+                &manifest,
+                &[],
+                registry.clone(),
+                Some(&snapshot),
+                |_| {},
+            )
+            .await;
+            assert_eq!(requests.try_recv().unwrap(), "bravo");
+            assert!(requests.try_recv().is_err());
+            assert_eq!(snapshot.updates.len(), 1);
+            assert_eq!(snapshot.updates[0].installed.project_id, "charlie");
+            assert_eq!(
+                snapshot.checked_at, original_checked_at,
+                "Inventory changes must not prolong cached results"
+            );
+
+            snapshot.failures.push(UpdateCheckFailure {
+                installed: manifest
+                    .files
+                    .last()
+                    .unwrap()
+                    .resolved_project()
+                    .unwrap()
+                    .clone(),
+                kind: ContentKind::Mod,
+                reason: "offline".to_owned(),
+            });
+            snapshot = scan_with_registry(
+                &instance,
+                &manifest,
+                &[],
+                registry.clone(),
+                Some(&snapshot),
+                |_| {},
+            )
+            .await;
+            assert_eq!(requests.try_recv().unwrap(), "charlie");
+            assert!(requests.try_recv().is_err());
+            assert!(snapshot.failures.is_empty());
+
+            snapshot.checked_at = 0;
+            snapshot = scan_with_registry(
+                &instance,
+                &manifest,
+                &[],
+                registry.clone(),
+                Some(&snapshot),
+                |_| {},
+            )
+            .await;
+            assert_eq!(
+                std::iter::from_fn(|| requests.try_recv().ok()).count(),
+                2,
+                "Expired results must be refreshed"
+            );
+            let mut changed_instance = instance.clone();
+            changed_instance.game_version = "1.21.2".to_owned();
+            scan_with_registry(
+                &changed_instance,
+                &manifest,
+                &[],
+                registry.clone(),
+                Some(&snapshot),
+                |_| {},
+            )
+            .await;
+            assert_eq!(
+                std::iter::from_fn(|| requests.try_recv().ok()).count(),
+                2,
+                "Changing compatibility invalidates cached results"
+            );
+            scan_with_registry(&instance, &manifest, &[], registry, None, |_| {}).await;
+            assert_eq!(
+                std::iter::from_fn(|| requests.try_recv().ok()).count(),
+                2,
+                "An explicit scan must still check everything"
+            );
         });
 }
 

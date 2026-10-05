@@ -2274,6 +2274,7 @@ impl App {
             orphan_only,
         )?;
         self.content_manifest = Some((name, manifest));
+        self.apply_cached_content_manifest();
         Ok(orphaned)
     }
 
@@ -2303,11 +2304,6 @@ impl App {
         self.worlds_state.remove_path(path);
         self.screenshots_state.remove_path(path);
         self.logs_state.remove_path(path);
-        self.mods_discovery_state.clear_installed_path(path);
-        self.resource_packs_discovery_state
-            .clear_installed_path(path);
-        self.shaders_discovery_state.clear_installed_path(path);
-        self.datapacks_discovery_state.clear_installed_path(path);
         if path
             .parent()
             .and_then(std::path::Path::file_name)

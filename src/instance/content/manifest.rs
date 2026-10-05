@@ -93,7 +93,10 @@ impl ContentLock {
         if current.version != previous.version || current.files != previous.files {
             return Err(ManifestError::Changed(self.path.clone()));
         }
-        self.save(manifest)
+        if manifest.version != previous.version || manifest.files != previous.files {
+            self.save(manifest)?;
+        }
+        Ok(())
     }
 }
 

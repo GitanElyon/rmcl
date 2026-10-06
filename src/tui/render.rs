@@ -446,7 +446,7 @@ fn render_provider_conflict(frame: &mut Frame, conflict: &super::app::ProviderCo
     use ratatui::{
         layout::{Constraint, Flex, Layout},
         style::{Modifier, Style},
-        text::Line,
+        text::{Line, Span},
         widgets::{Block, Borders, Clear, List, ListItem, ListState},
     };
 
@@ -488,10 +488,10 @@ fn render_provider_conflict(frame: &mut Frame, conflict: &super::app::ProviderCo
         .style(Style::default().fg(theme.text()).bg(theme.surface()))
         .highlight_style(
             Style::default()
-                .fg(theme.accent())
+                .fg(theme.text())
                 .bg(theme.stripe())
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("▌");
+        .highlight_symbol(Span::styled("▌", Style::default().fg(theme.accent())));
     frame.render_stateful_widget(list, area, &mut state);
 }

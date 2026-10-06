@@ -255,6 +255,15 @@ fn discovery_version_popup_renders_over_a_project_page() {
     state.list.list_state.selected = Some(0);
     state.begin_project_page();
     state.begin_versions();
+    let popup = state.version_popup.as_mut().unwrap();
+    popup.loading = false;
+    popup.versions = vec![
+        serde_json::from_value(serde_json::json!({
+            "id": "version", "name": "Version", "version_number": "1.0",
+            "game_versions": ["1.21.1"], "loaders": ["fabric"], "files": []
+        }))
+        .unwrap(),
+    ];
 
     let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
     let picker = ratatui_image::picker::Picker::halfblocks();
@@ -263,6 +272,10 @@ fn discovery_version_popup_renders_over_a_project_page() {
         .unwrap();
 
     assert!(format!("{}", terminal.backend()).contains("Install Project"));
+    let cells = terminal.backend().buffer().content();
+    let marker = cells.iter().position(|cell| cell.symbol() == "▶").unwrap();
+    assert_eq!(cells[marker + 2].fg, THEME.as_ref().text());
+    assert!(cells[marker + 2].modifier.contains(Modifier::BOLD));
 }
 
 #[test]

@@ -996,8 +996,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut State) {
     }
     if state.choice_picker.is_some() {
         if state.choice_picker == Some(ChoicePicker::Resolution) {
-            let items = resolution_items(&state.resolution_choices(), state.choice_index);
-            super::select_list::render_styled(items, state.choice_index, inner, frame.buffer_mut());
+            let items = resolution_items(&state.resolution_choices());
+            super::select_list::render(items, state.choice_index, inner, frame.buffer_mut());
         } else {
             render_settings_picker(&state.settings_picker, inner, frame.buffer_mut());
         }

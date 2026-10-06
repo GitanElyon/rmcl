@@ -21,29 +21,6 @@ pub(crate) const MOD_LOADERS: [ModLoader; 5] = [
 ];
 
 pub(crate) fn render(items: Vec<ListItem<'_>>, selected: usize, area: Rect, buffer: &mut Buffer) {
-    let list = List::new(items)
-        .highlight_style(
-            Style::default()
-                .fg(THEME.as_ref().accent())
-                .bg(THEME.as_ref().stripe())
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(Span::styled(
-            "▶ ",
-            Style::default()
-                .fg(THEME.as_ref().accent())
-                .add_modifier(Modifier::BOLD),
-        ));
-    let mut state = ListState::default().with_selected(Some(selected));
-    StatefulWidget::render(list, area, buffer, &mut state);
-}
-
-pub(crate) fn render_styled(
-    items: Vec<ListItem<'_>>,
-    selected: usize,
-    area: Rect,
-    buffer: &mut Buffer,
-) {
     let theme = THEME.as_ref();
     let items = items
         .into_iter()
@@ -57,6 +34,7 @@ pub(crate) fn render_styled(
         })
         .collect::<Vec<_>>();
     let list = List::new(items)
+        .style(Style::default().fg(theme.text()))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol(Span::styled(
             "▶ ",
@@ -76,6 +54,27 @@ mod tests {
     use crate::tui::widgets::status_badge;
 
     #[test]
+    fn selected_labels_use_normal_text_bold_and_keep_the_accent_marker() {
+        let theme = THEME.as_ref();
+        let area = Rect::new(0, 0, 30, 2);
+        let mut buffer = Buffer::empty(area);
+        render(
+            vec![ListItem::new("26.3"), ListItem::new("26.2")],
+            0,
+            area,
+            &mut buffer,
+        );
+
+        let selected = &buffer[(2, 0)];
+        assert_eq!(selected.fg, theme.text());
+        assert_eq!(selected.bg, theme.stripe());
+        assert!(selected.modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(0, 0)].fg, theme.accent());
+        assert_eq!(buffer[(2, 1)].fg, theme.text());
+        assert!(!buffer[(2, 1)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
     fn styled_list_preserves_badges_on_the_selected_row() {
         let theme = THEME.as_ref();
         let area = Rect::new(0, 0, 30, 1);
@@ -83,7 +82,7 @@ mod tests {
         let badge = status_badge("Auto", theme.success());
         let items = vec![ListItem::new(Line::from(vec![Span::raw("Java  "), badge]))];
 
-        render_styled(items, 0, area, &mut buffer);
+        render(items, 0, area, &mut buffer);
 
         let badge_cell = buffer.cell((8, 0)).unwrap();
         assert_eq!(badge_cell.bg, theme.success());
@@ -109,7 +108,7 @@ mod tests {
             ])),
         ];
 
-        render_styled(items, 1, area, &mut buffer);
+        render(items, 1, area, &mut buffer);
 
         let badge_cell = buffer.cell((10, 1)).unwrap();
         assert_eq!(badge_cell.bg, theme.success());

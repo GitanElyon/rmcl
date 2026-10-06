@@ -419,11 +419,7 @@ fn render_profile_list(
         } else {
             theme.background()
         };
-        let style = if show_selected {
-            Style::default()
-                .fg(theme.accent())
-                .add_modifier(Modifier::BOLD)
-        } else if is_active {
+        let style = if show_selected || is_active {
             Style::default()
                 .fg(theme.text())
                 .add_modifier(Modifier::BOLD)

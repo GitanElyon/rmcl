@@ -70,6 +70,10 @@ fn new_instance_renders_version_step() {
     terminal
         .draw(|f| render(f, f.area(), FocusedArea::Popup))
         .unwrap();
+    let cells = terminal.backend().buffer().content();
+    let marker = cells.iter().position(|cell| cell.symbol() == "▶").unwrap();
+    assert_eq!(cells[marker + 2].fg, THEME.as_ref().text());
+    assert!(cells[marker + 2].modifier.contains(Modifier::BOLD));
     insta::assert_snapshot!(terminal.backend());
 }
 

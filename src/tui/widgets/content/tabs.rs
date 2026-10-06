@@ -1038,10 +1038,8 @@ fn render_sort_panel(frame: &mut Frame, area: Rect, state: &mut DiscoveryState) 
             Span::styled(
                 label,
                 Style::default()
-                    .fg(if active {
+                    .fg(if active || selected {
                         theme.text()
-                    } else if selected {
-                        theme.accent()
                     } else {
                         theme.text_dim()
                     })
@@ -1140,17 +1138,11 @@ fn render_filter_panel(frame: &mut Frame, area: Rect, state: &DiscoveryState) {
                 ),
                 Span::styled(
                     value,
-                    Style::default()
-                        .fg(if selected {
-                            theme.accent()
-                        } else {
-                            theme.text()
-                        })
-                        .add_modifier(if selected {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
+                    Style::default().fg(theme.text()).add_modifier(if selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
                 ),
             ]))
             .style(Style::default().bg(background)),
@@ -1201,11 +1193,17 @@ fn render_filter_panel(frame: &mut Frame, area: Rect, state: &DiscoveryState) {
             ),
             Span::styled(
                 (*label).to_owned(),
-                Style::default().fg(if mode.is_some() {
-                    theme.text()
-                } else {
-                    theme.text_dim()
-                }),
+                Style::default()
+                    .fg(if selected || mode.is_some() {
+                        theme.text()
+                    } else {
+                        theme.text_dim()
+                    })
+                    .add_modifier(if selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
             ),
         ]);
         frame.render_widget(
@@ -1342,12 +1340,12 @@ fn render_filter_version_picker(frame: &mut Frame, area: Rect, state: &mut Disco
                         Span::styled(
                             label.clone(),
                             Style::default()
-                                .fg(if (*scope && *active) || mode.is_some() {
+                                .fg(if selected || (*scope && *active) || mode.is_some() {
                                     theme.text()
                                 } else {
                                     theme.text_dim()
                                 })
-                                .add_modifier(if *scope {
+                                .add_modifier(if selected || *scope {
                                     Modifier::BOLD
                                 } else {
                                     Modifier::empty()
@@ -1487,21 +1485,10 @@ pub(crate) fn render_version_popup(
     } else {
         popup
             .visible_versions()
-            .enumerate()
-            .map(|(index, version)| {
+            .map(|version| {
                 let mut spans = vec![Span::styled(
                     discovery_version_label(version),
-                    Style::default()
-                        .fg(if index == selected {
-                            theme.accent()
-                        } else {
-                            theme.text()
-                        })
-                        .add_modifier(if index == selected {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
+                    Style::default().fg(theme.text()),
                 )];
                 if current_version_id.as_deref() == Some(version.id.as_str()) {
                     spans.extend([
@@ -1634,9 +1621,9 @@ pub(crate) fn render_version_popup(
                 .style(Style::default().fg(THEME.as_ref().text_dim()))
                 .render(area, buffer);
             } else {
-                // render_styled preserves the badge spans: highlight only adds
+                // Preserve badge spans: highlight only adds
                 // bold instead of painting fg/bg over the whole row.
-                crate::tui::widgets::popups::select_list::render_styled(
+                crate::tui::widgets::popups::select_list::render(
                     items.clone(),
                     selected,
                     area,

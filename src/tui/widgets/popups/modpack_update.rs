@@ -188,8 +188,13 @@ pub fn render(frame: &mut Frame, state: &State) {
             frame.render_stateful_widget(
                 List::new(items)
                     .block(block)
-                    .highlight_symbol("▌")
-                    .highlight_style(Style::default().bg(theme.stripe())),
+                    .highlight_symbol(Span::styled("▌", Style::default().fg(theme.accent())))
+                    .highlight_style(
+                        Style::default()
+                            .fg(theme.text())
+                            .bg(theme.stripe())
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 area,
                 &mut selected,
             );

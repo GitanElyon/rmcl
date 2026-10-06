@@ -306,11 +306,7 @@ fn render_account_list(
 
         let active_marker = if *is_active { "\u{25b8} " } else { "  " };
 
-        let style = if show_selected {
-            Style::default()
-                .fg(theme.accent())
-                .add_modifier(Modifier::BOLD)
-        } else if *is_active {
+        let style = if show_selected || *is_active {
             Style::default()
                 .fg(theme.text())
                 .add_modifier(Modifier::BOLD)
@@ -326,7 +322,7 @@ fn render_account_list(
         if *acc_type == AccountType::Offline {
             let offline_style = if show_selected {
                 Style::default()
-                    .fg(theme.accent())
+                    .fg(theme.text())
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.text_dim())

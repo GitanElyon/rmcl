@@ -1110,6 +1110,15 @@ fn rendering_visible_entries_restores_the_first_selection() {
         .unwrap();
 
     assert_eq!(state.list_state.selected, Some(0));
+    let title = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .find(|cell| cell.symbol() == "F")
+        .unwrap();
+    assert_eq!(title.fg, crate::config::theme::THEME.as_ref().accent());
+    assert!(title.modifier.contains(Modifier::BOLD));
 }
 
 #[test]

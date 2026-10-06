@@ -113,7 +113,7 @@ paru -S rmcl-git
 
 ### Nix
 
-[![Nix](https://img.shields.io/badge/nix-5277C4?style=for-the-badge&logo=nixos)](https://github.com/objz/rmcl)
+[![Nix](https://img.shields.io/badge/nix-5277C4?style=for-the-badge&logo=nixos&logoColor=white)](https://github.com/objz/rmcl)
 
 ```sh
 nix run github:objz/rmcl

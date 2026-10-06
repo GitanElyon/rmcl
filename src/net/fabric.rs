@@ -79,7 +79,10 @@ pub async fn fetch_fabric_versions_from(
 ) -> Result<Vec<FabricLoaderVersion>, NetError> {
     let url = format!("{}/versions/loader/{}", meta_base, game_version);
     tracing::debug!("Fetching Fabric loader versions for {}", game_version);
-    let versions: Vec<FabricLoaderVersion> = client.get_json(&url).await?;
+    let mut versions: Vec<FabricLoaderVersion> = client.get_json(&url).await?;
+    versions.sort_by(|a, b| {
+        super::versions::compare_fabric_versions(&b.loader.version, &a.loader.version)
+    });
     tracing::debug!(
         "Fetched {} Fabric loader version(s) for {}",
         versions.len(),

@@ -24,8 +24,8 @@ async fn forge_fetch_versions_filters_by_prefix() {
         .and(path("/promotions.json"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "promos": {
-                "1.20.1-latest": "47.2.0",
-                "1.20.1-recommended": "47.1.0",
+                "1.20.1-latest": "47.10.0",
+                "1.20.1-recommended": "47.9.0",
                 "1.19.4-latest": "45.1.0",
                 "1.7.10-latest": "10.13.4.1614"
             }
@@ -38,7 +38,7 @@ async fn forge_fetch_versions_filters_by_prefix() {
         .await
         .expect("forge versions");
 
-    assert_eq!(versions, vec!["47.1.0", "47.2.0"]);
+    assert_eq!(versions, vec!["47.10.0", "47.9.0"]);
 }
 
 #[tokio::test]
@@ -50,7 +50,10 @@ async fn forge_fetch_game_versions_extracts_unique() {
             "promos": {
                 "1.20.1-latest": "47.2.0",
                 "1.20.1-recommended": "47.1.0",
-                "1.19.4-latest": "45.1.0"
+                "1.19.4-latest": "45.1.0",
+                "1.9.4-latest": "12.17.0.2317",
+                "1.10-latest": "12.18.0.2000",
+                "26.1.2-latest": "62.1.0"
             }
         })))
         .mount(&server)
@@ -62,7 +65,7 @@ async fn forge_fetch_game_versions_extracts_unique() {
         .expect("forge game versions");
 
     let ids: Vec<&str> = versions.iter().map(|v| v.id.as_str()).collect();
-    assert_eq!(ids, vec!["1.20.1", "1.19.4"]);
+    assert_eq!(ids, vec!["26.1.2", "1.20.1", "1.19.4", "1.10", "1.9.4"]);
 }
 
 #[tokio::test]
@@ -71,8 +74,13 @@ async fn fabric_fetch_game_versions_parses_response() {
     Mock::given(method("GET"))
         .and(path("/versions/game"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            { "version": "1.20.1", "stable": true },
-            { "version": "24w01a", "stable": false }
+            { "version": "26.4-snapshot-2", "stable": false },
+            { "version": "26.3", "stable": true },
+            { "version": "26.3-rc-3", "stable": false },
+            { "version": "26.3-snapshot-10", "stable": false },
+            { "version": "26.3-snapshot-9", "stable": false },
+            { "version": "24w01a", "stable": false },
+            { "version": "1.20.1", "stable": true }
         ])))
         .mount(&server)
         .await;
@@ -81,11 +89,20 @@ async fn fabric_fetch_game_versions_parses_response() {
         .await
         .expect("fabric game versions");
 
-    assert_eq!(versions.len(), 2);
-    assert_eq!(versions[0].id, "1.20.1");
-    assert!(versions[0].stable);
-    assert_eq!(versions[1].id, "24w01a");
-    assert!(!versions[1].stable);
+    assert_eq!(
+        versions.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+        [
+            "26.4-snapshot-2",
+            "26.3",
+            "26.3-rc-3",
+            "26.3-snapshot-10",
+            "26.3-snapshot-9",
+            "24w01a",
+            "1.20.1"
+        ]
+    );
+    assert!(!versions[0].stable);
+    assert!(versions[1].stable);
 }
 
 #[tokio::test]
@@ -95,7 +112,23 @@ async fn fabric_fetch_versions_parses_loader_entries() {
         .and(path("/versions/loader/1.20.1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {
-                "loader": { "version": "0.15.0", "stable": true },
+                "loader": { "version": "0.16.9", "stable": true },
+                "intermediary": { "version": "1.20.1", "stable": true }
+            },
+            {
+                "loader": { "version": "0.16.10", "stable": true },
+                "intermediary": { "version": "1.20.1", "stable": true }
+            },
+            {
+                "loader": { "version": "0.17.0-beta.2", "stable": false },
+                "intermediary": { "version": "1.20.1", "stable": true }
+            },
+            {
+                "loader": { "version": "0.7.8+build.9", "stable": true },
+                "intermediary": { "version": "1.20.1", "stable": true }
+            },
+            {
+                "loader": { "version": "0.7.8+build.10", "stable": true },
                 "intermediary": { "version": "1.20.1", "stable": true }
             }
         ])))
@@ -106,8 +139,19 @@ async fn fabric_fetch_versions_parses_loader_entries() {
         .await
         .expect("fabric versions");
 
-    assert_eq!(versions.len(), 1);
-    assert_eq!(versions[0].loader.version, "0.15.0");
+    assert_eq!(
+        versions
+            .iter()
+            .map(|v| v.loader.version.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "0.17.0-beta.2",
+            "0.16.10",
+            "0.16.9",
+            "0.7.8+build.10",
+            "0.7.8+build.9"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -144,6 +188,10 @@ async fn quilt_fetch_game_versions_parses_response() {
     Mock::given(method("GET"))
         .and(path("/versions/game"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "version": "26.4-snapshot-1", "stable": false },
+            { "version": "26.3", "stable": true },
+            { "version": "26.3-rc-3", "stable": false },
+            { "version": "24w01a", "stable": false },
             { "version": "1.20.1", "stable": true }
         ])))
         .mount(&server)
@@ -152,7 +200,10 @@ async fn quilt_fetch_game_versions_parses_response() {
     let versions = fetch_quilt_game_versions_from(&HttpClient::new(), &server.uri())
         .await
         .expect("quilt game versions");
-    assert_eq!(versions[0].id, "1.20.1");
+    assert_eq!(
+        versions.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+        ["26.4-snapshot-1", "26.3", "26.3-rc-3", "24w01a", "1.20.1"]
+    );
 }
 
 #[tokio::test]
@@ -161,6 +212,11 @@ async fn quilt_fetch_versions_parses_loader_entries() {
     Mock::given(method("GET"))
         .and(path("/versions/loader/1.20.1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "loader": { "version": "0.20.0-beta.9" } },
+            { "loader": { "version": "0.30.0-beta.9" } },
+            { "loader": { "version": "0.29.3" } },
+            { "loader": { "version": "0.30.0-beta.10" } },
+            { "loader": { "version": "0.30.0" } },
             { "loader": { "version": "0.23.0" } }
         ])))
         .mount(&server)
@@ -169,7 +225,20 @@ async fn quilt_fetch_versions_parses_loader_entries() {
     let versions = fetch_quilt_versions_from(&HttpClient::new(), &server.uri(), "1.20.1")
         .await
         .expect("quilt versions");
-    assert_eq!(versions[0].loader.version, "0.23.0");
+    assert_eq!(
+        versions
+            .iter()
+            .map(|v| v.loader.version.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "0.30.0",
+            "0.30.0-beta.10",
+            "0.30.0-beta.9",
+            "0.29.3",
+            "0.23.0",
+            "0.20.0-beta.9"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -303,9 +372,10 @@ async fn neoforge_fetch_versions_filters_by_prefix() {
         .and(path("/maven-api"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "versions": [
-                "20.4.190",
+                "20.4.9",
                 "20.4.180-beta",
                 "20.4.150",
+                "20.4.190",
                 "21.0.10",
                 "21.0.5-alpha"
             ]
@@ -319,7 +389,7 @@ async fn neoforge_fetch_versions_filters_by_prefix() {
         .expect("neoforge versions");
 
     // game version "1.20.4" maps to prefix "20.4." and beta/alpha are excluded
-    assert_eq!(versions, vec!["20.4.190", "20.4.150"]);
+    assert_eq!(versions, vec!["20.4.190", "20.4.150", "20.4.9"]);
 }
 
 #[tokio::test]
@@ -329,8 +399,9 @@ async fn neoforge_fetch_versions_supports_modern_minecraft_numbering() {
         .and(path("/maven-api"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "versions": [
-                "26.1.2.76",
                 "26.1.2.75",
+                "26.1.2.76",
+                "26.1.2.100",
                 "26.1.1.15",
                 "21.1.233"
             ]
@@ -343,7 +414,7 @@ async fn neoforge_fetch_versions_supports_modern_minecraft_numbering() {
         .await
         .expect("neoforge versions");
 
-    assert_eq!(versions, vec!["26.1.2.76", "26.1.2.75"]);
+    assert_eq!(versions, vec!["26.1.2.100", "26.1.2.76", "26.1.2.75"]);
 }
 
 #[tokio::test]
@@ -372,12 +443,7 @@ async fn neoforge_fetch_game_versions_reverse_engineers_mc_versions() {
         .await
         .expect("neoforge game versions");
     let ids: Vec<&str> = versions.iter().map(|v| v.id.as_str()).collect();
-    // dedup keeps the first occurrence, output is reversed, so the
-    // resulting list is in upstream maven-version order, deduped.
-    assert!(ids.contains(&"26.1.2"));
-    assert!(ids.contains(&"26.1.1"));
-    assert!(ids.contains(&"1.21"));
-    assert!(ids.contains(&"1.20.4"));
+    assert_eq!(ids, ["26.1.2", "26.1.1", "1.21", "1.20.4"]);
     assert!(versions.iter().all(|v| v.stable));
 }
 

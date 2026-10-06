@@ -136,6 +136,75 @@ fn version(id: &str) -> VersionInfo {
     }
 }
 
+fn project_versions(versions: Vec<VersionInfo>) -> ProjectVersions {
+    ProjectVersions {
+        minecraft_versions: minecraft_versions(&versions),
+        versions,
+    }
+}
+
+#[test]
+fn minecraft_choices_follow_manifest_chronology_and_keep_provider_only_ids() {
+    let ids = [
+        "26.4-snapshot-2",
+        "26.3",
+        "26.3-rc-3",
+        "26.3-pre-1",
+        "26.3-snapshot-10",
+        "26.3-snapshot-9",
+        "26.2",
+        "24w01a",
+        "1.20.1",
+    ];
+    let manifest = serde_json::from_value(serde_json::json!({
+        "latest": { "release": "26.3", "snapshot": "26.4-snapshot-2" },
+        "versions": ids.map(|id| serde_json::json!({
+            "id": id, "type": "snapshot", "url": "", "sha1": ""
+        }))
+    }))
+    .unwrap();
+    let supported = ids
+        .into_iter()
+        .rev()
+        .chain([
+            "1.18_experimental-snapshot-7",
+            "1.18_experimental-snapshot-6",
+        ])
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        minecraft_versions_from_manifest(&supported, &manifest),
+        ids.into_iter()
+            .chain([
+                "1.18_experimental-snapshot-7",
+                "1.18_experimental-snapshot-6"
+            ])
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn numeric_minecraft_choices_are_sorted_without_a_manifest_request() {
+    let mut version = version("new");
+    version.game_versions = ["1.9.4", "1.21.9", "26.3", "1.21.11", "1.10"]
+        .map(str::to_owned)
+        .to_vec();
+    let result = prepare_project_versions(Ok(vec![version]), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.minecraft_versions,
+        ["26.3", "1.21.11", "1.21.9", "1.10", "1.9.4"]
+    );
+    assert_eq!(
+        prepare_project_versions(Err("provider failed".to_owned()), true)
+            .await
+            .err()
+            .as_deref(),
+        Some("provider failed")
+    );
+}
+
 fn project(id: &str) -> DiscoveryProject {
     DiscoveryProject {
         id: id.to_owned(),
@@ -443,7 +512,7 @@ fn empty_filtered_versions_fall_back_to_the_version_picker() {
         DiscoveryActionResult::VersionsUnfiltered {
             request_id: request.request_id,
             project_id: request.project_id,
-            result: Ok(vec![fallback]),
+            result: Ok(project_versions(vec![fallback])),
         },
     );
     state.drain_pending();
@@ -475,7 +544,7 @@ fn unfiltered_fallback_without_any_versions_keeps_the_empty_state() {
         DiscoveryActionResult::VersionsUnfiltered {
             request_id: request.request_id,
             project_id: request.project_id,
-            result: Ok(Vec::new()),
+            result: Ok(project_versions(Vec::new())),
         },
     );
     state.drain_pending();
@@ -1575,7 +1644,7 @@ fn datapack_versions_select_a_world_before_dependency_resolution() {
         DiscoveryActionResult::Versions {
             request_id: request.request_id,
             project_id: request.project_id,
-            result: Ok(vec![datapack_version]),
+            result: Ok(project_versions(vec![datapack_version])),
         },
     );
     state.drain_pending();
@@ -1772,7 +1841,7 @@ fn compatible_versions_populate_the_open_popup() {
         DiscoveryActionResult::Versions {
             request_id: request.request_id,
             project_id: request.project_id,
-            result: Ok(vec![version("1.0.0"), version("1.1.0")]),
+            result: Ok(project_versions(vec![version("1.0.0"), version("1.1.0")])),
         },
     );
 
@@ -1800,7 +1869,7 @@ fn modpacks_choose_minecraft_before_filtering_pack_versions() {
         DiscoveryActionResult::Versions {
             request_id: request.request_id,
             project_id: request.project_id,
-            result: Ok(vec![older, version("2.0.0")]),
+            result: Ok(project_versions(vec![older, version("2.0.0")])),
         },
     );
     state.drain_pending();
@@ -1820,6 +1889,49 @@ fn modpacks_choose_minecraft_before_filtering_pack_versions() {
             .collect::<Vec<_>>(),
         ["1.0.0"]
     );
+}
+
+#[tokio::test]
+async fn project_version_popup_sorts_cached_and_appended_installed_versions_by_date() {
+    for provider in ["modrinth", "curseforge"] {
+        let mut state = DiscoveryState::new(ContentKind::Mod);
+        let mut entry = project_entry(project("project"), None);
+        entry.provider_project.as_mut().unwrap().provider = provider.to_owned();
+        state.list.entries.push(entry);
+        state.list.list_state.selected = Some(0);
+        let request = state.begin_versions().unwrap();
+        let versions = [
+            ("old", "2026-01-01T00:00:00Z"),
+            ("new", "2026-01-03T00:00:00Z"),
+            ("installed", "2026-01-02T00:00:00Z"),
+        ]
+        .into_iter()
+        .map(|(id, date)| {
+            let mut version = version(id);
+            version.date_published = date.to_owned();
+            version
+        })
+        .collect();
+        DiscoveryState::push_action_result(
+            &request.pending,
+            DiscoveryActionResult::Versions {
+                request_id: request.request_id,
+                project_id: request.project_id,
+                result: prepare_project_versions(Ok(versions), false).await,
+            },
+        );
+        state.drain_pending();
+        let popup = state.version_popup.as_ref().unwrap();
+        assert_eq!(
+            popup
+                .versions
+                .iter()
+                .map(|version| version.id.as_str())
+                .collect::<Vec<_>>(),
+            ["new", "installed", "old"]
+        );
+        assert_eq!(popup.selected_version().unwrap().id, "new");
+    }
 }
 
 #[test]
@@ -1982,7 +2094,7 @@ fn version_popup_owns_navigation_over_a_project_page() {
         DiscoveryActionResult::Versions {
             request_id: request.request_id,
             project_id: request.project_id,
-            result: Ok(vec![version("1.0.0"), version("2.0.0")]),
+            result: Ok(project_versions(vec![version("1.0.0"), version("2.0.0")])),
         },
     );
     state.drain_pending();
@@ -2016,7 +2128,7 @@ fn confirmation_can_return_to_version_selection() {
         DiscoveryActionResult::Versions {
             request_id: request.request_id,
             project_id: request.project_id,
-            result: Ok(vec![version("1.0.0")]),
+            result: Ok(project_versions(vec![version("1.0.0")])),
         },
     );
     state.drain_pending();
@@ -2051,7 +2163,7 @@ fn dependency_resolution_opens_the_existing_confirmation() {
         DiscoveryActionResult::Versions {
             request_id: versions.request_id,
             project_id: versions.project_id,
-            result: Ok(vec![version("1.0.0")]),
+            result: Ok(project_versions(vec![version("1.0.0")])),
         },
     );
     state.drain_pending();
@@ -2113,7 +2225,7 @@ fn confirming_state_with_plan() -> DiscoveryState {
         DiscoveryActionResult::Versions {
             request_id: versions.request_id,
             project_id: versions.project_id,
-            result: Ok(vec![version("1.0.0")]),
+            result: Ok(project_versions(vec![version("1.0.0")])),
         },
     );
     state.drain_pending();
@@ -2335,7 +2447,7 @@ fn successful_install_marks_the_project_and_closes_the_popup() {
         DiscoveryActionResult::Versions {
             request_id: versions_request.request_id,
             project_id: versions_request.project_id,
-            result: Ok(vec![version("1.0.0")]),
+            result: Ok(project_versions(vec![version("1.0.0")])),
         },
     );
     state.drain_pending();

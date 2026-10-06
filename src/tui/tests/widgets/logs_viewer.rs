@@ -243,6 +243,9 @@ fn level_filter_highlight_reaches_the_popup_right_edge() {
     let theme = THEME.as_ref();
     assert_eq!(buffer[(popup.right() - 2, popup.y + 1)].bg, theme.stripe());
     assert_eq!(buffer[(popup.right() - 2, popup.y + 2)].bg, theme.surface());
+    let selected = &buffer[(popup.x + 5, popup.y + 1)];
+    assert_eq!(selected.fg, theme.text());
+    assert!(selected.modifier.contains(Modifier::BOLD));
 }
 
 #[test]

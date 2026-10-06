@@ -12,6 +12,69 @@ fn key(code: KeyCode) -> KeyEvent {
 }
 
 #[test]
+fn snapshot_toggle_preserves_chronological_order_and_search_filtering() {
+    let mut state = WizardState {
+        step: WizardStep::Version,
+        versions: LoadState::Loaded(
+            [
+                ("26.4-snapshot-2", false),
+                ("26.4-snapshot-1", false),
+                ("26.3", true),
+                ("26.3-rc-3", false),
+                ("26.3-snapshot-10", false),
+                ("26.3-snapshot-9", false),
+                ("26.2", true),
+                ("24w01a", false),
+                ("1.20.1", true),
+            ]
+            .into_iter()
+            .map(|(id, stable)| GameVersion {
+                id: id.to_owned(),
+                stable,
+            })
+            .collect(),
+        ),
+        ..WizardState::default()
+    };
+    let ids = |state: &WizardState| {
+        visible_versions(state)
+            .map(|version| version.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&state), ["26.3", "26.2", "1.20.1"]);
+    handle_version_key(
+        &mut state,
+        &key(KeyCode::Char('s')),
+        &mut instances::State::default(),
+    );
+    assert_eq!(
+        ids(&state),
+        [
+            "26.4-snapshot-2",
+            "26.4-snapshot-1",
+            "26.3",
+            "26.3-rc-3",
+            "26.3-snapshot-10",
+            "26.3-snapshot-9",
+            "26.2",
+            "24w01a",
+            "1.20.1"
+        ]
+    );
+    state.version_search.query = "26.3".to_owned();
+    assert_eq!(
+        ids(&state),
+        ["26.3", "26.3-rc-3", "26.3-snapshot-10", "26.3-snapshot-9"]
+    );
+    handle_version_key(
+        &mut state,
+        &key(KeyCode::Char('s')),
+        &mut instances::State::default(),
+    );
+    assert_eq!(ids(&state), ["26.3"]);
+}
+
+#[test]
 fn dispatch_repeats_version_search_but_not_snapshot_toggle_or_creation() {
     use crate::tui::{app::FocusedArea, tests::harness::UiHarness};
     use crossterm::event::KeyEventKind;

@@ -36,6 +36,40 @@ fn version_with_files(files: Vec<VersionFile>) -> VersionInfo {
     }
 }
 
+#[tokio::test]
+async fn version_lists_sort_by_publish_date_not_version_name_or_response_order() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let mut versions = vec![version_with_files(Vec::new()); 3];
+    for (version, (id, date)) in versions.iter_mut().zip([
+        ("9.0", "2026-01-01T00:00:00Z"),
+        ("1.0", "2026-01-02T00:00:00.500Z"),
+        ("2.0", "2026-01-02T01:00:00+01:00"),
+    ]) {
+        version.id = id.to_owned();
+        version.version_number = id.to_owned();
+        version.date_published = date.to_owned();
+    }
+    Mock::given(method("GET"))
+        .and(path("/versions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(versions))
+        .mount(&server)
+        .await;
+
+    let versions = fetch_version_list(
+        &crate::net::HttpClient::new(),
+        &format!("{}/versions", server.uri()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        versions.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+        ["1.0", "2.0", "9.0"]
+    );
+}
+
 #[test]
 fn version_dependencies_and_release_type_are_deserialized() {
     let version: VersionInfo = serde_json::from_str(

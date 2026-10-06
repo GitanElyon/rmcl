@@ -41,7 +41,7 @@ pub async fn fetch_forge_versions_from(
         .map(|(_, value)| value.clone())
         .collect();
 
-    versions.sort();
+    versions.sort_by(|a, b| super::versions::compare_versions(b, a));
     versions.dedup();
     tracing::debug!(
         "Resolved {} Forge version(s) for Minecraft {} from promotions",
@@ -66,9 +66,8 @@ pub async fn fetch_forge_game_versions_from(
         .keys()
         .filter_map(|key| key.rsplit_once('-').map(|(version, _)| version.to_string()))
         .collect();
-    game_versions.sort();
+    game_versions.sort_by(|a, b| super::versions::compare_versions(b, a));
     game_versions.dedup();
-    game_versions.reverse();
     tracing::debug!(
         "Resolved {} Forge game version(s) from promotions",
         game_versions.len()

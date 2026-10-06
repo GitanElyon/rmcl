@@ -892,6 +892,11 @@ pub struct InstallCompletion {
     pub orphaned_dependencies: Vec<PathBuf>,
 }
 
+pub struct ProjectVersions {
+    pub versions: Vec<VersionInfo>,
+    pub minecraft_versions: Vec<String>,
+}
+
 pub enum DiscoveryActionResult {
     ProjectPage {
         request_id: u64,
@@ -907,14 +912,14 @@ pub enum DiscoveryActionResult {
     Versions {
         request_id: u64,
         project_id: String,
-        result: Result<Vec<VersionInfo>, String>,
+        result: Result<ProjectVersions, String>,
     },
     /// The filtered fetch found nothing, so the task retried unfiltered.
     /// Drain opens the Minecraft version picker instead of a dead end.
     VersionsUnfiltered {
         request_id: u64,
         project_id: String,
-        result: Result<Vec<VersionInfo>, String>,
+        result: Result<ProjectVersions, String>,
     },
     Dependencies {
         request_id: u64,
@@ -2564,9 +2569,9 @@ impl DiscoveryState {
                     };
                     popup.loading = false;
                     match result {
-                        Ok(versions) => {
-                            popup.minecraft_versions = minecraft_versions(&versions);
-                            popup.versions = versions;
+                        Ok(result) => {
+                            popup.minecraft_versions = result.minecraft_versions;
+                            popup.versions = result.versions;
                             popup.selected = 0;
                             popup.error = None;
                         }
@@ -2585,11 +2590,11 @@ impl DiscoveryState {
                     };
                     popup.loading = false;
                     match result {
-                        Ok(versions) if !versions.is_empty() => {
+                        Ok(result) if !result.versions.is_empty() => {
                             popup.all_game_versions = true;
                             popup.selecting_minecraft_version = true;
-                            popup.minecraft_versions = minecraft_versions(&versions);
-                            popup.versions = versions;
+                            popup.minecraft_versions = result.minecraft_versions;
+                            popup.versions = result.versions;
                             popup.selected = 0;
                             popup.error = None;
                         }
@@ -3039,9 +3044,60 @@ fn minecraft_versions(versions: &[VersionInfo]) -> Vec<String> {
         .filter(|game_version| seen.insert((*game_version).clone()))
         .cloned()
         .collect::<Vec<_>>();
+    if numeric_game_versions(&minecraft_versions) {
+        minecraft_versions.sort_by(|a, b| crate::net::versions::compare_versions(b, a));
+    }
     minecraft_versions
-        .sort_by(|a, b| crate::tui::widgets::popups::compare_game_versions(b.as_str(), a.as_str()));
-    minecraft_versions
+}
+
+fn numeric_game_versions(versions: &[String]) -> bool {
+    versions.iter().all(|version| {
+        version
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    })
+}
+
+pub(crate) async fn prepare_project_versions(
+    result: Result<Vec<VersionInfo>, String>,
+    choose_minecraft: bool,
+) -> Result<ProjectVersions, String> {
+    let mut versions = result?;
+    crate::instance::content::provider::sort_versions_newest_first(&mut versions);
+    let mut minecraft_versions = if choose_minecraft {
+        minecraft_versions(&versions)
+    } else {
+        Vec::new()
+    };
+    // Numeric releases can be compared directly. Weekly snapshots, prereleases
+    // and special releases require the official chronology, not a string sort.
+    if !numeric_game_versions(&minecraft_versions) {
+        let manifest = crate::net::mojang::fetch_version_manifest(&crate::net::HttpClient::new())
+            .await
+            .map_err(|error| format!("Failed to load Minecraft version order: {error}"))?;
+        minecraft_versions = minecraft_versions_from_manifest(&minecraft_versions, &manifest);
+    }
+    Ok(ProjectVersions {
+        versions,
+        minecraft_versions,
+    })
+}
+
+fn minecraft_versions_from_manifest(
+    supported: &[String],
+    manifest: &crate::net::mojang::VersionManifest,
+) -> Vec<String> {
+    let order = manifest
+        .versions
+        .iter()
+        .enumerate()
+        .map(|(index, version)| (version.id.as_str(), index))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut versions = supported.to_vec();
+    // Keep provider-only IDs (e.g. experimental snapshots) in their original
+    // order after catalogued versions instead of silently dropping choices.
+    versions.sort_by_key(|version| order.get(version.as_str()).copied().unwrap_or(usize::MAX));
+    versions
 }
 
 pub(crate) fn page_key_direction(key_event: &KeyEvent) -> Option<bool> {

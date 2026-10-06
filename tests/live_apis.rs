@@ -9,6 +9,24 @@
 use rmcl::instance::{ContentKind, ModLoader, VanillaInstaller};
 use rmcl::net::{self, HttpClient};
 
+fn numeric_core(version: &str) -> Vec<u64> {
+    version
+        .split(['-', '+'])
+        .next()
+        .unwrap()
+        .split('.')
+        .map(|part| part.parse().unwrap())
+        .collect()
+}
+
+fn assert_published_newest_first(versions: &[net::modrinth::VersionInfo]) {
+    let dates = versions
+        .iter()
+        .map(|version| chrono::DateTime::parse_from_rfc3339(&version.date_published).unwrap())
+        .collect::<Vec<_>>();
+    assert!(dates.windows(2).all(|pair| pair[0] >= pair[1]));
+}
+
 #[tokio::test]
 #[ignore = "hits live Fabric API"]
 async fn fabric_versions_are_available() {
@@ -19,6 +37,12 @@ async fn fabric_versions_are_available() {
 
     assert!(!versions.is_empty());
     assert!(versions[0].loader.version.contains('.'));
+    assert!(
+        versions
+            .windows(2)
+            .all(|pair| numeric_core(&pair[0].loader.version)
+                >= numeric_core(&pair[1].loader.version))
+    );
 }
 
 #[tokio::test]
@@ -39,6 +63,12 @@ async fn quilt_versions_are_available() {
         .unwrap();
 
     assert!(!versions.is_empty());
+    assert!(
+        versions
+            .windows(2)
+            .all(|pair| numeric_core(&pair[0].loader.version)
+                >= numeric_core(&pair[1].loader.version))
+    );
 }
 
 #[tokio::test]
@@ -59,6 +89,11 @@ async fn forge_versions_are_available() {
         .unwrap();
 
     assert!(!versions.is_empty());
+    assert!(
+        versions
+            .windows(2)
+            .all(|pair| numeric_core(&pair[0]) >= numeric_core(&pair[1]))
+    );
 }
 
 #[tokio::test]
@@ -79,6 +114,11 @@ async fn neoforge_versions_are_available() {
         .unwrap();
 
     assert!(!versions.is_empty());
+    assert!(
+        versions
+            .windows(2)
+            .all(|pair| numeric_core(&pair[0]) >= numeric_core(&pair[1]))
+    );
 }
 
 #[tokio::test]
@@ -109,6 +149,33 @@ async fn vanilla_installer_lists_game_versions() {
 }
 
 #[tokio::test]
+#[ignore = "hits live Mojang, Fabric and Quilt APIs"]
+async fn instance_game_version_pickers_preserve_minecraft_chronology() {
+    let manifest = net::mojang::fetch_version_manifest(&HttpClient::new())
+        .await
+        .unwrap();
+    let order = manifest
+        .versions
+        .iter()
+        .enumerate()
+        .map(|(index, version)| (version.id.as_str(), index))
+        .collect::<std::collections::HashMap<_, _>>();
+    for loader in [ModLoader::Vanilla, ModLoader::Fabric, ModLoader::Quilt] {
+        let versions = rmcl::tui::widgets::popups::version_lists::game_versions(loader)
+            .await
+            .unwrap();
+        let indices = versions
+            .iter()
+            .filter_map(|version| order.get(version.id.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            indices.windows(2).all(|pair| pair[0] < pair[1]),
+            "{loader:?} reordered Minecraft releases/snapshots"
+        );
+    }
+}
+
+#[tokio::test]
 #[ignore = "hits live Modrinth API"]
 async fn modrinth_project_is_available() {
     let project = net::modrinth::fetch_project(&HttpClient::new(), "fabulously-optimized")
@@ -128,6 +195,7 @@ async fn modrinth_versions_are_available() {
 
     assert!(!versions.is_empty());
     assert!(!versions[0].files.is_empty());
+    assert_published_newest_first(&versions);
 }
 
 #[tokio::test]
@@ -221,4 +289,15 @@ async fn curseforge_discovery_returns_compatible_mods() {
     assert!(!result.projects.is_empty());
     assert!(result.total_hits >= result.projects.len());
     assert!(result.projects.iter().all(|project| !project.id.is_empty()));
+    let versions = net::curseforge::fetch_versions(
+        &HttpClient::new(),
+        api_key,
+        &result.projects[0].id,
+        "1.21.1",
+        Some(ModLoader::Fabric),
+    )
+    .await
+    .unwrap();
+    assert!(!versions.is_empty());
+    assert_published_newest_first(&versions);
 }

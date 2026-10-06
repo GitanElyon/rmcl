@@ -466,9 +466,10 @@ pub struct ProviderRegistry {
 pub(crate) fn newest_version(versions: &[VersionInfo]) -> Option<&VersionInfo> {
     let first = versions.first()?;
     Some(versions.iter().fold(first, |newest, version| {
-        match (published_at(version), published_at(newest)) {
-            (Some(candidate), Some(current)) if candidate > current => version,
-            _ => newest,
+        if published_at(version) > published_at(newest) {
+            version
+        } else {
+            newest
         }
     }))
 }
@@ -485,6 +486,12 @@ pub(crate) fn is_newer(target: &VersionInfo, installed: &VersionInfo) -> bool {
 
 fn published_at(version: &VersionInfo) -> Option<chrono::DateTime<chrono::FixedOffset>> {
     chrono::DateTime::parse_from_rfc3339(&version.date_published).ok()
+}
+
+/// Keep provider order for equal or missing dates. Mod version names are
+/// arbitrary labels, not necessarily comparable version numbers.
+pub(crate) fn sort_versions_newest_first(versions: &mut [VersionInfo]) {
+    versions.sort_by_cached_key(|version| std::cmp::Reverse(published_at(version)));
 }
 
 pub(crate) fn has_newer_compatible_version(

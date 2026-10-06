@@ -895,11 +895,17 @@ pub(crate) fn render_level_filter(frame: &mut Frame, selected: usize, filters: &
                 ),
                 Span::styled(
                     level_label(*level),
-                    Style::default().fg(if mode.is_some() {
-                        theme.text()
-                    } else {
-                        theme.text_dim()
-                    }),
+                    Style::default()
+                        .fg(if index == selected || mode.is_some() {
+                            theme.text()
+                        } else {
+                            theme.text_dim()
+                        })
+                        .add_modifier(if index == selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
                 ),
             ])
             .style(Style::default().bg(if index == selected {

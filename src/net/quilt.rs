@@ -76,7 +76,9 @@ pub async fn fetch_quilt_versions_from(
 ) -> Result<Vec<QuiltLoaderVersion>, NetError> {
     let url = format!("{}/versions/loader/{}", meta_base, game_version);
     tracing::debug!("Fetching Quilt loader versions for {}", game_version);
-    let versions: Vec<QuiltLoaderVersion> = client.get_json(&url).await?;
+    let mut versions: Vec<QuiltLoaderVersion> = client.get_json(&url).await?;
+    versions
+        .sort_by(|a, b| super::versions::compare_versions(&b.loader.version, &a.loader.version));
     tracing::debug!(
         "Fetched {} Quilt loader version(s) for {}",
         versions.len(),

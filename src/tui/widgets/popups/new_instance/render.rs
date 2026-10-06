@@ -178,8 +178,7 @@ fn render_version_step(state: &WizardState, area: Rect, buf: &mut ratatui::buffe
         }
         LoadState::Loaded(_) => {
             let items: Vec<ListItem> = visible_versions(state)
-                .enumerate()
-                .map(|(index, version)| {
+                .map(|version| {
                     let suffix = if version.stable {
                         String::new()
                     } else {
@@ -187,11 +186,7 @@ fn render_version_step(state: &WizardState, area: Rect, buf: &mut ratatui::buffe
                     };
                     ListItem::new(state.version_search.highlight_line(
                         &format!("{}{}", version.id, suffix),
-                        Style::default().fg(if index == state.version_idx {
-                            theme.accent()
-                        } else {
-                            theme.text()
-                        }),
+                        Style::default().fg(theme.text()),
                     ))
                 })
                 .collect();

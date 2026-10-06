@@ -1684,9 +1684,7 @@ fn render_choice_picker(frame: &mut Frame, area: Rect, state: &mut State) {
         return;
     }
     let items = match state.choice_picker {
-        Some(ChoicePicker::Resolution) => {
-            resolution_items(&state.resolution_choices(), state.choice_index)
-        }
+        Some(ChoicePicker::Resolution) => resolution_items(&state.resolution_choices()),
         Some(ChoicePicker::Java | ChoicePicker::Account | ChoicePicker::Glfw) => Vec::new(),
         _ => state
             .choice_values()
@@ -1707,8 +1705,6 @@ fn render_choice_picker(frame: &mut Frame, area: Rect, state: &mut State) {
     };
     if let Some(picker) = settings_picker {
         render_settings_picker(picker, list_area, frame.buffer_mut());
-    } else if state.choice_picker == Some(ChoicePicker::Resolution) {
-        super::select_list::render_styled(items, state.choice_index, list_area, frame.buffer_mut());
     } else {
         super::select_list::render(items, state.choice_index, list_area, frame.buffer_mut());
     }

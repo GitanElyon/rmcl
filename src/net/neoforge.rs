@@ -88,11 +88,12 @@ pub async fn fetch_neoforge_versions_from(
 
     let maven_versions: NeoForgeMavenVersions = client.get_json(api_url).await?;
 
-    let versions: Vec<String> = maven_versions
+    let mut versions: Vec<String> = maven_versions
         .versions
         .into_iter()
         .filter(|v| v.starts_with(&prefix) && !v.contains("-beta") && !v.contains("-alpha"))
         .collect();
+    versions.sort_by(|a, b| super::versions::compare_versions(b, a));
 
     tracing::debug!(
         "Resolved {} NeoForge version(s) for Minecraft {} with prefix {}",
@@ -123,7 +124,7 @@ pub async fn fetch_neoforge_game_versions_from(
             game_versions.push(mc_version);
         }
     }
-    game_versions.reverse();
+    game_versions.sort_by(|a, b| super::versions::compare_versions(b, a));
     tracing::debug!("Resolved {} NeoForge game version(s)", game_versions.len());
 
     Ok(game_versions

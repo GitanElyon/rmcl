@@ -146,11 +146,7 @@ impl SettingsPicker {
             .enumerate()
             .map(|(index, option)| {
                 let selected = index == self.selected;
-                let title_style = if selected {
-                    Style::default()
-                        .fg(theme.accent())
-                        .add_modifier(Modifier::BOLD)
-                } else if option.active {
+                let title_style = if selected || option.active {
                     Style::default()
                         .fg(theme.text())
                         .add_modifier(Modifier::BOLD)
@@ -170,7 +166,7 @@ impl SettingsPicker {
                         format!("  {detail}"),
                         Style::default()
                             .fg(if selected {
-                                theme.accent()
+                                theme.text()
                             } else {
                                 theme.text_dim()
                             })
@@ -1022,7 +1018,7 @@ pub(crate) fn render_settings_picker(
     area: Rect,
     buffer: &mut ratatui::buffer::Buffer,
 ) {
-    super::select_list::render_styled(picker.items(), picker.selected(), area, buffer);
+    super::select_list::render(picker.items(), picker.selected(), area, buffer);
 }
 
 pub(crate) fn display_resolutions() -> Vec<DisplayResolution> {
@@ -1089,22 +1085,14 @@ pub(crate) fn resolution_choices(
     choices
 }
 
-pub(crate) fn resolution_items(
-    choices: &[ResolutionChoice],
-    selected: usize,
-) -> Vec<ListItem<'static>> {
+pub(crate) fn resolution_items(choices: &[ResolutionChoice]) -> Vec<ListItem<'static>> {
     let theme = THEME.as_ref();
     choices
         .iter()
-        .enumerate()
-        .map(|(index, choice)| {
+        .map(|choice| {
             let mut spans = vec![Span::styled(
                 choice.label(),
-                Style::default().fg(if index == selected {
-                    theme.accent()
-                } else {
-                    theme.text()
-                }),
+                Style::default().fg(theme.text()),
             )];
             if is_default_resolution(choice.resolution()) {
                 spans.extend([Span::raw("  "), default_label()]);
@@ -1146,6 +1134,32 @@ mod tests {
     use crate::config::settings::format_tag_values;
 
     #[test]
+    fn settings_picker_selection_keeps_text_and_detail_neutral_and_preserves_badges() {
+        let mut picker = SettingsPicker::default();
+        picker.sync(
+            vec![SettingsPickerOption {
+                key: "auto".to_owned(),
+                title: "Java".to_owned(),
+                detail: Some("runtime".to_owned()),
+                leading: None,
+                active: false,
+                badge: Some(SettingsPickerBadge::Auto),
+            }],
+            None,
+        );
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        render_settings_picker(&picker, area, &mut buffer);
+        let theme = THEME.as_ref();
+        for x in [2, 8] {
+            assert_eq!(buffer[(x, 0)].fg, theme.text());
+            assert!(buffer[(x, 0)].modifier.contains(Modifier::BOLD));
+        }
+        assert_eq!(buffer[(18, 0)].bg, theme.success());
+        assert_eq!(buffer[(18, 0)].fg, theme.background());
+    }
+
+    #[test]
     fn memory_steps_move_and_clamp() {
         assert_eq!(adjust_memory("2G", true), "3G");
         assert_eq!(adjust_memory("2G", false), "1G");
@@ -1166,7 +1180,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 frame.render_widget(
-                    ratatui::widgets::List::new(resolution_items(&choices, 0)),
+                    ratatui::widgets::List::new(resolution_items(&choices)),
                     frame.area(),
                 );
             })

@@ -11,9 +11,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Clear, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap,
-    },
+    widgets::{Block, Borders, Clear, ListItem, Paragraph, Widget, Wrap},
 };
 
 #[cfg(test)]
@@ -272,16 +270,7 @@ fn render_version_step(state: &ImportWizardState, area: Rect, buf: &mut ratatui:
                 })
                 .collect();
 
-            let list = List::new(items)
-                .highlight_style(
-                    Style::default()
-                        .fg(theme.accent())
-                        .add_modifier(Modifier::BOLD),
-                )
-                .highlight_symbol("\u{25b6} ");
-
-            let mut list_state = ListState::default().with_selected(Some(state.version_idx));
-            StatefulWidget::render(list, area, buf, &mut list_state);
+            super::super::select_list::render(items, state.version_idx, area, buf);
         }
     }
 }

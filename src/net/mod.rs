@@ -8,6 +8,7 @@ pub mod modrinth;
 pub mod mojang;
 pub mod neoforge;
 pub mod quilt;
+pub(crate) mod versions;
 
 use reqwest::Client;
 use serde::Serialize;

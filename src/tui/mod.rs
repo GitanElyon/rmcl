@@ -278,47 +278,13 @@ async fn migration_retry_requested(
     app: &mut app::App,
     error: &str,
 ) -> color_eyre::Result<bool> {
-    use crate::config::theme::{BORDER_STYLE, THEME};
     use crossterm::event::{Event, KeyCode};
-    use ratatui::layout::{Constraint, Direction, Layout};
-    use ratatui::style::Style;
-    use ratatui::widgets::{Block, Paragraph, Wrap};
     use std::time::Duration;
 
     loop {
         terminal.draw(|frame| {
             app.render_migration_frame(frame);
-            let theme = THEME.as_ref();
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Fill(1),
-                    Constraint::Length(9),
-                    Constraint::Fill(1),
-                ])
-                .split(frame.area());
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(12),
-                    Constraint::Percentage(76),
-                    Constraint::Percentage(12),
-                ])
-                .split(rows[1]);
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "Migration stopped safely:\n\n{error}\n\n[r] retry    [q] quit"
-                ))
-                .block(
-                    Block::bordered()
-                        .title(" Migration needs attention ")
-                        .border_type(BORDER_STYLE.to_border_type())
-                        .border_style(Style::default().fg(theme.error()))
-                        .style(Style::default().fg(theme.text()).bg(theme.surface())),
-                )
-                .wrap(Wrap { trim: false }),
-                columns[1],
-            );
+            render_migration_error_popup(frame, error);
         })?;
         if crossterm::event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = crossterm::event::read()?
@@ -330,6 +296,36 @@ async fn migration_retry_requested(
             }
         }
     }
+}
+
+fn render_migration_error_popup(frame: &mut ratatui::Frame, error: &str) {
+    use crate::config::theme::THEME;
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::Line;
+    use ratatui::widgets::{Paragraph, Widget, Wrap};
+    use widgets::popups::{base::PopupFrame, keybind_line};
+
+    let theme = THEME.as_ref();
+    frame.render_widget(
+        PopupFrame {
+            title: Line::from(" Migration needs attention ").style(
+                Style::default()
+                    .fg(theme.error())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            border_color: theme.error(),
+            bg: Some(theme.surface()),
+            keybinds: Some(keybind_line(&[("r", " retry"), ("q", " quit")])),
+            search_line: None,
+            content: Box::new(move |area, buffer| {
+                Paragraph::new(format!("Migration stopped safely:\n\n{error}"))
+                    .style(Style::default().fg(theme.text()))
+                    .wrap(Wrap { trim: false })
+                    .render(area, buffer);
+            }),
+        },
+        migration_popup_area(frame.area(), 12),
+    );
 }
 
 async fn migration_completion_confirmation(
@@ -440,4 +436,29 @@ fn migration_popup_area(area: ratatui::layout::Rect, height: u16) -> ratatui::la
         Constraint::Length(area.width.saturating_sub(4).min(72)),
         Constraint::Length(area.height.saturating_sub(2).min(height)),
     )
+}
+
+#[cfg(test)]
+#[test]
+fn migration_error_actions_are_rendered_in_the_popup_footer() {
+    let _guard = crate::tests::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render_migration_error_popup(frame, "conflicting files"))
+        .unwrap();
+    let area = migration_popup_area(ratatui::layout::Rect::new(0, 0, 100, 24), 12);
+    let buffer = terminal.backend().buffer();
+    let footer = (area.x..area.right())
+        .map(|x| buffer[(x, area.bottom() - 1)].symbol())
+        .collect::<String>();
+    assert!(footer.contains("[r] retry"), "{footer}");
+    assert!(footer.contains("[q] quit"), "{footer}");
+    for y in area.y + 1..area.bottom() - 1 {
+        let line = (area.x..area.right())
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>();
+        assert!(!line.contains("[r]") && !line.contains("[q]"), "{line}");
+    }
 }

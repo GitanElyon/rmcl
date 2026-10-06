@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -72,8 +72,10 @@ pub enum MigrationError {
         old: String,
         new: String,
     },
-    #[error("Cannot merge migration data because both paths contain {path}")]
-    MergeConflict { path: String },
+    #[error(
+        "Cannot safely merge migration data from {old} into {new}: conflicting contents or incompatible paths"
+    )]
+    MergeConflict { old: String, new: String },
     #[error("Migration backup would be created inside the data being backed up: {0}")]
     BackupOverlap(String),
     #[error(
@@ -85,6 +87,8 @@ pub enum MigrationError {
 pub fn is_needed(instances_dir: &Path, meta_dir: &Path) -> bool {
     let metadata = MetadataPaths::new(meta_dir);
     metadata.cache_rebuild_pending().exists()
+        || metadata.migration_journal().exists()
+        || metadata.state().join("migration-v2.json").exists()
         || has_legacy_instances(instances_dir)
         || has_legacy_shared_data(meta_dir)
 }
@@ -137,6 +141,7 @@ pub fn run(
     if marker_version(&metadata.layout_marker()) == Some(LAYOUT_VERSION)
         && metadata.cache_rebuild_pending().exists()
         && !metadata.migration_journal().exists()
+        && !metadata.state().join("migration-v2.json").exists()
         && !has_legacy_instances(instances_dir)
         && !has_legacy_shared_data(meta_dir)
     {
@@ -156,7 +161,7 @@ pub fn run(
     let total = instances.len() as u64 + 8;
     let mut current = journal.completed.len() as u64;
 
-    if !is_complete(&journal, "backup") {
+    if !is_complete(&journal, "backup") || !journal.backup_dir.exists() {
         let backup_dir = journal.backup_dir.clone();
         backup_user_data(
             instances_dir,
@@ -177,7 +182,7 @@ pub fn run(
             },
         )?;
         complete(&mut journal, &metadata, "backup")?;
-        current += 1;
+        current = journal.completed.len() as u64;
     }
 
     if !is_complete(&journal, "config") {
@@ -192,7 +197,7 @@ pub fn run(
         );
         crate::config::upgrade_config_file(config_file)?;
         complete(&mut journal, &metadata, "config")?;
-        current += 1;
+        current = journal.completed.len() as u64;
     }
 
     validate_migration_conflicts(&instances, meta_dir)?;
@@ -204,7 +209,7 @@ pub fn run(
             .unwrap_or("instance")
             .to_owned();
         let key = format!("instance:{name}");
-        if is_complete(&journal, &key) {
+        if is_complete(&journal, &key) && !has_legacy_instance_data(instance) {
             continue;
         }
         report(
@@ -213,40 +218,23 @@ pub fn run(
         );
         migrate_instance(instance, &name)?;
         complete(&mut journal, &metadata, &key)?;
-        current += 1;
+        current = journal.completed.len() as u64;
     }
 
-    let moves = [
-        (
-            "profiles",
-            meta_dir.join("config-sync").join("profiles"),
-            metadata.profiles(),
-        ),
-        ("versions", meta_dir.join("versions"), metadata.versions()),
-        (
-            "libraries",
-            meta_dir.join("libraries"),
-            metadata.libraries(),
-        ),
-        ("assets", meta_dir.join("assets"), metadata.assets()),
-        (
-            "loader-profiles",
-            meta_dir.join("loader-profiles"),
-            metadata.loader_profiles(),
-        ),
-    ];
-    for (key, source, destination) in moves {
+    for (key, source, destination) in shared_moves(meta_dir) {
         let journal_key = format!("shared:{key}");
-        if is_complete(&journal, &journal_key) {
+        if is_complete(&journal, &journal_key) && !source.exists() {
             continue;
         }
         report(
             MigrationProgress::new("Migrating shared data", key, current, total)
                 .with_backup(&journal.backup_dir),
         );
-        move_or_merge(&source, &destination)?;
+        let conflicts =
+            (key != "profiles").then(|| journal.backup_dir.join("cache-conflicts").join(key));
+        move_or_merge(&source, &destination, conflicts.as_deref())?;
         complete(&mut journal, &metadata, &journal_key)?;
-        current += 1;
+        current = journal.completed.len() as u64;
     }
     let legacy_config_sync = meta_dir.join("config-sync");
     if legacy_config_sync.exists() && fs::read_dir(&legacy_config_sync)?.next().is_none() {
@@ -263,8 +251,13 @@ pub fn run(
         .with_backup(&journal.backup_dir),
     );
     initialize_new_layout(meta_dir)?;
-    if metadata.migration_journal().exists() {
-        fs::remove_file(metadata.migration_journal())?;
+    for journal_path in [
+        metadata.migration_journal(),
+        metadata.state().join("migration-v2.json"),
+    ] {
+        if journal_path.exists() {
+            fs::remove_file(journal_path)?;
+        }
     }
     report(
         MigrationProgress::new("Migration complete", "Layout updated", total, total)
@@ -293,7 +286,7 @@ fn migrate_instance(instance: &Path, name: &str) -> Result<(), MigrationError> {
     rename_visible_directory(instance, LEGACY_STATE, paths.state(), name)?;
 
     let old_config = paths.state().join("config-sync").join("local-config");
-    move_or_merge(&old_config, &paths.local_config())?;
+    move_or_merge(&old_config, &paths.local_config(), None)?;
     let old_config_root = paths.state().join("config-sync");
     if old_config_root.exists() && fs::read_dir(&old_config_root)?.next().is_none() {
         fs::remove_dir(old_config_root)?;
@@ -309,17 +302,18 @@ fn rename_visible_directory(
     instance_name: &str,
 ) -> Result<(), MigrationError> {
     let source = instance.join(legacy_name);
-    if source.exists() && destination.exists() {
+    if path_exists(&source)?
+        && path_exists(&destination)?
+        && (!fs::symlink_metadata(&source)?.is_dir()
+            || !fs::symlink_metadata(&destination)?.is_dir())
+    {
         return Err(MigrationError::PathConflict {
             instance: instance_name.to_owned(),
             old: source.display().to_string(),
             new: destination.display().to_string(),
         });
     }
-    if source.exists() {
-        fs::rename(source, destination)?;
-    }
-    Ok(())
+    move_or_merge(&source, &destination, None)
 }
 
 fn backup_user_data(
@@ -399,51 +393,78 @@ fn validate_migration_conflicts(
             (instance.join(LEGACY_MINECRAFT), paths.minecraft()),
             (instance.join(LEGACY_STATE), paths.state()),
         ] {
-            if legacy.exists() && destination.exists() {
+            if path_exists(&legacy)?
+                && path_exists(&destination)?
+                && (!fs::symlink_metadata(&legacy)?.is_dir()
+                    || !fs::symlink_metadata(&destination)?.is_dir())
+            {
                 return Err(MigrationError::PathConflict {
                     instance: name.to_owned(),
                     old: legacy.display().to_string(),
                     new: destination.display().to_string(),
                 });
             }
+            validate_merge(&legacy, &destination, false)?;
         }
-        validate_merge(
-            &paths.state().join("config-sync").join("local-config"),
-            &paths.local_config(),
-        )?;
+        for state in [instance.join(LEGACY_STATE), paths.state()] {
+            for destination in [
+                instance.join(LEGACY_STATE).join("content/config"),
+                paths.local_config(),
+            ] {
+                validate_merge(&state.join("config-sync/local-config"), &destination, false)?;
+            }
+        }
     }
-    let metadata = MetadataPaths::new(meta_dir);
-    for (source, destination) in [
-        (
-            meta_dir.join("config-sync").join("profiles"),
-            metadata.profiles(),
-        ),
-        (meta_dir.join("versions"), metadata.versions()),
-        (meta_dir.join("libraries"), metadata.libraries()),
-        (meta_dir.join("assets"), metadata.assets()),
-        (meta_dir.join("loader-profiles"), metadata.loader_profiles()),
-    ] {
-        validate_merge(&source, &destination)?;
+    for (key, source, destination) in shared_moves(meta_dir) {
+        validate_merge(&source, &destination, key != "profiles")?;
     }
     Ok(())
 }
 
-fn validate_merge(source: &Path, destination: &Path) -> Result<(), MigrationError> {
-    if !source.exists() || !destination.exists() {
+fn shared_moves(meta_dir: &Path) -> [(&'static str, PathBuf, PathBuf); 5] {
+    let metadata = MetadataPaths::new(meta_dir);
+    [
+        (
+            "profiles",
+            meta_dir.join("config-sync").join("profiles"),
+            metadata.profiles(),
+        ),
+        ("versions", meta_dir.join("versions"), metadata.versions()),
+        (
+            "libraries",
+            meta_dir.join("libraries"),
+            metadata.libraries(),
+        ),
+        ("assets", meta_dir.join("assets"), metadata.assets()),
+        (
+            "loader-profiles",
+            meta_dir.join("loader-profiles"),
+            metadata.loader_profiles(),
+        ),
+    ]
+}
+
+pub(crate) fn validate_merge(
+    source: &Path,
+    destination: &Path,
+    archive_cache_conflicts: bool,
+) -> Result<(), MigrationError> {
+    if !path_exists(source)? || !path_exists(destination)? {
         return Ok(());
     }
+    validate_merge_roots(source, destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let target = destination.join(entry.file_name());
-        if !target.exists() {
+        if !path_exists(&target)? {
             continue;
         }
-        if entry.file_type()?.is_dir() && target.is_dir() {
-            validate_merge(&entry.path(), &target)?;
-        } else {
-            return Err(MigrationError::MergeConflict {
-                path: target.display().to_string(),
-            });
+        if entry.file_type()?.is_dir() && fs::symlink_metadata(&target)?.is_dir() {
+            validate_merge(&entry.path(), &target, archive_cache_conflicts)?;
+        } else if !files_identical(&entry.path(), &target)?
+            && !(archive_cache_conflicts && distinct_regular_files(&entry.path(), &target)?)
+        {
+            return Err(merge_conflict(&entry.path(), &target));
         }
     }
     Ok(())
@@ -508,40 +529,178 @@ fn file_size(path: &Path) -> io::Result<u64> {
     }
 }
 
-fn move_or_merge(source: &Path, destination: &Path) -> Result<(), MigrationError> {
-    if !source.exists() {
+pub(crate) fn move_or_merge(
+    source: &Path,
+    destination: &Path,
+    cache_conflicts: Option<&Path>,
+) -> Result<(), MigrationError> {
+    if !path_exists(source)? {
         return Ok(());
     }
-    if !destination.exists() {
+    if !path_exists(destination)? {
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::rename(source, destination)?;
-        return Ok(());
+        match fs::rename(source, destination) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {}
+            Err(error) => return Err(error.into()),
+        }
     }
-    merge_dir_without_overwrite(source, destination)?;
-    fs::remove_dir_all(source)?;
+    merge_dir_without_overwrite(source, destination, cache_conflicts)?;
+    fs::remove_dir(source)?;
     Ok(())
 }
 
-fn merge_dir_without_overwrite(source: &Path, destination: &Path) -> Result<(), MigrationError> {
+fn merge_dir_without_overwrite(
+    source: &Path,
+    destination: &Path,
+    cache_conflicts: Option<&Path>,
+) -> Result<(), MigrationError> {
+    let new_directory = !path_exists(destination)?;
     fs::create_dir_all(destination)?;
+    validate_merge_roots(source, destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let target = destination.join(entry.file_name());
         let file_type = entry.file_type()?;
-        if !target.exists() {
-            fs::rename(entry.path(), target)?;
-        } else if file_type.is_dir() && target.is_dir() {
-            merge_dir_without_overwrite(&entry.path(), &target)?;
-            fs::remove_dir(entry.path())?;
+        let target_exists = path_exists(&target)?;
+        if file_type.is_dir() && (!target_exists || fs::symlink_metadata(&target)?.is_dir()) {
+            move_or_merge(
+                &entry.path(),
+                &target,
+                cache_conflicts
+                    .map(|path| path.join(entry.file_name()))
+                    .as_deref(),
+            )?;
+        } else if !target_exists {
+            move_file(&entry.path(), &target)?;
+        } else if files_identical(&entry.path(), &target)? {
+            fs::remove_file(entry.path())?;
+        } else if let Some(conflicts) = cache_conflicts
+            && distinct_regular_files(&entry.path(), &target)?
+        {
+            fs::create_dir_all(conflicts)?;
+            let mut archived = conflicts.join(entry.file_name());
+            let mut suffix = 0;
+            while path_exists(&archived)? && !files_identical(&entry.path(), &archived)? {
+                suffix += 1;
+                let mut name = entry.file_name();
+                name.push(format!(".{suffix}"));
+                archived = conflicts.join(name);
+            }
+            if path_exists(&archived)? {
+                fs::remove_file(entry.path())?;
+            } else {
+                move_file(&entry.path(), &archived)?;
+            }
+            tracing::warn!(
+                "Kept current cache {}; archived conflicting legacy copy at {}",
+                target.display(),
+                archived.display()
+            );
         } else {
-            return Err(MigrationError::MergeConflict {
-                path: target.display().to_string(),
-            });
+            return Err(merge_conflict(&entry.path(), &target));
         }
     }
+    if new_directory {
+        fs::set_permissions(destination, fs::metadata(source)?.permissions())?;
+    }
     Ok(())
+}
+
+fn path_exists(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn merge_conflict(source: &Path, destination: &Path) -> MigrationError {
+    MigrationError::MergeConflict {
+        old: source.display().to_string(),
+        new: destination.display().to_string(),
+    }
+}
+
+fn validate_merge_roots(source: &Path, destination: &Path) -> Result<(), MigrationError> {
+    if !fs::symlink_metadata(source)?.is_dir() || !fs::symlink_metadata(destination)?.is_dir() {
+        return Err(merge_conflict(source, destination));
+    }
+    let source_path = source.canonicalize()?;
+    let destination_path = destination.canonicalize()?;
+    if source_path.starts_with(&destination_path) || destination_path.starts_with(&source_path) {
+        return Err(merge_conflict(source, destination));
+    }
+    Ok(())
+}
+
+fn move_file(source: &Path, destination: &Path) -> io::Result<()> {
+    match fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+            copy_file_then_remove(source, destination)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn copy_file_then_remove(source: &Path, destination: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.is_symlink() {
+        crate::storage::copy_symlink(source, destination)?;
+    } else if metadata.is_file() {
+        let mut input = fs::File::open(source)?;
+        let mut output = tempfile::NamedTempFile::new_in(
+            destination
+                .parent()
+                .ok_or_else(|| io::Error::other("migration destination has no parent"))?,
+        )?;
+        io::copy(&mut input, &mut output)?;
+        output.as_file().set_permissions(metadata.permissions())?;
+        output.as_file().sync_all()?;
+        output
+            .persist_noclobber(destination)
+            .map_err(|error| error.error)?;
+    } else {
+        return Err(io::Error::other(
+            "migration source is not a regular file or symlink",
+        ));
+    }
+    fs::remove_file(source)
+}
+
+fn distinct_regular_files(source: &Path, destination: &Path) -> io::Result<bool> {
+    Ok(fs::symlink_metadata(source)?.is_file()
+        && fs::symlink_metadata(destination)?.is_file()
+        && source.canonicalize()? != destination.canonicalize()?)
+}
+
+fn files_identical(source: &Path, destination: &Path) -> io::Result<bool> {
+    let source_metadata = fs::symlink_metadata(source)?;
+    let destination_metadata = fs::symlink_metadata(destination)?;
+    if !source_metadata.is_file()
+        || !destination_metadata.is_file()
+        || source_metadata.len() != destination_metadata.len()
+        || source.canonicalize()? == destination.canonicalize()?
+    {
+        return Ok(false);
+    }
+    let mut source = fs::File::open(source)?;
+    let mut destination = fs::File::open(destination)?;
+    let mut source_bytes = [0; 8192];
+    let mut destination_bytes = [0; 8192];
+    loop {
+        let count = source.read(&mut source_bytes)?;
+        destination.read_exact(&mut destination_bytes[..count])?;
+        if source_bytes[..count] != destination_bytes[..count] {
+            return Ok(false);
+        }
+        if count == 0 {
+            return Ok(destination.read(&mut destination_bytes)? == 0);
+        }
+    }
 }
 
 fn copy_dir_recursive_with_progress(
@@ -611,6 +770,9 @@ fn complete(
     metadata: &MetadataPaths,
     key: &str,
 ) -> Result<(), MigrationError> {
+    if is_complete(journal, key) {
+        return Ok(());
+    }
     journal.completed.push(key.to_owned());
     write_json_atomic(&metadata.migration_journal(), journal)
 }
@@ -630,10 +792,22 @@ fn instance_directories(instances_dir: &Path) -> io::Result<Vec<PathBuf>> {
 
 fn has_legacy_instances(instances_dir: &Path) -> bool {
     instance_directories(instances_dir).is_ok_and(|instances| {
-        instances.iter().any(|instance| {
-            instance.join(LEGACY_MINECRAFT).exists() || instance.join(LEGACY_STATE).exists()
-        })
+        instances
+            .iter()
+            .any(|instance| has_legacy_instance_data(instance))
     })
+}
+
+fn has_legacy_instance_data(instance: &Path) -> bool {
+    [
+        instance.join(LEGACY_MINECRAFT),
+        instance.join(LEGACY_STATE),
+        InstancePaths::new(instance)
+            .state()
+            .join("config-sync/local-config"),
+    ]
+    .iter()
+    .any(|path| path.exists())
 }
 
 fn marker_version(path: &Path) -> Option<u32> {

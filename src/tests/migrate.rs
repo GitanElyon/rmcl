@@ -33,7 +33,7 @@ fn rename_top_level_skips_when_only_new_exists() {
 }
 
 #[test]
-fn rename_top_level_skips_when_both_exist() {
+fn rename_top_level_merges_nonconflicting_existing_directories() {
     let tmp = tempfile::tempdir().unwrap();
     let old = tmp.path().join("mcl");
     let new = tmp.path().join("rmcl");
@@ -44,10 +44,42 @@ fn rename_top_level_skips_when_both_exist() {
 
     rename_top_level(&old, &new);
 
-    assert!(old.exists(), "old should remain when both exist");
+    assert!(!old.exists());
     assert!(new.exists(), "new should remain when both exist");
-    assert_eq!(fs::read(old.join("a")).unwrap(), b"old");
+    assert_eq!(fs::read(new.join("a")).unwrap(), b"old");
     assert_eq!(fs::read(new.join("b")).unwrap(), b"new");
+}
+
+#[test]
+fn rename_top_level_deduplicates_identical_files_but_preserves_conflicting_user_data() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old = tmp.path().join("mcl");
+    let new = tmp.path().join("rmcl");
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&new).unwrap();
+    fs::write(old.join("accounts.json"), b"old accounts").unwrap();
+    fs::write(new.join("accounts.json"), b"current accounts").unwrap();
+    fs::write(old.join("unique"), b"keep").unwrap();
+    rename_top_level(&old, &new);
+    assert_eq!(
+        fs::read(old.join("accounts.json")).unwrap(),
+        b"old accounts"
+    );
+    assert_eq!(
+        fs::read(new.join("accounts.json")).unwrap(),
+        b"current accounts"
+    );
+    assert!(old.join("unique").exists());
+    assert!(!new.join("unique").exists());
+
+    fs::write(old.join("accounts.json"), b"current accounts").unwrap();
+    rename_top_level(&old, &new);
+    assert!(!old.exists());
+    assert_eq!(
+        fs::read(new.join("accounts.json")).unwrap(),
+        b"current accounts"
+    );
+    assert_eq!(fs::read(new.join("unique")).unwrap(), b"keep");
 }
 
 #[test]
@@ -121,6 +153,34 @@ fn copy_dir_recursive_copies_nested_tree() {
     assert_eq!(
         fs::read(dst.join("nested").join("inner.txt")).unwrap(),
         b"inner"
+    );
+}
+
+#[test]
+fn cross_device_top_level_copy_does_not_remove_source_until_the_tree_is_published() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old = tmp.path().join("mcl");
+    let new = tmp.path().join("rmcl");
+    fs::create_dir_all(old.join("instances/Example")).unwrap();
+    fs::write(old.join("instances/Example/instance.json"), b"instance").unwrap();
+    fs::create_dir_all(&new).unwrap();
+    fs::write(new.join("accounts.json"), b"current accounts").unwrap();
+    assert!(copy_top_level_across_devices(&old, &new).is_err());
+    assert_eq!(
+        fs::read(old.join("instances/Example/instance.json")).unwrap(),
+        b"instance"
+    );
+    assert_eq!(
+        fs::read(new.join("accounts.json")).unwrap(),
+        b"current accounts"
+    );
+    fs::remove_file(new.join("accounts.json")).unwrap();
+    fs::remove_dir(&new).unwrap();
+    copy_top_level_across_devices(&old, &new).unwrap();
+    assert!(!old.exists());
+    assert_eq!(
+        fs::read(new.join("instances/Example/instance.json")).unwrap(),
+        b"instance"
     );
 }
 

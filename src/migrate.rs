@@ -41,11 +41,16 @@ fn rename_top_level(old: &Path, new: &Path) {
         return;
     }
     if new.exists() {
-        eprintln!(
-            "rmcl migration: both {} and {} exist; leaving as-is, please merge manually",
-            old.display(),
-            new.display()
-        );
+        match crate::layout_migration::validate_merge(old, new, false)
+            .and_then(|_| crate::layout_migration::move_or_merge(old, new, None))
+        {
+            Ok(()) => eprintln!(
+                "rmcl migration: merged {} -> {}",
+                old.display(),
+                new.display()
+            ),
+            Err(error) => eprintln!("rmcl migration stopped safely: {error}"),
+        }
         return;
     }
     match fs::rename(old, new) {
@@ -55,20 +60,12 @@ fn rename_top_level(old: &Path, new: &Path) {
             new.display()
         ),
         Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-            if let Err(e2) = copy_dir_recursive(old, new) {
+            if let Err(e2) = copy_top_level_across_devices(old, new) {
                 eprintln!(
                     "rmcl migration: failed cross-device copy {} -> {}: {}",
                     old.display(),
                     new.display(),
                     e2
-                );
-                return;
-            }
-            if let Err(e3) = fs::remove_dir_all(old) {
-                eprintln!(
-                    "rmcl migration: copied but failed to remove {}: {}",
-                    old.display(),
-                    e3
                 );
                 return;
             }
@@ -87,6 +84,18 @@ fn rename_top_level(old: &Path, new: &Path) {
     }
 }
 
+fn copy_top_level_across_devices(old: &Path, new: &Path) -> io::Result<()> {
+    let parent = new
+        .parent()
+        .ok_or_else(|| io::Error::other("migration destination has no parent"))?;
+    let staging = tempfile::Builder::new()
+        .prefix(".rmcl-migration-")
+        .tempdir_in(parent)?;
+    copy_dir_recursive(old, staging.path())?;
+    fs::rename(staging.path(), new)?;
+    fs::remove_dir_all(old)
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
@@ -101,6 +110,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
             fs::copy(entry.path(), &dst_path)?;
         }
     }
+    fs::set_permissions(dst, fs::metadata(src)?.permissions())?;
     Ok(())
 }
 

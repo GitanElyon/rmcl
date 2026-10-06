@@ -443,7 +443,7 @@ pub async fn fetch_versions(
 ) -> Result<Vec<VersionInfo>, crate::net::NetError> {
     let url = versions_url(API_BASE, slug_or_id);
     tracing::debug!("Fetching Modrinth versions for project '{}'", slug_or_id);
-    let versions: Vec<VersionInfo> = client.get_json(&url).await?;
+    let versions = fetch_version_list(client, &url).await?;
     tracing::debug!(
         "Fetched {} Modrinth version(s) for project '{}'",
         versions.len(),
@@ -470,7 +470,16 @@ pub async fn fetch_content_versions(
         game_version,
         loader
     );
-    client.get_json(&url).await
+    fetch_version_list(client, &url).await
+}
+
+async fn fetch_version_list(
+    client: &crate::net::HttpClient,
+    url: &str,
+) -> Result<Vec<VersionInfo>, crate::net::NetError> {
+    let mut versions: Vec<VersionInfo> = client.get_json(url).await?;
+    crate::instance::content::provider::sort_versions_newest_first(&mut versions);
+    Ok(versions)
 }
 
 fn content_versions_url(

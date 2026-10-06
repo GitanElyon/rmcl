@@ -8,12 +8,12 @@ use crate::instance::{
 
 pub async fn game_versions(loader: ModLoader) -> Result<Vec<GameVersion>, String> {
     let client = crate::net::HttpClient::new();
-    let mut versions = get_installer(loader)
+    // Mojang, Fabric and Quilt supply chronological lists, including snapshots
+    // whose IDs cannot be compared as numeric Minecraft versions.
+    get_installer(loader)
         .get_game_versions(&client)
         .await
-        .map_err(|error| error.to_string())?;
-    versions.sort_by(|a, b| super::compare_game_versions(&b.id, &a.id));
-    Ok(versions)
+        .map_err(|error| error.to_string())
 }
 
 pub async fn loader_versions(loader: ModLoader, game_version: &str) -> Result<Vec<String>, String> {

@@ -1306,6 +1306,7 @@ impl App {
             let result = crate::instance::import::provider_versions(&source)
                 .await
                 .map_err(|error| error.to_string());
+            let result = widgets::content::discovery::prepare_project_versions(result, false).await;
             widgets::content::DiscoveryState::push_action_result(
                 &request.pending,
                 widgets::content::discovery::DiscoveryActionResult::Versions {
@@ -1975,6 +1976,11 @@ impl App {
                     request.provider
                 )),
             };
+            let result = widgets::content::discovery::prepare_project_versions(
+                result,
+                request.all_game_versions || fallback,
+            )
+            .await;
             widgets::content::DiscoveryState::push_action_result(
                 &request.pending,
                 if fallback {

@@ -669,6 +669,8 @@ fn spawn_versions(request: crate::tui::widgets::content::discovery::VersionsRequ
             _ => crate::net::modrinth::fetch_versions(&client, &request.project_id).await,
         }
         .map_err(|error| error.to_string());
+        let result =
+            crate::tui::widgets::content::discovery::prepare_project_versions(result, true).await;
         crate::tui::widgets::content::DiscoveryState::push_action_result(
             &request.pending,
             crate::tui::widgets::content::discovery::DiscoveryActionResult::Versions {

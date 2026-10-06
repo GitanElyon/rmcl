@@ -569,7 +569,9 @@ async fn fetch_versions_from(
             break;
         }
     }
-    Ok(files.into_iter().map(version_info).collect())
+    let mut versions = files.into_iter().map(version_info).collect::<Vec<_>>();
+    crate::instance::content::provider::sort_versions_newest_first(&mut versions);
+    Ok(versions)
 }
 
 pub async fn fetch_file_versions(

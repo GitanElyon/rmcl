@@ -50,6 +50,27 @@ fn update_check_uses_publish_dates_not_response_order() {
 }
 
 #[test]
+fn publish_date_sort_preserves_ties_and_places_unknown_dates_last() {
+    let mut versions = vec![
+        version("missing", ""),
+        version("old", "2026-01-01T00:00:00Z"),
+        version("tie-a", "2026-01-02T01:00:00+01:00"),
+        version("invalid", "not a date"),
+        version("new", "2026-01-02T00:00:00.500Z"),
+        version("tie-b", "2026-01-02T00:00:00Z"),
+    ];
+    assert_eq!(newest_version(&versions).unwrap().id, "new");
+    sort_versions_newest_first(&mut versions);
+    assert_eq!(
+        versions
+            .iter()
+            .map(|version| version.id.as_str())
+            .collect::<Vec<_>>(),
+        ["new", "tie-a", "tie-b", "old", "missing", "invalid"]
+    );
+}
+
+#[test]
 fn a_version_missing_from_the_compatible_list_can_still_be_outdated() {
     // a modpack pins files that are not tagged for the instance's exact game
     // version, so the installed version never shows up in the filtered list

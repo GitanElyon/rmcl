@@ -203,7 +203,8 @@ async fn curseforge_versions_follow_pagination() {
                     "id": id,
                     "modId": 7,
                     "displayName": format!("Version {id}"),
-                    "fileName": format!("{id}.jar")
+                    "fileName": format!("{id}.jar"),
+                    "fileDate": if id == 50 { "2026-01-02T00:00:00Z" } else { "2026-01-01T00:00:00Z" }
                 })
             })
             .collect::<Vec<_>>()
@@ -232,6 +233,8 @@ async fn curseforge_versions_follow_pagination() {
             .await
             .unwrap();
     assert_eq!(versions.len(), 51);
+    assert_eq!(versions[0].id, "50");
+    assert_eq!(versions[1].id, "0");
 }
 
 #[tokio::test]

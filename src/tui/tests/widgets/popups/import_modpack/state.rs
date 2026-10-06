@@ -160,18 +160,21 @@ fn discovered_modpack_version_skips_content_install_confirmation() {
         crate::tui::widgets::content::discovery::DiscoveryActionResult::Versions {
             request_id: versions.request_id,
             project_id: versions.project_id,
-            result: Ok(vec![VersionInfo {
-                id: "version-id".to_owned(),
-                project_id: "pack-id".to_owned(),
-                name: "1.0".to_owned(),
-                version_number: "1.0".to_owned(),
-                game_versions: vec!["1.21.1".to_owned()],
-                loaders: vec!["fabric".to_owned()],
-                version_type: crate::net::modrinth::VersionType::Release,
-                dependencies: Vec::new(),
-                date_published: String::new(),
-                files: Vec::new(),
-            }]),
+            result: Ok(crate::tui::widgets::content::discovery::ProjectVersions {
+                minecraft_versions: vec!["1.21.1".to_owned()],
+                versions: vec![VersionInfo {
+                    id: "version-id".to_owned(),
+                    project_id: "pack-id".to_owned(),
+                    name: "1.0".to_owned(),
+                    version_number: "1.0".to_owned(),
+                    game_versions: vec!["1.21.1".to_owned()],
+                    loaders: vec!["fabric".to_owned()],
+                    version_type: crate::net::modrinth::VersionType::Release,
+                    dependencies: Vec::new(),
+                    date_published: String::new(),
+                    files: Vec::new(),
+                }],
+            }),
         },
     );
     discovery.drain_pending();
